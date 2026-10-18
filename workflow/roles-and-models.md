@@ -1,84 +1,131 @@
-# Roles, models, dispatch
+# Roles, models, dispatch, provisioning
 
-Skill defaults for role/model/thinking; the human's per-change selection record overrides them.
+The human chooses the model and thinking for every role. There is no fixed default table in this skill.
+The selection is asked once per repository, recorded, and reused until the human changes it.
 
-**Default role/model table** (portable across repos; agent names bind to each repo's agent
-definitions — e.g. this repo: `worker`/`reviewer`/`oracle`/`ios-ui-reviewer`):
+## Step 1 — ask the human (no defaults)
 
-| Role | Default model (thinking) | Fallback | Responsibility |
-|---|---|---|---|
-| Implementer | `openai-codex/gpt-6.1-sol:high` | `opencode-go/glm-5.3-flash:high` | writes code, tests, and evidence |
-| Runner | `openai-codex/gpt-6-luna:max` | `openrouter/openai/gpt-6-luna:high` | runs long processes (tests, Maestro flows) or polls external resources in the background; reports progress, consults the Coordinator on problems, never implements |
-| Code reviewer | `openai-codex/gpt-6.1-sol:medium` | `opencode-go/deepseek-v4.1-flash:high` | reviews implementation |
-| Test reviewer | `openai-codex/gpt-6.1-sol:medium` | `opencode-go/deepseek-v4.1-flash:high` | separate pass for high-risk lanes |
-| Rendered-UI reviewer | `openai-codex/gpt-6.1-sol:medium` | `opencode-go/deepseek-v4.1-flash:high` | ingests screenshots/manifests only, never launches anything |
-| Oracle | `openai-codex/gpt-6.1-sol:max` | `opencode-go/glm-5.3:high` | plan review, mediation, bounded authored fixes |
+Before any dispatch, ask the human through the harness's user-question tool (for example an
+`ask_user` or interview-style prompt). Ask one question per role, in this order:
 
-Primary thinking levels: implementer `high`, all reviewers `medium`, Oracle `max`. Code/test share fallback. Coordinator has no
-worker model. The runner takes Coordinator instructions verbatim and is not a dispatch target for
-lane implementation roles.
+| Role | Question |
+|---|---|
+| Orchestration | Which model and thinking level should run the coordinator session? |
+| Implementer | Which model and thinking level should implement tasks and fixes? |
+| Code reviewer | Which model and thinking level should review code? |
+| Test reviewer | Which model and thinking level should review test adequacy? |
+| Rendered-UI reviewer | Which model and thinking level should review supplied UI evidence? |
+| Oracle | Which model and thinking level should review plans, mediate, and author bounded fixes? |
 
-## Selection
+Rules:
 
-Before preflight/worker creation, ask human once: defaults (table above) or per-role override.
-Persist the outcome in gitignored `<feature-checkout>/.agents/tmp/featdev-<change>/model-selection.json`; no run id.
-Override applies to every matching dispatch; absent overrides, the table's defaults apply.
-Explicit human overrides and existing lane model locks take precedence; other role defaults remain unchanged.
+1. Offer the models the harness actually reports as available, plus a free-text option.
+2. Ask per role; do not invent a default and do not fill an answer yourself.
+3. If the harness has no question tool, ask in chat and record the answer verbatim.
+4. The human may answer "same as X" or "you choose"; record that literally with the resolved value.
+5. Never infer a role model from a different role, from the coordinator session, or from a previous change
+   in another repository. Explicit per-role answers and existing lane model locks win.
 
-Oracle operations: `plan_review`, `technical_resolution`.
-Primary level: `max` for both Oracle operations;
-fallback `high`/`max` as recorded by selected candidate.
+## Record the selection
 
-Use the shared handoff contract in `briefs-and-handoffs.md` for fresh briefs/coherent delta continuations.
-Perform live initial availability check. Cache successful preflight by mechanism/model/level/environment;
-invalidate changed bindings. Prefer completion events, bounded fallback polling; preserve required PR monitoring.
+Write the answers to a gitignored file under the coordinator store:
 
-## Locking
+```
+<repo>/.agents/workflow/<change>/model-selection.json
+```
 
-Lock selected model/level per role lineage within lane, including replacements.
-Record launched model/level in every `dispatch`.
+```json
+{
+  "change": "<change>",
+  "asked_at": "<ISO-8601>",
+  "asked_with": "ask_user | interview | chat",
+  "roles": {
+    "implementer": { "model": "<provider/model>", "thinking": "<level>" },
+    "code_reviewer": { "model": "<provider/model>", "thinking": "<level>" },
+    "test_reviewer": { "model": "<provider/model>", "thinking": "<level>" },
+    "rendered_ui_reviewer": { "model": "<provider/model>", "thinking": "<level>" },
+    "oracle": { "model": "<provider/model>", "thinking": "<level>" }
+  },
+  "dispatch_mechanism": "<mechanism>",
+  "agent_provisioning": "<mechanism>"
+}
+```
 
-## Mechanism
+The Coordinator reads this file before every dispatch. It re-asks only when the human requests a change,
+when a recorded model is no longer available, or when the change name does not match. `.agents/workflow/`
+must be gitignored; `featdev.py state-derive` appends that rule when it is missing.
 
-Select first available, preflighted mechanism before first worker:
+Verify each selected model against the live list the harness reports. A model that is not offered is
+recorded as unavailable with the reason, and the human is asked again.
+
+## Step 1b — provision the roles with native subagent tooling
+
+A role needs an agent definition in the harness before it can be launched. Do not assume the files ship.
+
+1. **Read the canonical role files** in this skill: `subagent-roles/*.md`, each with `name`,
+   `description`, `tools`, `thinking` and a prompt body.
+2. **Detect the provisioning mechanism** the harness offers, in this order:
+   - the package manifest already exposes the agents (`pi.subagents.agents` or `pi-subagents.agents`);
+   - the native subagent tool can create or update agents programmatically (for example
+     `{ action: "create", options: { config } }` and `{ action: "update" }`);
+   - the harness reads a project agent directory;
+   - the harness reads a user agent directory.
+3. **Provision idempotently**: get the agent first; create it when absent, update it when the canonical
+   file changed. Compare a hash of the canonical file with the installed definition, and update on drift.
+4. **Verify before dispatching**: the agent resolves by name and reports the expected tools. A same-named
+   builtin without the role's tools is not acceptable; namespace the role (for example
+   `multi-lane-workflow.codeReviewer`) or stop with a named reason.
+5. **Record the mechanism** in `model-selection.json` as `agent_provisioning`, and in the coordination
+   record. A different mechanism on a later run is a new preflight, not a silent fallback.
+
+Rules:
+
+- Never launch a role whose agent is missing, incomplete, or lacks `write` where the role produces a report.
+- Never edit the harness's agent directory by hand when a provisioning tool exists.
+- If no provisioning mechanism works, stop before planning work starts and report what is missing.
+
+## Mechanism selection and locking
+
+Select the first available, preflighted dispatch mechanism before the first worker:
 
 1. native Pi subagents;
-2. invoking harness's native subagents, including Codex;
+2. the invoking harness's native subagents, including Codex;
 3. Orca;
 4. Herdr.
 
-Mechanism determines harness, never provider/model prefix.
-Dispatch-layer failure: stop, never switch mechanism silently.
-Model failure: recover locked role model in same lane worktree.
-Role briefs/selected model override mapped agent or mechanism model/level/description.
+Mechanism determines harness, never provider/model prefix. Dispatch-layer failure: stop, never switch
+mechanism silently. Model failure: recover the locked role model in the same lane worktree.
+
+Records `dispatch --model`, `--level`, `--role`, `--access`, and the provisioning mechanism. The
+selected model and level are locked per role lineage inside a lane, including replacements.
 
 ### Dispatch mode (worker resumability)
 
-Long-running workers (Implementer, Reviewer, Oracle): dispatch with `async: true` (background,
-keeps the session interactive) and an explicit `timeoutMs` (implementers 3600000). Never call
-`bg_wait` merely to wait — native completion/attention events wake the parent.
+Long-running workers (Implementer, Reviewer, Oracle): dispatch with `async: true` (background, keeps the
+session interactive) and an explicit `timeoutMs` (implementers 3600000). Never call `bg_wait` merely to
+wait; native completion/attention events wake the parent.
 
-**Timeout recovery is resume-first.** Failed/partial/paused async runs keep their persisted
-child session for 30 days and are resumable; only runs killed via stop/interrupt (`stopped`)
-are not. On timeout: recover the run id via `subagent({ action: "status" })` or
-`children.list` — NOT the session-file UUID from the failure notice — then
-`subagent({ action: "resume", id: "<run-id>", message: "<continuation>" })`. Launch a fresh
-same-role worker only if revive fails (wrong id, missing session) or the human asks; the
-lane's live report is the fallback context source in that case.
+**Timeout recovery is resume-first.** Failed or paused async runs keep their persisted child session for
+30 days and are resumable; only runs killed via stop/interrupt are not. On timeout: recover the run id via
+`subagent({ action: "status" })` or `children.list`, then `subagent({ action: "resume", id, message })`.
+Launch a fresh same-role worker only if revive fails or the human asks; the lane's live report is the
+fallback context source.
 
 ### Codex native adapter
 
-Use exposed native tools, not a nested CLI: `spawn_agent`, follow-up/message, completion wait, stop/close as available.
-Tool names/parameters vary by harness; inspect live schemas. This skill authorizes scoped lane delegation.
-Record `dispatch` before spawn; returned agent/session ID becomes `dispatch-done --worker-run-id`.
-Pass role-brief path, filled task brief, absolute lane worktree; require all worker commands there.
-Do not assume `.agents/agents/*.md` auto-loads or spawning creates a worktree.
-Use fresh context (`fork_turns: "none"` where exposed); reuse coherent correction sessions only.
+Use exposed native tools, not a nested CLI: `spawn_agent`, follow-up/message, completion wait, stop/close
+as available. Tool names and parameters vary by harness; inspect live schemas. This skill authorizes
+scoped lane delegation.
+
+Record `dispatch` before spawn; the returned agent/session ID becomes `dispatch-done --worker-run-id`.
+Pass the role-brief path, the filled task brief, and the absolute lane worktree; require all writes there.
+Do not assume `.agents/agents/*.md` auto-loads and do not assume spawning creates a worktree.
+Use fresh context (`fork_turns: "none"` where exposed); reuse a coherent correction session only.
 Respect live capacity, sandbox, and review-only boundaries.
 
-Preflight selected model/effort against live supported choices; map provider notation only to verified equivalents.
-Never silently inherit parent defaults or substitute unsupported provider/model selections.
-Before mechanism lock, choose next compatible mechanism or ask human for supported override; after lock, stop on failure.
-Verify custom-agent settings do not override selection. Preserve default role table until human changes it.
+Preflight the selected model and effort against live supported choices; map provider notation only to
+verified equivalents. Never silently inherit the parent's defaults or substitute an unsupported
+provider/model selection. Before the mechanism lock, choose the next compatible mechanism or ask the human
+for a supported override; after the lock, stop on failure.
 
 Reference: [Codex subagents](https://developers.openai.com/codex/subagents/).

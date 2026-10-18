@@ -12,6 +12,10 @@ Coordinator manages planning/integration; dispatched workers write implementatio
 
 Records: committed `tasks.md` ticks = completion; committed `plan/graph-plan.json` = contract;
 feature-branch commits = merges. Derived state and scratch never prove completion or approval.
+
+Coordinator store: `.agents/workflow/<change>/` holds `state.json`, `coordination.json`,
+`model-selection.json`, `briefs/`, `reviews/`, `reports/` and `evidence/`. It is gitignored; every brief
+and review lives there at a predictable name, never in chat or a scratch path.
 Lane lifecycle: implementation → review 1 → fix → review 2 (two-round max); then Oracle-authored
 fix → independent review → human gate. Lanes test on a single newest runtime only; after all
 lanes merge, human classification and required version/generated changes are committed
@@ -38,9 +42,16 @@ Missing required helper or unmet human gate: stop; never invent substitutes or c
 
 The Coordinator MUST work through these steps strictly in order. Do NOT batch, reorder, or skip ahead. Each step completes (including its human/approval gate, where present) before the next begins. When resuming an interrupted run, re-derive from committed artifacts and continue at the current step; never restart completed steps merely to follow this router.
 
-1. **Step 1 — Role & model selection** (`workflow/roles-and-models.md`): ask the human once (defaults vs per-role override), record the selection, preflight and lock the dispatch mechanism before any worker or Oracle dispatch.
+1. **Step 1 — Roles, models, provisioning** (`workflow/roles-and-models.md`): ask the human, through the
+   harness's user-question tool, which model and thinking level each role uses; there are no fixed
+   defaults. Record the answers in `.agents/workflow/<change>/model-selection.json`. Then provision the
+   role agents with the harness's native subagent tooling (package manifest, create/update, or native
+   agent directory), verify each agent resolves with the expected tools, and lock the dispatch mechanism.
+   No worker or Oracle dispatch happens before this step completes.
 2. **Step 2 — Plan** (`workflow/plan.md`): author `plan/graph-plan.json` + OpenSpec artifacts, validate, dispatch Oracle `plan_review`, obtain human approval, commit the approval checkpoint naming the approver. NO implementation dispatch before that checkpoint commit.
-3. **Step 3 — Lanes** (`workflow/lane.md`): implement/review/integrate lanes; current-HEAD reviews, bounded corrections, merge/close gates, risk-based review decisions and ancestor reuse (opt-in/shadow; legacy gates stay authoritative for this change), human-override merges (`lane-merge --human-override --override-reason`, waiving review duties only), Orca child-worktree registration of lanes.
+3. **Step 3 — Lanes** (`workflow/lane.md`): implement/review/integrate lanes; record every subagent update
+   in the coordinator store before doing anything else (dispatch result, ticks, reviews, lane phase), so
+   `status` always answers which lane is complete, in progress, under review, or waiting; current-HEAD reviews, bounded corrections, merge/close gates, risk-based review decisions and ancestor reuse (opt-in/shadow; legacy gates stay authoritative for this change), human-override merges (`lane-merge --human-override --override-reason`, waiving review duties only), Orca child-worktree registration of lanes.
 4. **Step 4 — Finish** (`workflow/finish.md`): classification/version/integrated commit before final evidence, selected release checks, direct human integrated inspection for deferred UI, separate PR/merge approvals.
 5. **Recovery** (`workflow/recovery.md`, any step): re-derive, never infer approval from missing scratch.
 

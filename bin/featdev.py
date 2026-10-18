@@ -342,9 +342,46 @@ def _safe_change(change: str) -> str:
     return change
 
 
+def workflow_dir(root: Path) -> Path:
+    """Coordinator-owned store for one repository."""
+    return root / ".agents" / "workflow"
+
+
+def _ensure_workflow_ignored(root: Path) -> None:
+    """Ignore the coordinator store without touching a tracked file.
+
+    Writes to .git/info/exclude, which git never tracks, so a clean-tree gate stays clean.
+    """
+    rule = ".agents/workflow/"
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--git-path", "info/exclude"],
+            capture_output=True, text=True, check=False,
+        )
+    except OSError:
+        return
+    if result.returncode != 0:
+        return
+    target = Path(result.stdout.strip())
+    if not target.is_absolute():
+        target = root / target
+    try:
+        text = target.read_text(encoding="utf-8") if target.is_file() else ""
+    except OSError:
+        return
+    if rule in {line.strip() for line in text.splitlines()}:
+        return
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(("" if text.endswith("\n") or not text else "\n") + rule + "\n")
+    except OSError:
+        return
+
+
 def _derived_state_path(change: str, checkout: Path | None = None) -> Path:
     root = (checkout or Path.cwd()).resolve()
-    return root / ".agents" / "tmp" / f"featdev-{_safe_change(change)}" / "state.json"
+    return workflow_dir(root) / _safe_change(change) / "state.json"
 
 
 def _coordination_path(change: str, checkout: Path | None = None) -> Path:
@@ -562,6 +599,7 @@ def _derived_task_views(plan: dict[str, Any], checked_tasks: set[str]) -> dict[s
 def state_derive(change: str, source_ref: str | None = None, checkout: Path | None = None) -> Path:
     change = _safe_change(change)
     repository = (checkout or Path.cwd()).resolve()
+    _ensure_workflow_ignored(repository)
     resolved_ref, source_sha = _resolve_state_ref(repository, source_ref)
     plan_relative = f"openspec/changes/{change}/plan/graph-plan.json"
     tasks_relative = f"openspec/changes/{change}/tasks.md"
@@ -1129,7 +1167,9 @@ def _find_state(change: str | None = None, checkout: Path | None = None) -> Path
             raise StateError(f"state: no derived state for change {change!r}; run state-derive <change>")
         return path
     paths: list[Path] = []
-    for path in sorted((root / ".agents" / "tmp").glob("featdev-*/state.json")):
+    candidates = list(sorted(workflow_dir(root).glob("*/state.json")))
+    candidates += list(sorted((root / ".agents" / "tmp").glob("featdev-*/state.json")))
+    for path in candidates:
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -4740,7 +4780,8 @@ def _self_check() -> int:
         ui_coord["authorizations"]["unused"] = {"status": "active"}
         _write_coordination(ui_state, ui_coord, ui_plan)
         defer_rationale = "bounded reversible cosmetic UI; no medical/safety/privacy/sharing/data-integrity/content effect"
-        screen_evidence = ui_repo / ".agents/tmp/screen-receipt.json"
+        screen_evidence = ui_repo / ".agents" / "workflow" / "defercase" / "screen-receipt.json"
+        screen_evidence.parent.mkdir(parents=True, exist_ok=True)
         screen_evidence.write_text("current screen evidence")
         expect_refusal("--change", "defercase", "human-defer", "ui", "--commit", ui_head,
                        "--evidence-revision", "r1", "--risk-assessment", "uncertain", "--rationale",
@@ -4823,7 +4864,8 @@ def _self_check() -> int:
                       "--artifact", str(screen_evidence), "--input", "App/project.yml")[0] == 0
         expect_refusal("--change", "defercase", "finish-record", "pr-check", contains="inspection missing")
         for runtime in ("ios-27.0", "ios-26.5", "ios-18.6"):
-            report = ui_repo / ".agents/tmp" / f"{runtime}.md"
+            report = ui_repo / ".agents" / "workflow" / "defercase" / f"{runtime}.md"
+            report.parent.mkdir(parents=True, exist_ok=True)
             report.write_text(f"inspector: human\nruntime: {runtime}\nverdict: accept\n")
             assert invoke("--change", "defercase", "finish-record", "inspect", "--check", runtime,
                           "--artifact", str(report))[0] == 0
@@ -4836,7 +4878,7 @@ def _self_check() -> int:
         _atomic_write_json(_coordination_path("defercase", ui_repo), normal_gate)
         expect_refusal("--change", "defercase", "finish-record", "pr-check", contains="inspection missing")
         _atomic_write_json(_coordination_path("defercase", ui_repo), saved_gate)
-        separate_reject = ui_repo / ".agents/tmp/later-ios-18.6.md"
+        separate_reject = ui_repo / ".agents" / "workflow" / "defercase" / "later-ios-18.6.md"
         separate_reject.write_text('inspector: human\nruntime: ios-18.6\nverdict: reject\nprevious verdict: accept\n')
         expect_refusal("--change", "defercase", "finish-record", "inspect", "--check", "ios-18.6",
                        "--artifact", str(separate_reject), contains="personally record accept")

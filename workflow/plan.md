@@ -105,7 +105,9 @@ Structure only: Oracle/human assess lane boundaries, risk, assignments.
 ## Oracle review
 
 Dispatch `plan_review` using fresh review brief: OpenSpec/graph, exact base/`HEAD`, boundaries,
-criteria, prior findings. Return `PASS`/`MORE WORK`; long reports via paths.
+criteria, prior findings. Return `PASS`/`MORE WORK`; the Oracle writes the full report to
+`.agents/workflow/<change>/reviews/plan-<role>-r<round>.md` and returns that path. A verdict that exists
+only in chat is not recorded.
 Maximum two Coordinator-driven reviews. Second `MORE WORK`: Oracle authors revision or escalate to human;
 never third Coordinator-driven cycle.
 

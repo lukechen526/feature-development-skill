@@ -15,6 +15,22 @@ Clarification never authorizes review-time edits, expands scope, hides correctio
 Resolve conflicting requirements before dependent edits.
 Read-only Oracle consultation answers one uncertainty; never resets rounds.
 
+## Set locations (no ad-hoc paths)
+
+Every handoff artifact has one home, under the coordinator store:
+
+| Artifact | Path |
+|---|---|
+| Filled brief | `.agents/workflow/<change>/briefs/<lane>-<role>-<task-or-round>.md` |
+| Lane live report | `.agents/workflow/<change>/reports/<lane>-report.md` |
+| Review report | `.agents/workflow/<change>/reviews/<lane>-<role>-r<round>.md` |
+| Oracle plan review | `.agents/workflow/<change>/reviews/plan-<role>-r<round>.md` |
+| Evidence and logs | `.agents/workflow/<change>/evidence/<lane>/<revision>/` |
+
+The Coordinator writes the brief before dispatch and passes its absolute path. The worker writes the
+report at the named path, updating it after every commit and check. A later session must find every
+artifact by pattern, without asking the Coordinator. Missing directory: create it, do not relocate it.
+
 ## Output
 
 Send outcome (`PASS`/`MORE WORK`/`fixed`/`disputed`), exact SHA, task/finding IDs,

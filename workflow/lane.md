@@ -9,10 +9,17 @@ Committed records:
 - `openspec/changes/<change>/tasks.md`: top-level task identity/completion.
 - `openspec/changes/<change>/plan/graph-plan.json`: assignments, dependencies, risk/UI flags.
 
-Gitignored views under `<feature-checkout>/.agents/tmp/featdev-<change>/`:
+Coordinator store, gitignored, under `<feature-checkout>/.agents/workflow/<change>/`:
 - `state.json`: source SHA, plan hash/revision, lane tasks/flags/ticks/completion/readiness.
-- `coordination.json`: worktrees, dispatches, reviews, authorizations, human gates.
-- `model-selection.json`: per-role selections.
+- `coordination.json`: worktrees, dispatches, reviews, authorizations, human gates, lane phases.
+- `model-selection.json`: per-role model/thinking answers and the provisioning mechanism.
+- `briefs/`: one file per dispatch, named `<lane>-<role>-<task-or-round>.md`.
+- `reviews/`: one report per review, named `<lane>-<role>-r<round>.md`.
+- `reports/`: lane live reports, named `<lane>-report.md`.
+
+Every artifact a later session needs lives here. A brief or review at any other path is a Coordinator error.
+The store is created on demand; `state-derive` appends `.agents/workflow/` to `.gitignore` when the rule is
+missing.
 
 Only `featdev.py` writes state; atomic/idempotent. Lost state: re-derive.
 Lost coordination: re-review/renew approval, never lose committed completion.
@@ -92,6 +99,21 @@ The feature checkout receives lane implementation only through `lane-merge`.
 ### Coordinator duties
 
 After tick/review/gate/merge/correction/recovery, recompute readiness; dispatch ready lanes within capacity.
+
+### Status updates (mandatory on every subagent update)
+
+A worker result, a review verdict, a failed dispatch, a timeout, or a correction batch is not complete
+until the Coordinator has recorded it. On every update, in this order:
+
+1. Close or update the dispatch record (`dispatch-done` with the run id and result).
+2. Record the task ticks that the update added (`state-derive` after reading the lane worktree).
+3. Record reviews, mediations and human gates with the exact commit, report path and revision.
+4. Write the lane phase: `writing`, `reviewing`, `fixing`, `awaiting-gate`, `merging`, `merged`.
+5. Refresh the dashboard or status view the human reads, and state the change in one line.
+
+Never leave a subagent update only in chat. `featdev status --json` must answer, at any moment, which
+lane is complete, which is in progress, which is under review, and what each lane is waiting for. When a
+record and an artifact disagree, the artifact wins and the record is corrected; never the reverse.
 Require feature-branch ticks for cross-lane prerequisites; use own ticks for same-lane prerequisites.
 All assigned tasks ticked: complete, never redispatch as ready.
 
@@ -118,7 +140,8 @@ Run independent checks there; keep review read-only and never patch reviewed wor
 
 ## Implementation
 
-Fill `briefs-and-handoffs.md` implementation template; apply its handoff-context rules.
+Fill `briefs-and-handoffs.md` implementation template; apply its handoff-context rules. Write the filled
+brief to `.agents/workflow/<change>/briefs/<lane>-<role>-<task>.md` and hand the worker that absolute path.
 Record intent before starting worker:
 
 ```bash
@@ -240,7 +263,8 @@ python3 .agents/skills/feature-development/bin/featdev.py \
 Only `--commit`/`--report` required generally.
 Revision defaults to `r<round>`; same commit reuses recorded revision, new commit advances round.
 `screen: true` refuses `PASS` without current evidence.
-Record while reviewed `HEAD` is current. Ancestor verdict: superseded history, not approval.
+Store the report under `.agents/workflow/<change>/reviews/<lane>-<role>-r<round>.md` and record that
+absolute path with `lane-review`. Record while reviewed `HEAD` is current. Ancestor verdict: superseded history, not approval.
 Non-ancestor: refused, no record. Rounds persist across commits.
 Status/dashboard expose role, SHA, round, current/superseded state, selected duties, and reuse.
 Every correction round keeps the selected duties and any reuse assessment visible in status,
