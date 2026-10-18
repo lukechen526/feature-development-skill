@@ -10,8 +10,10 @@ Committed records:
 - `openspec/changes/<change>/plan/graph-plan.json`: assignments, dependencies, risk/UI flags.
 
 Coordinator store, gitignored, under `<feature-checkout>/.agents/workflow/<change>/`:
-- `state.json`: source SHA, plan hash/revision, lane tasks/flags/ticks/completion/readiness.
-- `coordination.json`: worktrees, dispatches, reviews, authorizations, human gates, lane phases.
+- `state.json`: derived snapshot only. Never edit it; it is rebuilt from committed artifacts.
+- `coordination.json`: the definitive coordinator store. Holds each lane's `status`, `status_reason`,
+  per-task state (`pending | in_progress | done | blocked`), worktrees, dispatches, reviews, authorizations,
+  human gates and merge records.
 - `model-selection.json`: per-role model/thinking answers and the provisioning mechanism.
 - `briefs/`: one file per dispatch, named `<lane>-<role>-<task-or-round>.md`.
 - `reviews/`: one report per review, named `<lane>-<role>-r<round>.md`.
@@ -115,6 +117,14 @@ Lane progress before merge is committed on the lane ref, not on the feature bran
 it per lane as `inflight` (for example `in-flight only (lane ref): 4/11`); `dashboard` shows it in its own
 column. The feature-branch view stays unchecked until `lane-merge`, which is what makes ticks authoritative.
 To inspect a lane candidate directly, run `state-derive <change> --ref featdev/<change>-<lane>`.
+
+The coordinator refreshes it with `featdev.py sync` after every subagent update. That command reads
+each lane ref's committed ticks, then writes `done`, `in_progress`, `pending` or `blocked` per task and the
+lane status (`pending | in_progress | blocked | done`) into `coordination.json`. Blocked cases that a sync
+cannot infer are recorded with `task-status <lane> <task> --status blocked --reason "<why>"`.
+
+Ownership is enforced, not just documented: `sync` and `task-status` refuse to run outside the feature
+checkout, so a worker in a lane worktree cannot write the coordinator store. Workers only tick tasks.
 
 Never leave a subagent update only in chat. `featdev status --json` must answer, at any moment, which
 lane is complete, which is in progress, which is under review, and what each lane is waiting for. When a

@@ -342,6 +342,11 @@ def _safe_change(change: str) -> str:
     return change
 
 
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
 def workflow_dir(root: Path) -> Path:
     """Coordinator-owned store for one repository."""
     return root / ".agents" / "workflow"
@@ -653,8 +658,12 @@ def state_derive(change: str, source_ref: str | None = None, checkout: Path | No
 
 _COORDINATION_FIELDS = (
     "phase", "worktree", "ref", "base", "dispatches", "reviews", "merge", "cleanup", "mediations",
-    "decisions",
+    "decisions", "status", "status_reason", "task_states",
 )
+
+# Task states the coordinator store tracks per lane. "done" here is a lane-local claim; only a
+# committed and merged tick makes it authoritative on the feature branch.
+_TASK_STATES = ("pending", "in_progress", "done", "blocked")
 
 # Review-duty decision vocabulary (design D5).
 _DECISION_DUTIES = ("code", "test", "ui")
@@ -678,11 +687,145 @@ def _coordination_lane(lane: dict[str, Any] | None = None) -> dict[str, Any]:
         "cleanup": None,
         "mediations": [],
         "decisions": None,
+        "status": None,
+        "status_reason": None,
+        "task_states": {},
     }
     for key, default in defaults.items():
         if key not in value:
             value[key] = json.loads(json.dumps(default))
     return {key: value[key] for key in _COORDINATION_FIELDS}
+
+
+def _coordinator_lane_tasks(lane_id: str, lane: dict[str, Any], plan: dict[str, Any]) -> list[str]:
+    assigned = [
+        task_id for task_id, task in plan.get("tasks", {}).items()
+        if isinstance(task, dict) and task.get("lane") == lane_id
+    ]
+    return assigned or [str(task) for task in (lane.get("tasks") or [])]
+
+
+def _lane_ref_progress(
+    state: dict[str, Any], lane: dict[str, Any], plan: dict[str, Any]
+) -> tuple[set[str], str | None]:
+    """Checked tasks on the lane ref. The lane is the only place unmerged ticks exist."""
+    ref = lane.get("ref")
+    checkout_value = state.get("feature_checkout")
+    change = state.get("change")
+    if not isinstance(ref, str) or not ref or not isinstance(checkout_value, str) or not isinstance(change, str):
+        return set(), None
+    repository = Path(checkout_value).expanduser().resolve()
+    try:
+        head = _ref_sha(repository, ref)
+        if not head:
+            return set(), None
+        text = _committed_file(repository, head, f"openspec/changes/{change}/tasks.md")
+        _check_task_ids_text(plan, text, f"openspec/changes/{change}/tasks.md at lane ref")
+        return set(_checked_task_ids_from_text(text)), head
+    except (OSError, PlanError, StateError, ValueError):
+        return set(), None
+
+
+def _require_coordinator_cwd(state: dict[str, Any], command: str) -> None:
+    """Refuse writes from a lane worktree: the coordinator store has one writer."""
+    branch = subprocess.run(
+        ["git", "-C", str(Path.cwd()), "symbolic-ref", "--short", "-q", "HEAD"],
+        capture_output=True, text=True, check=False,
+    ).stdout.strip()
+    if branch.startswith("featdev/"):
+        raise StateError(
+            f"{command}: refused on lane branch {branch}; "
+            "run from the feature checkout. Lane worktrees and workers never write the coordinator store"
+        )
+
+
+def coordination_sync(change: str | None = None, checkout: Path | None = None) -> dict[str, Any]:
+    """Refresh lane and task status in the coordinator store from lane refs and records.
+
+    The coordinator runs this after every subagent update. Workers never write this file; they
+    commit ticks. Reconciliation is monotonic for "done" (a task never regresses) and recomputed
+    for the other states, so a stale in_progress or blocked entry cannot survive a real change.
+    """
+    _, state, plan = _state_context(change, checkout)
+    _require_coordinator_cwd(state, "sync")
+    coordination = _load_coordination(state, plan)
+    for lane_id, lane in coordination.get("lanes", {}).items():
+        if not isinstance(lane, dict):
+            continue
+        done, head = _lane_ref_progress(state, lane, plan)
+        assigned = _coordinator_lane_tasks(lane_id, lane, plan)
+        previous = lane.get("task_states") if isinstance(lane.get("task_states"), dict) else {}
+        open_dispatch = next(
+            (row for row in lane.get("dispatches", [])
+             if isinstance(row, dict) and row.get("result") in (None, "open")),
+            None,
+        )
+        last_review = lane.get("reviews", [])[-1] if lane.get("reviews") else None
+        review_blocked = (
+            isinstance(last_review, dict) and last_review.get("verdict") == "MORE WORK"
+        )
+        tasks: dict[str, Any] = {}
+        for task_id in assigned:
+            prior = previous.get(task_id) if isinstance(previous.get(task_id), dict) else {}
+            if task_id in done:
+                tasks[task_id] = {"status": "done", "commit": head, "updated_at": prior.get("updated_at")}
+                continue
+            if prior.get("status") == "blocked":
+                tasks[task_id] = prior
+                continue
+            if isinstance(open_dispatch, dict) and open_dispatch.get("task") == task_id:
+                tasks[task_id] = {"status": "in_progress", "updated_at": prior.get("updated_at")}
+                continue
+            tasks[task_id] = {"status": "pending", "updated_at": prior.get("updated_at")}
+        lane["task_states"] = tasks
+        states = {row.get("status") for row in tasks.values()}
+        if assigned and all(row.get("status") == "done" for row in tasks.values()):
+            lane["status"], lane["status_reason"] = "done", None
+        elif "blocked" in states:
+            blocked = sorted(task_id for task_id, row in tasks.items() if row.get("status") == "blocked")
+            lane["status"] = "blocked"
+            lane["status_reason"] = "blocked tasks: " + ", ".join(blocked)
+        elif review_blocked and isinstance(last_review, dict) and last_review.get("commit") == head:
+            lane["status"], lane["status_reason"] = "blocked", f"review returned MORE WORK at {head[:12]}"
+        elif "in_progress" in states or isinstance(open_dispatch, dict) or "done" in states:
+            lane["status"], lane["status_reason"] = "in_progress", None
+        else:
+            lane["status"], lane["status_reason"] = "pending", None
+    _write_coordination(state, coordination, plan)
+    return {"change": state.get("change"), "lanes": {
+        lane_id: {"status": lane.get("status"), "reason": lane.get("status_reason"),
+                  "tasks": {task_id: row.get("status") for task_id, row in (lane.get("task_states") or {}).items()}}
+        for lane_id, lane in coordination.get("lanes", {}).items() if isinstance(lane, dict)
+    }}
+
+
+def coordination_task_status(
+    lane_id: str, task_id: str, status: str, reason: str | None = None,
+    change: str | None = None, checkout: Path | None = None,
+) -> Path:
+    """Set one task's coordinator-side state, for cases a sync cannot infer (blocked with a reason)."""
+    if status not in _TASK_STATES:
+        raise StateError(f"task-status: status must be one of {', '.join(_TASK_STATES)}")
+    _, state, plan = _state_context(change, checkout)
+    _require_coordinator_cwd(state, "task-status")
+    coordination = _load_coordination(state, plan)
+    lane = coordination.get("lanes", {}).get(lane_id)
+    if not isinstance(lane, dict):
+        raise StateError(f"lane: lane {lane_id!r} is not in the committed plan; change it")
+    if task_id not in _coordinator_lane_tasks(lane_id, lane, plan):
+        raise StateError(f"lane: task {task_id!r} is not assigned to lane {lane_id!r}; change it")
+    tasks = lane.get("task_states") if isinstance(lane.get("task_states"), dict) else {}
+    row: dict[str, Any] = {"status": status, "updated_at": _now_iso()}
+    if reason:
+        row["reason"] = reason
+    tasks[task_id] = row
+    lane["task_states"] = tasks
+    if status == "blocked":
+        lane["status"] = "blocked"
+        lane["status_reason"] = reason or f"task {task_id} blocked"
+    _write_coordination(state, coordination, plan)
+    path = _coordination_path(str(state.get("change")), Path(str(state.get("feature_checkout"))))
+    return path
 
 
 def _review_mode(plan: dict[str, Any]) -> str:
@@ -1783,6 +1926,13 @@ def _status_view(state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
         if isinstance(lane, dict):
             lane["phase"] = _coordination_phase_for_display(lane, change, plan)
             lane["inflight"] = _inflight_task_status(view, lane, plan)
+            lane["coordinator_status"] = lane.get("status")
+            lane["coordinator_status_reason"] = lane.get("status_reason")
+            lane["task_states"] = {
+                task_id: row.get("status")
+                for task_id, row in (lane.get("task_states") or {}).items()
+                if isinstance(row, dict)
+            }
             lane["human_gate"] = _human_gate_summary(
                 lane_id, lane, view.get("human_gates"), coordination_available, view.get("authorizations"),
                 view.get("review_policy") == "risk-based" and change != _SELF_REVIEW_CHANGE,
@@ -1846,6 +1996,19 @@ def _status_text(view: dict[str, Any]) -> str:
             + duty_note
             + (f"; human gate {gate}" if gate else "")
         )
+        raw_states = lane.get("task_states") if isinstance(lane.get("task_states"), dict) else {}
+        states = {
+            task_id: (row.get("status") if isinstance(row, dict) else row)
+            for task_id, row in raw_states.items()
+        }
+        if states:
+            done_count = sum(1 for status_value in states.values() if status_value == "done")
+            detail = ", ".join(f"{task_id}={status_value}" for task_id, status_value in states.items())
+            reason = lane.get("coordinator_status_reason")
+            lines.append(
+                f"coordinator: {lane.get('coordinator_status')}; {done_count}/{len(states)} done"
+                f" [{detail}]" + (f"; reason: {reason}" if reason else "")
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -7993,6 +8156,20 @@ def _parser() -> argparse.ArgumentParser:
     dashboard_command.add_argument("--output", type=Path, metavar="<path>")
     _add_change_option(dashboard_command)
 
+    sync_command = commands.add_parser(
+        "sync", help="refresh lane and task status in the coordinator store from lane refs"
+    )
+    _add_change_option(sync_command)
+
+    task_status = commands.add_parser(
+        "task-status", help="set one task's coordinator-side status (blocked with a reason)"
+    )
+    task_status.add_argument("lane")
+    task_status.add_argument("task")
+    task_status.add_argument("--status", required=True, choices=_TASK_STATES)
+    task_status.add_argument("--reason")
+    _add_change_option(task_status)
+
     current = commands.add_parser("status", help="show the current derived task and lane state")
     current.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON")
     _add_change_option(current)
@@ -8102,6 +8279,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "dashboard":
             path = dashboard(selected_change, args.output)
             print(f"dashboard: rendered ({path})")
+            return 0
+        if args.command == "sync":
+            result = coordination_sync(selected_change, None)
+            print(json.dumps(result, indent=2))
+            return 0
+        if args.command == "task-status":
+            path = coordination_task_status(
+                args.lane, args.task, args.status, args.reason, selected_change, None
+            )
+            print(f"task-status: recorded {args.lane}/{args.task} {args.status} ({path})")
             return 0
         if args.command == "status":
             print(status(selected_change, args.as_json), end="")
