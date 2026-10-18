@@ -41,12 +41,12 @@ injection:
 
 A mechanism change on a later run is a new preflight. There is no silent fallback.
 
-Write the preflight to `.agents/workflow/<change>/preflight.json`, or to the `harness`, `skill_root`,
-and `profiles` sections of `model-selection.json` created in Step 1. Include the harness name and
-version, the capability matrix, the resolved skill root, the featdev path, the capability map path and
-hash, and one launch profile per role: role file, prompt hash, mechanism, working directory, model and
-thinking requested versus effective, tool policy, continuation and stop support, gaps, and human
-acknowledgement.
+Step 0 writes `.agents/workflow/<change>/capability-map.md` and may write
+`.agents/workflow/<change>/preflight.json` with the harness name and version, capability matrix,
+resolved skill root, featdev path, capability map path/hash, and mechanism choice.
+
+Do not create or write `model-selection.json` in Step 0. Step 1 writes it after the human answers, and
+Step 1b adds the role profiles.
 
 ### Record the capability map
 
@@ -78,7 +78,7 @@ Every capability in the Step 0 table must have a row. Use `unsupported` or `not 
 never leave a blank. If the harness exposes more than one mechanism, name the mechanism the row
 applies to.
 
-Reference the map from `model-selection.json` as `capability_map` (absolute path) and
+When Step 1 writes `model-selection.json`, record the map there as `capability_map` (absolute path) and
 `capability_map_sha256`. The Coordinator reads it before every dispatch, and every brief carries its
 absolute path. A different harness or mechanism invalidates the map and requires a new preflight.
 
@@ -114,6 +114,10 @@ Write the answers to a gitignored file under the coordinator store:
 ```
 <repo>/.agents/workflow/<change>/model-selection.json
 ```
+
+This file is created in Step 1, after the human answers. Step 0 does not create it. When writing it,
+copy in the preflight's `harness`, `skill_root`, `capability_map`, and `capability_map_sha256` fields;
+Step 1b then adds the launch profiles.
 
 ```json
 {
