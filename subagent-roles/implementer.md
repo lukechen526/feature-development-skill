@@ -1,12 +1,11 @@
 ---
-name: worker
+name: implementer
+role_id: implementer
 description: Implementation agent for normal tasks and approved oracle handoffs. Writes implementation in the lane worktree and maintains the supplied live report.
-aliases: developer, coder, implementer, develop
 tools: read, grep, find, ls, bash, edit, write
-systemPromptMode: replace
-inheritProjectContext: true
-inheritSkills: false
-defaultContext: fresh
+context: fresh
+project_context: inherit
+skills: none
 ---
 
 # Implementer

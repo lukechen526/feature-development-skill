@@ -9,22 +9,25 @@ Committed records:
 - `openspec/changes/<change>/tasks.md`: top-level task identity/completion.
 - `openspec/changes/<change>/plan/graph-plan.json`: assignments, dependencies, risk/UI flags.
 
-Coordinator store, gitignored, under `<feature-checkout>/.agents/workflow/<change>/`:
-- Derived state is rebuilt in memory from committed artifacts. There is no persisted `state.json`.
-- `coordination.json`: the definitive coordinator store. Holds each lane's `status`, `status_reason`,
+Coordinator store, gitignored, under `<feature-checkout>/.agents/workflow/`:
+- Repo-level `capability-map.md`: the preflight mapping from generic workflow capabilities to this
+  harness's concrete tools and operations. Required before the first dispatch; it may name the harness
+  because it is a runtime artifact, not part of the skill.
+- Repo-level `model-selection.json`: per-role model/thinking answers, the launch profiles, and the
+  path/hash of the capability map. Asked once per repository; every change reuses it.
+- `<change>/plan-reviews.json`: the lane-less plan dispatch and review ledger.
+- `<change>/coordination.json`: the definitive lane store. Holds each lane's `status`, `status_reason`,
   per-task state (`pending | in_progress | done | blocked`), `worktree` and `worktree_present`,
   `review_status` (`state`, `round`, `reviewer`, reviewed commit, report path), `escalation`
   (`required`, `rounds`, `state`, `decision`, options), dispatches, reviews, authorizations, human gates
   and merge records. A top-level `subagents` list tracks every dispatched subagent: `run_id`, `role`,
   `lane`, `task`, `model`, `level`, `access`, `worktree`, `status`, `result`, timestamps.
-- `capability-map.md`: the preflight mapping from generic workflow capabilities to this harness's
-  concrete tools and operations. Required before the first dispatch; it may name the harness because it
-  is a runtime artifact, not part of the skill.
-- `model-selection.json`: per-role model/thinking answers, the launch profiles, and the path/hash of the
-  capability map.
-- `briefs/`: one file per dispatch, named `<lane>-<role>-<task-or-round>.md`.
-- `reviews/`: one report per review, named `<lane>-<role>-r<round>.md`.
-- `reports/`: lane live reports, named `<lane>-report.md`.
+- `<change>/briefs/`: one file per dispatch, named `<lane>-<role>-<task-or-round>.md`.
+- `<change>/reviews/`: one report per review, named `<lane>-<role>-r<round>.md`; plan reviews use
+  `plan-<role>-r<round>.md`.
+- `<change>/reports/`: lane live reports `<lane>-report.md`; runner reports
+  `<lane>-runner-<task>.md`.
+- `<change>/evidence/`: evidence and logs.
 
 Every artifact a later session needs lives here. A brief or review at any other path is a Coordinator error.
 The store is created on demand. `state-derive` ignores `.agents/workflow/` through the local Git exclude file.
@@ -45,7 +48,7 @@ Refresh after plan/task-artifact commits and before first lane mutation.
 ## Commands
 
 Standard-library CLI: `"$FEATDEV_SKILL_ROOT/bin/featdev.py"`; no repository-specific constants.
-`FEATDEV_SKILL_ROOT` is resolved by the Step 0 preflight (`roles-and-models.md`) and never hardcoded.
+`FEATDEV_SKILL_ROOT` is resolved by the Step 0 preflight (`preflight-and-roles.md`) and never hardcoded.
 Commands discover state; pass global `--change <change>` when ambiguous. No run id.
 Use command `--help` for flags; `…` below denotes required flags.
 
@@ -53,6 +56,8 @@ Use command `--help` for flags; `…` below denotes required flags.
 |---|---|
 | `plan-validate <plan.json> [--tasks <tasks.md>]` | shape, task bijection, references, cycles |
 | `plan-graph <plan.json>` | read-only; `--format md` or `--format mermaid` |
+| `plan-dispatch …` | pre-plan: record the Oracle plan-review intent before launch |
+| `plan-review …` | pre-plan: record the Oracle plan-review verdict against the working-tree plan |
 | `state-derive <change> [--ref <committed-ref>]` | refresh committed view |
 | `task-tick <lane> <task>` | tick assigned top-level task; refuse foreign/unknown/nested IDs |
 | `dispatch <lane> <role> …` | record intent before worker starts |
@@ -63,8 +68,11 @@ Use command `--help` for flags; `…` below denotes required flags.
 | `review-reuse <lane> <role> …` | record assessed ancestor-review reuse with intervening-diff binding |
 | `lane-mediate <lane> …` | record Oracle mediation for further round/bounded merge |
 | `human-gate <lane> …` | record commit/evidence-bound checkpoint |
+| `human-defer <lane> …` | opt-in low-risk UI checkpoint deferral to integrated inspection |
 | `lane-merge <lane>` | validate base/ticks/source/plan/reviews/gates; merge |
 | `lane-close <lane>` | remove merged worktree/ref |
+| `sync` | refresh lane/task status from lane refs (Coordinator checkout only) |
+| `task-status <lane> <task> --status …` | record a coordinator-only blocked/status reason |
 | `status [--json]` | tasks/lanes/readiness/reviews/open dispatches |
 | `dashboard [--serve]` | live page over `coordination.json`; `--serve` re-reads it on every request and the page reloads every 2 s |
 | `dashboard [--output <path>]` | offline state dashboard |
@@ -233,6 +241,10 @@ authorization.
 - Reviewers independently run relevant checks at reviewed `HEAD`. Missing/stale/under-covering evidence
   or unproven claims: `MORE WORK`.
 - Reuse only with matching evidence content, reviewed dependencies, commits, hashes; label reuse, never fresh run.
+- Long checks, builds, captures, or external polling may be delegated to the read-only Runner. Record
+  `dispatch <lane> runner …`, close it with `dispatch-done`, and keep the report at
+  `reports/<lane>-runner-<task>.md`. Runner reports observations only; it never issues `PASS`/`MORE WORK`
+  and does not satisfy a review duty.
 - Prefer completion events/deadlines; bound fallback polling/output.
   Cache preflight only while mechanism/model/level/environment/evidence bindings match; retain live initial availability check.
 
@@ -281,8 +293,9 @@ Start only after every lane task is implemented/ticked. Use `briefs-and-handoffs
 include changed files and all plan flags. Read worktree/approved sources/evidence directly.
 Never consume generated review packages, deterministic preflight results, digests, or verdict files.
 
-Cover every assigned acceptance criterion: code checks implementation/every tick;
-high-risk test reviewer checks test adequacy; UI reviewer checks rendered acceptance.
+Cover every assigned acceptance criterion: ordinary `code` covers implementation/task completeness plus
+test adequacy; on high-risk lanes `code` checks implementation/every tick and the separate `test` reviewer
+checks test adequacy; `ui` checks rendered acceptance.
 Uncovered criterion/unjustified tick: `MORE WORK`.
 Start full lane diff/named dependencies; expand only for concrete failure/requirement violation.
 Risk-calibrated reachable issues only; no defensive coding/unnecessary complexity.
@@ -325,6 +338,31 @@ python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
   --change <change> human-gate <lane-id> \
   --state <waiting|approved|rejected|revoked> --commit <head-sha> --evidence-revision <rev> [--evidence <path>]
 ```
+
+### Deferred low-risk UI checkpoint (opt-in)
+
+A low-risk UI/screen checkpoint may defer to direct human inspection of integrated artifacts only when:
+
+- the Coordinator recorded `review-decision ... --opt-in` (risk-based policy);
+- the lane has `ui` or `screen`, is not `sensitive`, and is not high-risk;
+- combined review mode is not active;
+- the deferral binds the current lane `HEAD` and evidence revision, and a screen lane supplies current
+  evidence.
+
+```bash
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
+  --change <change> human-defer <lane-id> \
+  --commit <head-sha> --evidence-revision <rev> \
+  --rationale "<bounded, reversible, low-risk; excluded sensitive effects>" \
+  --risk-assessment low [--evidence <path>]
+```
+
+The deferral is not an approval. At finish, declare `--inspection <checkpoint-id>` on
+`finish-record classify`/`restage`; `pr-check` requires the human's integrated inspection record.
+A deferred UI checkpoint requires at least one declared inspection. A changed integrated `HEAD` requires
+a fresh human inspection.
+
+### Oracle stand-in under a grant
 
 Recorded human authorization may permit independent Oracle stand-in:
 
@@ -443,7 +481,9 @@ python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> lane-merge <lane-
 python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> lane-close <lane-id>
 ```
 
-Combined mode: Oracle supplies the lane code/test and complete-change implementation review.
+Combined mode: Oracle supplies the lane code/test and complete-change implementation review. The
+verdict is recorded with `lane-review <lane> code <verdict> --combined`; `--oracle-provenance` identifies the
+Oracle session. There is no separate `oracle` combined role or alias.
 Require current tasks, ticks, UI review, human checkpoints, and candidate acceptance/evidence.
 Fast-forward the lane into the feature branch at the exact Oracle-reviewed candidate.
 Changed pre-merge base, candidate, acceptance, evidence, or eligibility invalidates that approval.

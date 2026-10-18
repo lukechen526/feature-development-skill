@@ -21,9 +21,11 @@ Every handoff artifact has one home, under the coordinator store:
 
 | Artifact | Path |
 |---|---|
-| Capability map | `.agents/workflow/<change>/capability-map.md` |
+| Capability map | `.agents/workflow/capability-map.md` |
+| Model selection | `.agents/workflow/model-selection.json` |
 | Filled brief | `.agents/workflow/<change>/briefs/<lane>-<role>-<task-or-round>.md` |
 | Lane live report | `.agents/workflow/<change>/reports/<lane>-report.md` |
+| Runner report | `.agents/workflow/<change>/reports/<lane>-runner-<task>.md` |
 | Review report | `.agents/workflow/<change>/reviews/<lane>-<role>-r<round>.md` |
 | Oracle plan review | `.agents/workflow/<change>/reviews/plan-<role>-r<round>.md` |
 | Evidence and logs | `.agents/workflow/<change>/evidence/<lane>/<revision>/` |
@@ -69,6 +71,23 @@ Deliver: <report path; evidence directory/revision; required receipt fields>
 
 Require all assigned tasks, committed work/ticks, clean tree. Specify behavior, not speculative machinery.
 
+## Long-process Runner
+
+```text
+Role: Runner | lane: <id> | task: <id>
+Role source: <absolute path to subagent-roles/runner.md> | profile: <id or sha256>
+Capability map: <absolute path to capability-map.md> | sha256: <hash>
+Worktree: <absolute path> | HEAD: <SHA>
+Command or poll target: <exact command / URL / device>
+Completion condition: <what ends the run>
+Cadence: <progress report interval>
+Retry policy: <none, or bounded retries>
+Deliver: <reports/<lane>-runner-<task>.md; evidence/log directory; exit code; limitations>
+```
+
+Runner executes exactly the supplied command or polling target. It does not implement, edit, or issue a
+verdict. Its report is evidence input; it never satisfies a review duty.
+
 ## Review
 
 ```text
@@ -86,6 +105,9 @@ Prior findings: <none, or report path + IDs + closure checks>
 Deliver: <report path; PASS or MORE WORK; limitations>
 ```
 
+The review role ID is `code`, `test`, or `ui`. Ordinary lanes dispatch `code` for the combined code/test
+review; high-risk lanes dispatch separate `code` and `test` reviews. An explicitly selected separate test
+duty also uses `test`. Combined Oracle review is recorded with `role=code`.
 Correction/impact: include previous reviewed SHA, correction range, full lane range.
 Preserve full-lane access; investigate relevant dependencies only.
 Combined Oracle: whole-change target base, feature/lane base, code/test/complete-change implementation duties, provenance, candidate acceptance

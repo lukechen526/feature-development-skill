@@ -8,7 +8,8 @@ Plan is graph; `status` derives readiness from committed plan/ticks, never a sec
 Planning artifacts (`plan/graph-plan.json`, delta specs, design.md, tasks.md edits) are UNCOMMITTED while under review. Commit order is strictly:
 
 1. Author artifacts; validate locally.
-2. Dispatch Oracle `plan_review` against the working tree.
+2. Record the Oracle dispatch with `plan-dispatch`, dispatch `plan_review` against the working tree, and
+   record the verdict with `plan-review`.
 3. Obtain explicit human approval of the artifacts/plan.
 4. ONLY THEN commit: first the artifacts, then the approval checkpoint naming the approver.
 
@@ -106,12 +107,34 @@ Structure only: Oracle/human assess lane boundaries, risk, assignments.
 
 ## Oracle review
 
-Dispatch `plan_review` using fresh review brief: OpenSpec/graph, exact base/`HEAD`, boundaries,
-criteria, prior findings. Return `PASS`/`MORE WORK`; the Oracle writes the full report to
-`.agents/workflow/<change>/reviews/plan-<role>-r<round>.md` and returns that path. A verdict that exists
-only in chat is not recorded.
-Maximum two Coordinator-driven reviews. Second `MORE WORK`: Oracle authors revision or escalate to human;
-never third Coordinator-driven cycle.
+Dispatch `plan_review` using a fresh review brief: OpenSpec/graph, exact base/`HEAD`, boundaries,
+criteria, prior findings. Return `PASS`/`MORE WORK`; the Oracle writes the full report under
+`.agents/workflow/<change>/reviews/` and returns that path. A verdict that exists only in chat is not
+recorded.
+
+Record the dispatch intent before launch:
+
+```bash
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> plan-dispatch \
+  --role oracle --model <model> --level <level> --task plan \
+  --report .agents/workflow/<change>/reviews/plan-oracle-r<round>.md
+```
+
+Then record the verdict against the same plan and `HEAD`:
+
+```bash
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> plan-review \
+  --role oracle <PASS|MORE WORK> --head <feature-head-sha> \
+  --report .agents/workflow/<change>/reviews/plan-oracle-r<round>.md
+```
+
+Both commands write the one lane-less ledger `.agents/workflow/<change>/plan-reviews.json`; they do not
+require a committed plan or a lane worktree. `plan-review` binds the verdict to the working-tree plan
+SHA-256 and the feature `HEAD`, and refuses a stale plan or missing dispatch.
+
+Maximum two Coordinator-driven reviews. A third review requires `--mediation <report>`; otherwise
+escalate to the human. Second `MORE WORK`: Oracle authors revision or escalate to human; never a third
+Coordinator-driven cycle.
 
 ## Approval
 

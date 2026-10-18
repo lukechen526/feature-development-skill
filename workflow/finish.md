@@ -15,7 +15,7 @@ the order of decisions and the ownership of consent.
    Check ticks, reviews, and state health. Confirm a clean feature-branch HEAD.
 
 2. **Release classification and version.** Obtain the human's release
-   classification and apply the version change the repository's versioning policy
+   classification first, then apply the version change the repository's versioning policy
    requires; regenerate generated files as the repository specifies and commit.
    Never hand-edit generated files. Classification and PR approval are separate
    decisions; classification never consumes PR consent.
@@ -70,14 +70,17 @@ Repository guides define the release classification, preparation commands, check
    Use `finish-record classify --classification <label> --artifact <receipt> --input <path> ...`.
    Add optional `--version <label>` when the repository uses a version.
    The version is descriptive; repository tooling validates it.
+   Add `--check <id>` for every selected release check so `pr-check` can detect an omitted or extra check.
    Add `--inspection <checkpoint-id>` for each required direct human inspection.
    A deferred UI checkpoint requires at least one declared integrated inspection.
 
 6. Run the selected release checks on committed integrated HEAD.
 7. Record each result with `finish-record capture --check <id> --artifact <receipt> --input <path> ...`.
+   A check that was not declared at classify is refused.
 8. Ask the human to perform each declared inspection.
 9. Record each human inspection with `finish-record inspect --check <checkpoint-id> --artifact <record>`.
-10. Run `finish-record pr-check` before requesting approval to open the PR.
+10. Run `finish-record pr-check` before requesting approval to open the PR. It requires the declared
+    check set and the captured evidence to match exactly.
 
 Each human inspection artifact contains these unique fields:
 
@@ -90,10 +93,12 @@ verdict: accept
 A human can record `reject` instead. A rejection blocks PR readiness.
 A changed integrated HEAD requires fresh human inspection.
 
+The normal path must not require restage: classify after the preparation commit, then capture.
 A preparation artifact or its declared inputs must not change after capture.
-Use `finish-record restage` with the new preparation receipt and input paths after such a change.
-Restage clears final evidence and human inspections. It preserves selected check requirements.
-Restage preserves inspection checkpoint names unless new `--inspection` values replace them.
+If they do, use `finish-record restage` with the new preparation receipt and input paths. Restage reuses
+the stored classification; pass `--classification` only to re-classify. Restage clears final evidence
+and human inspections, preserves selected check requirements, and preserves inspection checkpoint names
+unless new `--inspection` values replace them. Use `--check` to replace the declared check set.
 Recapture affected release evidence before requesting PR-opening approval.
 
 Use separate files for lane candidate evidence and integrated release evidence.

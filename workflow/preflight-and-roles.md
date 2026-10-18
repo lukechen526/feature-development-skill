@@ -1,9 +1,10 @@
-# Roles, models, dispatch, provisioning
+# Preflight, roles, models, and dispatch
 
 The human chooses the model and thinking for every role. There is no fixed default table in this skill.
-The selection is recorded and reused until the human changes it.
+The selection is asked once per repository, recorded at repo level, and reused by every change until the
+human changes it.
 
-## Step 0 — capability preflight (before asking or dispatching)
+## Step 0 — capability preflight (once per repo/harness)
 
 Do not assume a provider, harness, or agent registry. Inspect the live tool surface and record what it
 actually supports. Do not infer a capability from a tool name, a package manifest, or a previous run.
@@ -41,18 +42,18 @@ injection:
 
 A mechanism change on a later run is a new preflight. There is no silent fallback.
 
-Step 0 writes `.agents/workflow/<change>/capability-map.md` and may write
-`.agents/workflow/<change>/preflight.json` with the harness name and version, capability matrix,
-resolved skill root, featdev path, capability map path/hash, and mechanism choice.
+Step 0 writes the repo-level `.agents/workflow/capability-map.md` and may write
+`.agents/workflow/preflight.json` with the harness name and version, capability matrix, resolved skill
+root, featdev path, capability map path/hash, and mechanism choice.
 
-Do not create or write `model-selection.json` in Step 0. Step 1 writes it after the human answers, and
-Step 1b adds the role profiles.
+Do not create or write `model-selection.json` in Step 0. Step 1 writes it once for the repository after
+the human answers, and Step 1b adds the role profiles.
 
 ### Record the capability map
 
-Before defining roles, write `.agents/workflow/<change>/capability-map.md`: a short, one-page mapping
-from each generic capability in the table above to the concrete tool or operation this harness exposes.
-It is a runtime artifact, not part of the skill, so it may name the harness and its tools.
+Before defining roles, write `.agents/workflow/capability-map.md`: a short, one-page mapping from each
+generic capability in the table above to the concrete tool or operation this harness exposes. It is a
+runtime artifact, not part of the skill, so it may name the harness and its tools.
 
 Required columns:
 
@@ -82,19 +83,20 @@ When Step 1 writes `model-selection.json`, record the map there as `capability_m
 `capability_map_sha256`. The Coordinator reads it before every dispatch, and every brief carries its
 absolute path. A different harness or mechanism invalidates the map and requires a new preflight.
 
-## Step 1 — ask the human (no implicit defaults)
+## Step 1 — ask the human (once per repository)
 
 Before any dispatch, ask the human through the harness's user-question tool (or in chat when no
 question tool exists). Ask one question per role, in this order:
 
-| Role | Question |
-|---|---|
-| Orchestration | Which model and thinking level should run the coordinator session? |
-| Implementer | Which model and thinking level should implement tasks and fixes? |
-| Code reviewer | Which model and thinking level should review code? |
-| Test reviewer | Which model and thinking level should review test adequacy? |
-| Rendered-UI reviewer | Which model and thinking level should review supplied UI evidence? |
-| Oracle | Which model and thinking level should review plans, mediate, and author bounded fixes? |
+| Role ID | Role | Question |
+|---|---|---|
+| `orchestration` | Orchestration | Which model and thinking level should run the coordinator session? |
+| `implementer` | Implementer | Which model and thinking level should implement tasks and fixes? |
+| `code` | Code reviewer | Which model and thinking level should review code? |
+| `test` | Test reviewer | Which model and thinking level should review test adequacy? |
+| `ui` | Rendered-UI reviewer | Which model and thinking level should review supplied UI evidence? |
+| `oracle` | Oracle | Which model and thinking level should review plans, mediate, and author bounded fixes? |
+| `runner` | Runner | Which model and thinking level should run long checks or polling? |
 
 Rules:
 
@@ -104,28 +106,53 @@ Rules:
 3. If the harness cannot select a model or thinking level, say so, record the session default as the
    effective value, and ask the human to acknowledge the degradation explicitly.
 4. The human may answer "same as X" or "you choose"; record that literally with the resolved value.
-5. Never infer a role model from another role, from the coordinator session, or from a previous change
-   in another repository. Explicit per-role answers and existing lane model locks win.
+5. Never infer a role model from another role, from the coordinator session, or from another repository.
+   Explicit per-role answers win.
+
+## Canonical roles
+
+| Role ID | Role file | Review duty |
+|---|---|---|
+| `implementer` | `subagent-roles/implementer.md` | Implementation, tests, fixes |
+| `code` | `subagent-roles/code-reviewer.md` | Implementation/task completeness; ordinary lanes also own the combined code/test review |
+| `test` | `subagent-roles/test-reviewer.md` | Test adequacy/coverage/quality and mutation testing; high-risk lanes or an explicitly selected separate test duty |
+| `ui` | `subagent-roles/ui-reviewer.md` | Supplied rendered-UI evidence |
+| `oracle` | `subagent-roles/oracle.md` | Plan review, mediation, authorized fixes, combined review |
+| `runner` | `subagent-roles/runner.md` | Long checks and polling; observations only, no verdict |
+
+The same role ID is used in the role file's `role_id`, `model-selection.json`, the positional role in
+`dispatch <lane> <role>` and `lane-review <lane> <role> <verdict>`, and `review-decision` duties.
+Do not use aliases or alternate spellings.
+Combined Oracle review is recorded under `role=code`; there is no separate `oracle` combined role.
+
+Ordinary lanes require the combined `code` review, which covers code and test adequacy. High-risk lanes
+require separate `code` and `test` reviews. An explicitly selected separate test duty also uses
+`test`. The standard gate requires `ui` review only when the plan sets `ui: true`.
+`screen: true` requires current screen evidence, not a separate UI review. Either flag requires a human
+checkpoint, subject to the documented deferral rules.
 
 ## Record the selection
 
-Write the answers to a gitignored file under the coordinator store:
+Write the answers once for the repository:
 
 ```
-<repo>/.agents/workflow/<change>/model-selection.json
+<repo>/.agents/workflow/model-selection.json
 ```
 
-This file is created in Step 1, after the human answers. Step 0 does not create it. When writing it,
-copy in the preflight's `harness`, `skill_root`, `capability_map`, and `capability_map_sha256` fields;
-Step 1b then adds the launch profiles.
+This file is created in Step 1, after the human answers. Step 0 does not create it. Every change reuses
+it; do not copy it into `.agents/workflow/<change>/`. A different selection for one change requires an
+explicit human decision and an update to this repo-level file.
+
+When writing it, copy in the preflight's `harness`, `skill_root`, `capability_map`, and
+`capability_map_sha256` fields; Step 1b then adds the launch profiles.
 
 ```json
 {
-  "change": "<change>",
+  "scope": "repo",
   "asked_at": "<ISO-8601>",
   "asked_with": "question-tool | interview | chat",
   "skill_root": "<absolute path>",
-  "capability_map": "<absolute path to .agents/workflow/<change>/capability-map.md>",
+  "capability_map": "<absolute path to .agents/workflow/capability-map.md>",
   "capability_map_sha256": "<hash>",
   "harness": {
     "name": "<name>",
@@ -149,14 +176,15 @@ Step 1b then adds the launch profiles.
   "roles": {
     "orchestration": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" },
     "implementer": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" },
-    "code_reviewer": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" },
-    "test_reviewer": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" },
-    "rendered_ui_reviewer": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" },
-    "oracle": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" }
+    "code": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" },
+    "test": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" },
+    "ui": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" },
+    "oracle": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" },
+    "runner": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" }
   },
   "profiles": {
     "implementer": {
-      "role_file": "<absolute path to subagent-roles/worker.md>",
+      "role_file": "<absolute path to subagent-roles/implementer.md>",
       "prompt_sha256": "<hash>",
       "mechanism": "native-agent | composed-prompt | one-shot-orchestration | external-cli",
       "working_directory": "<absolute lane worktree>",
@@ -169,12 +197,13 @@ Step 1b then adds the launch profiles.
 }
 ```
 
-Repeat `profiles` for every role defined in Step 1b.
+Repeat `profiles` for every role defined in Step 1b: `implementer`, `code`, `test`, `ui`, `oracle`,
+and `runner`.
 
-The Coordinator reads this file before every dispatch. It re-asks only when the human requests a
-change, when a recorded capability or model is no longer available, or when this change has no recorded
-selection. `.agents/workflow/` must be gitignored; `featdev.py state-derive` adds a local Git exclude
-rule when it is missing.
+The Coordinator reads this file before every dispatch. It re-asks only when the repository has no
+selection, the human requests a change, the harness or mechanism changed, or a recorded capability or
+model is no longer available. A different selection for one change is an explicit human-approved update
+to this file, never a separate change-level copy.
 
 Verify each selected model and thinking level against the preflight's live findings. A choice that is
 not selectable is recorded with the effective session default and the human's acknowledgement, never
@@ -184,12 +213,12 @@ silently substituted.
 
 A role needs a launch profile before it can be dispatched. Do not assume the files are installed.
 
-1. **Read the canonical role files** in this skill: `subagent-roles/*.md`, each with `name`, `aliases`,
+1. **Read the canonical role files** in this skill: `subagent-roles/*.md`, each with `name`, `role_id`,
    `description`, a requested capability list, and a prompt body.
 2. **Normalize the role file into a profile.** Preserve the prompt body verbatim. Treat the role's tool
    list as requested capabilities and map each to the harness's actual tools; a capability the harness
    lacks is recorded as a gap, not silently dropped. Add the absolute contract path and the lane
-   worktree to the profile.
+   worktree to the profile. The role file's `role_id` is authoritative; do not rename the role.
 3. **Instantiate** using the first mechanism from Step 0:
    - native registry or definition API: create or update the named agent from the role file; set model,
      thinking, and tools only where the preflight says they are supported;
@@ -199,8 +228,8 @@ A role needs a launch profile before it can be dispatched. Do not assume the fil
      working-directory control or continuation may be absent.
 4. **Provision idempotently**: get the definition first; create it when absent; update it when the
    canonical file hash changed.
-5. **Verify before dispatching**: the child's first report must state its role, profile hash, worktree,
-   `HEAD`, and the absolute contract path. A same-named builtin without the role prompt is not
+5. **Verify before dispatching**: the child's first report must state its role ID, profile hash,
+   worktree, `HEAD`, and the absolute contract path. A same-named builtin without the role prompt is not
    acceptable. If verification fails, re-dispatch; never accept the work.
 6. **Record the mechanism and profile** in `model-selection.json`. A different mechanism on a later run
    is a new preflight, not a silent fallback.
@@ -218,14 +247,15 @@ role prompt injection. The mechanism determines harness behavior, never provider
 Dispatch-layer failure: stop; never switch mechanism silently. Model failure: recover the locked role
 model in the same lane worktree.
 
-Records `dispatch --model`, `--level`, `--role`, `--access`, and the profile id or hash. The selected
-model and level are locked per role lineage inside a lane, including replacements.
+Record the role with `dispatch <lane> <role>` and pass `--model`, `--level`, and `--access`.
+Keep the profile id or hash in the brief and repo-level model selection. The selected model and level
+are locked per role lineage inside a lane, including replacements.
 
 ### Dispatch mode (worker resumability)
 
-Long-running workers (Implementer, Reviewer, Oracle): dispatch asynchronously when the harness supports
-it, with an explicit per-dispatch deadline. Do not poll merely to wait when completion events wake the
-parent.
+Long-running roles (Implementer, Reviewer, Runner, Oracle): dispatch asynchronously when the harness
+supports it, with an explicit per-dispatch deadline. Do not poll merely to wait when completion events
+wake the parent.
 
 Recovery is capability-based. On deadline, inspect progress. If the harness supports continuation,
 continue the child; otherwise launch a fresh same-role worker from the live report. Never start a second

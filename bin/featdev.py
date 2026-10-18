@@ -451,6 +451,240 @@ def _atomic_write_json(path: Path, value: object) -> None:
                 pass
 
 
+_PLAN_LEDGER = "plan-reviews.json"
+
+
+def _plan_reviews_path(change: str, checkout: Path | None = None) -> Path:
+    root = (checkout or Path.cwd()).resolve()
+    return workflow_dir(root) / _safe_change(change) / _PLAN_LEDGER
+
+
+def _load_plan_ledger(change: str, checkout: Path | None = None) -> tuple[dict[str, Any], Path]:
+    path = _plan_reviews_path(change, checkout)
+    if not path.exists():
+        return {
+            "change": change,
+            "plan_path": None,
+            "plan_sha256": None,
+            "dispatches": [],
+            "reviews": [],
+        }, path
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise StateError(f"plan: cannot load {path}: {_one_line(exc)}; repair or remove it") from exc
+    if not isinstance(value, dict):
+        raise StateError(f"plan: {path} must contain a JSON object; repair or remove it")
+    if value.get("change") != change:
+        raise StateError(f"plan: {path} belongs to another change; reconcile it")
+    dispatches = value.setdefault("dispatches", [])
+    reviews = value.setdefault("reviews", [])
+    if not isinstance(dispatches, list) or not isinstance(reviews, list):
+        raise StateError(f"plan: {path} has malformed dispatch/review records; repair it")
+    return value, path
+
+
+def _write_plan_ledger(change: str, checkout: Path | None, ledger: dict[str, Any]) -> Path:
+    path = _plan_reviews_path(change, checkout)
+    _atomic_write_json(path, ledger)
+    return path
+
+
+def _plan_head(repository: Path) -> str:
+    result = _run_git(repository, "rev-parse", "HEAD")
+    if result.returncode or not result.stdout.strip():
+        detail = _one_line(result.stderr.strip() or result.stdout.strip())
+        raise StateError(
+            f"plan: cannot resolve feature HEAD{(': ' + detail) if detail else ''}; repair the checkout"
+        )
+    return result.stdout.strip()
+
+
+def _plan_context(
+    change: str | None, plan_path: object = None
+) -> tuple[Path, str, Path, str, str]:
+    """Resolve the working-tree plan before its approval commit."""
+    root = Path.cwd().resolve()
+    if plan_path is not None:
+        plan = Path(str(plan_path)).expanduser().resolve()
+        derived = _change_directory(plan)
+        if change is not None and _safe_change(change) != derived:
+            raise StateError(
+                f"plan: --change {change!r} does not match the plan directory {derived!r}; change it"
+            )
+        change = derived
+    else:
+        change = _safe_change(change) if change is not None else _infer_change(root)
+        plan = root / "openspec" / "changes" / change / "plan" / "graph-plan.json"
+    if not plan.is_file():
+        raise StateError(f"plan: cannot find the working-tree plan at {plan}; author it first")
+    tasks = root / "openspec" / "changes" / change / "tasks.md"
+    validate_plan(plan, tasks)
+    _ensure_workflow_ignored(root)
+    plan_sha256 = hashlib.sha256(plan.read_bytes()).hexdigest()
+    head = _plan_head(root)
+    return root, change, plan, plan_sha256, head
+
+
+def _plan_relative(checkout: Path, plan: Path) -> str:
+    try:
+        return str(plan.relative_to(checkout))
+    except ValueError:
+        return str(plan)
+
+
+def plan_dispatch(
+    role: str,
+    model: str,
+    level: str,
+    task: str = "plan",
+    key: str | None = None,
+    report: object = None,
+    head: str | None = None,
+    change: str | None = None,
+    plan_path: object = None,
+) -> Path:
+    """Record the Oracle plan-review dispatch intent before launch."""
+    role = _require_role(role)
+    if role != "oracle":
+        raise StateError("plan: plan review must use role 'oracle'; change --role")
+    checkout, change, plan, plan_sha256, current_head = _plan_context(change, plan_path)
+    reviewed_head = _git_commit(checkout, head) if head is not None else current_head
+    if reviewed_head != current_head:
+        raise StateError(
+            f"plan: dispatch must bind the current feature HEAD {current_head}; change --head"
+        )
+    report_path = str(Path(str(report)).expanduser().resolve()) if report is not None else None
+    ledger, path = _load_plan_ledger(change, checkout)
+    dispatch_key = key or f"{change}/plan/{role}/{uuid.uuid4().hex}"
+    plan_relative = _plan_relative(checkout, plan)
+    intent = {
+        "role": role,
+        "model": model,
+        "level": level,
+        "task": task,
+        "key": dispatch_key,
+        "access": "read-only",
+        "started_at": _utc_timestamp(),
+        "head": reviewed_head,
+        "plan_path": plan_relative,
+        "plan_sha256": plan_sha256,
+    }
+    if report_path is not None:
+        intent["report"] = report_path
+    dispatches = ledger["dispatches"]
+    for record in dispatches:
+        if not isinstance(record, dict) or record.get("key") != dispatch_key:
+            continue
+        if any(record.get(field) != intent[field] for field in ("role", "model", "level", "task", "head", "plan_sha256")):
+            raise StateError(
+                f"plan: dispatch key {dispatch_key!r} has a different intent; change --key"
+            )
+        return path
+    open_for_role = [
+        record for record in dispatches
+        if isinstance(record, dict) and record.get("role") == role
+        and record.get("task") == task and record.get("result") is None
+    ]
+    if open_for_role and key is None:
+        raise StateError(
+            f"plan: role {role!r} already has an open plan dispatch; complete it or change --key"
+        )
+    ledger.update({"change": change, "plan_path": plan_relative, "plan_sha256": plan_sha256})
+    dispatches.append(intent)
+    return _write_plan_ledger(change, checkout, ledger)
+
+
+def plan_review(
+    role: str,
+    verdict: str,
+    head: str,
+    report: object,
+    mediation: object = None,
+    change: str | None = None,
+    plan_path: object = None,
+) -> Path:
+    """Record the Oracle plan-review verdict against the working-tree plan."""
+    role = _require_role(role)
+    if role != "oracle":
+        raise StateError("plan: plan review must use role 'oracle'; change --role")
+    if verdict not in {"PASS", "MORE WORK"}:
+        raise StateError("plan: verdict must be PASS or MORE WORK; change it")
+    checkout, change, plan, plan_sha256, current_head = _plan_context(change, plan_path)
+    reviewed_head = _git_commit(checkout, head)
+    if reviewed_head != current_head:
+        raise StateError(
+            f"plan: review must bind the current feature HEAD {current_head}; change --head"
+        )
+    report_path = _review_report(report)
+    reviews_root = (workflow_dir(checkout) / change / "reviews").resolve()
+    if reviews_root not in Path(report_path).parents:
+        raise StateError(
+            f"plan: plan-review report must live under {reviews_root}; move the report there"
+        )
+    if mediation is not None:
+        mediation_path = _required_document(mediation, "plan mediation report")
+    else:
+        mediation_path = None
+    ledger, path = _load_plan_ledger(change, checkout)
+    dispatches = ledger["dispatches"]
+    open_records = [
+        record for record in dispatches
+        if isinstance(record, dict) and record.get("role") == role
+        and record.get("task") == "plan" and record.get("result") is None
+    ]
+    if not open_records:
+        raise StateError(
+            "plan: no open plan dispatch matches this review; record the intent with plan-dispatch first"
+        )
+    dispatch = open_records[-1]
+    if dispatch.get("plan_sha256") != plan_sha256:
+        raise StateError(
+            "plan: the working-tree plan changed since the plan dispatch; "
+            "dispatch a fresh plan review for the current plan"
+        )
+    if dispatch.get("head") != reviewed_head:
+        raise StateError(
+            f"plan: plan dispatch is bound to {dispatch.get('head') or 'no head'}, "
+            f"review HEAD is {reviewed_head}; dispatch a fresh plan review"
+        )
+    round_number = len([
+        item for item in ledger["reviews"]
+        if isinstance(item, dict) and item.get("role") == role
+    ]) + 1
+    if round_number > 2 and mediation_path is None:
+        raise StateError(
+            "plan: plan review round is past the two-review limit; provide --mediation "
+            "with the Oracle mediation report before reviewing again"
+        )
+    record = {
+        "role": role,
+        "verdict": verdict,
+        "head": reviewed_head,
+        "plan_path": _plan_relative(checkout, plan),
+        "plan_sha256": plan_sha256,
+        "report": report_path,
+        "round": round_number,
+        "dispatch_key": dispatch.get("key"),
+        "recorded_at": _utc_timestamp(),
+    }
+    if mediation_path is not None:
+        record["mediation"] = mediation_path
+    ledger["reviews"].append(record)
+    dispatch.update({
+        "result": "ok",
+        "verdict": verdict,
+        "report": report_path,
+        "completed_at": _utc_timestamp(),
+    })
+    ledger.update({
+        "change": change,
+        "plan_path": _plan_relative(checkout, plan),
+        "plan_sha256": plan_sha256,
+    })
+    return _write_plan_ledger(change, checkout, ledger)
+
+
 def _state_git(repository: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
@@ -657,6 +891,23 @@ _TASK_STATES = ("pending", "in_progress", "done", "blocked")
 # Review-duty decision vocabulary.
 _DECISION_DUTIES = ("code", "test", "ui")
 _DECISION_MODES = ("full", "focused", "skip")
+
+# One role vocabulary for dispatch, review, and the coordinator's model selection.
+_CANONICAL_ROLES = ("implementer", "code", "test", "ui", "oracle", "runner")
+
+
+def _require_role(role: object) -> str:
+    """Return the canonical role ID or refuse an alias/non-canonical name."""
+    if not isinstance(role, str) or not role.strip():
+        raise StateError(
+            f"state: role must be one of {', '.join(_CANONICAL_ROLES)}; change it"
+        )
+    value = role.strip()
+    if value not in _CANONICAL_ROLES:
+        raise StateError(
+            f"state: role {value!r} is not canonical; use one of {', '.join(_CANONICAL_ROLES)}"
+        )
+    return value
 
 
 def _coordination_lane(lane: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1103,6 +1354,7 @@ def review_reuse(
     Affected/uncertain inputs require fresh re-review instead. Human authorization and
     combined-Oracle approvals stay exact-bound: reuse never applies to them.
     """
+    role = _require_role(role)
     path, state, plan = _state_context(change)
     lane = _state_lane(state, lane_id)
     _reject_finished_lane(lane_id, lane)
@@ -1234,7 +1486,6 @@ def _new_coordination(state: dict[str, Any], plan: dict[str, Any]) -> dict[str, 
         "dispatches": [],
         "reviews": [],
         "worktrees": [],
-        "model_selection": None,
         "authorizations": {},
         "human_gates": {},
         # The standard gates stay authoritative by default.
@@ -1271,7 +1522,7 @@ def _load_coordination(state: dict[str, Any], plan: dict[str, Any]) -> dict[str,
     if not isinstance(lanes, dict):
         raise StateError("state: coordination lanes are missing; repair or remove the coordination data")
     result = _new_coordination(state, plan)
-    for key in ("dispatches", "reviews", "worktrees", "model_selection", "authorizations", "human_gates", "review_policy", "finish", "subagents"):
+    for key in ("dispatches", "reviews", "worktrees", "authorizations", "human_gates", "review_policy", "finish", "subagents"):
         if key in value:
             result[key] = value[key]
     for lane_id in plan.get("lanes", {}):
@@ -1593,17 +1844,16 @@ def _reject_finished_lane(lane_id: str, lane: dict[str, Any]) -> None:
 
 def _dispatch_access(role: str, access: str | None = None) -> str:
     """Resolve the narrow authoring/read-only provenance recorded for a dispatch."""
-    if not isinstance(role, str) or not role.strip():
-        raise StateError("state: dispatch role must be non-empty; change it")
+    role = _require_role(role)
     if access is not None and access not in {"read-only", "write"}:
         raise StateError("state: dispatch access must be read-only or write; change --access")
-    if access == "write" and role not in {"implementer", "worker", "oracle"}:
+    if access == "write" and role not in {"implementer", "oracle"}:
         raise StateError(
             f"state: dispatch role {role!r} cannot receive write access; reviewers and advice are read-only"
         )
     if access is not None:
         return access
-    return "write" if role in {"implementer", "worker"} else "read-only"
+    return "write" if role == "implementer" else "read-only"
 
 
 def _dispatch_intent(
@@ -1619,6 +1869,7 @@ def _dispatch_intent(
     acceptance: object = None,
     evidence: object = None,
 ) -> str:
+    role = _require_role(role)
     lane = _state_lane(state, lane_id)
     _reject_finished_lane(lane_id, lane)
     if lane.get("complete"):
@@ -1715,6 +1966,7 @@ def dispatch_run(
     acceptance: object = None,
     evidence: object = None,
 ) -> Path:
+    role = _require_role(role)
     path, state, plan = _state_context(change)
     coordination, runtime = _coordination_lane_for(state, plan, lane_id)
     merged_view = dict(state["lanes"][lane_id])
@@ -1798,6 +2050,7 @@ def dispatch_done(
     change: str | None = None,
     key: str | None = None,
 ) -> Path:
+    role = _require_role(role)
     path, state, plan = _state_context(change)
     coordination, runtime = _coordination_lane_for(state, plan, lane_id)
     merged_view = dict(state["lanes"][lane_id])
@@ -3399,6 +3652,7 @@ def lane_review(
     review_base: str | None = None,
     acceptance: object = None,
 ) -> Path:
+    role = _require_role(role)
     path, state, plan = _state_context(change)
     if combined:
         return _combined_lane_review(
@@ -3644,6 +3898,8 @@ def _combined_oracle_dispatch(
         if not isinstance(author, dict) or author is dispatch:
             continue
         author_access = author.get("access")
+        # Historical stores may use the retired "worker" label; it is never accepted for a new
+        # dispatch, but it still counts as an author-capable record for independence checks.
         authoring = author_access == "write" or (
             author_access is None and author.get("role") in {"implementer", "worker", "oracle"}
         )
@@ -3967,6 +4223,8 @@ def lane_mediate(
     change: str | None = None,
 ) -> Path:
     """Record an Oracle mediation for a lane that has used its two ordinary review rounds."""
+    if role is not None:
+        role = _require_role(role)
     path, state, plan = _state_context(change)
     lane = _state_lane(state, lane_id)
     _reject_finished_lane(lane_id, lane)
@@ -4753,8 +5011,15 @@ def _finish_integrated(state: dict[str, Any], coordination: dict[str, Any], repo
             raise StateError(f"finish: lane {lane_id} merge commit is not in integrated HEAD")
 
 
+def _one_check(check: object) -> str:
+    values = check if isinstance(check, list) else [check] if check is not None else []
+    if len(values) != 1 or not isinstance(values[0], str) or not values[0].strip():
+        raise StateError("finish: this action requires exactly one --check id")
+    return values[0].strip()
+
+
 def finish_record(action: str, classification: str | None = None, version: str | None = None,
-                  check: str | None = None, artifact: str | None = None,
+                  check: object = None, artifact: str | None = None,
                   inputs: list[str] | None = None, change: str | None = None,
                   inspections: list[str] | None = None) -> Path:
     """Bind repository-defined release artifacts to committed feature-branch inputs."""
@@ -4767,7 +5032,12 @@ def finish_record(action: str, classification: str | None = None, version: str |
     record = coordination.setdefault("finish", {})
     if action in {"classify", "restage"}:
         _finish_integrated(state, coordination, repository, head)
-        if not classification or not classification.strip() or not artifact or not inputs:
+        if action == "classify":
+            if not classification or not classification.strip():
+                raise StateError("finish: record the human release classification with --classification")
+        elif not (isinstance(classification, str) and classification.strip()):
+            classification = record.get("classification")
+        if not isinstance(classification, str) or not classification.strip() or not artifact or not inputs:
             raise StateError("finish: record human classification, release preparation --artifact, and committed --input paths")
         preparation_path = _required_document(artifact, "release preparation artifact")
         if action == "classify" and (record.get("evidence") or record.get("required_checks")):
@@ -4780,6 +5050,20 @@ def finish_record(action: str, classification: str | None = None, version: str |
                 required.setdefault(selected, item["inputs"])
             record["evidence"] = {}
             record["inspection"] = {}
+        declared_checks = [
+            value.strip() for value in (
+                check if isinstance(check, list) else [check] if check is not None else []
+            )
+            if isinstance(value, str) and value.strip()
+        ]
+        if declared_checks:
+            record["declared_checks"] = sorted(set(declared_checks))
+            existing = record.get("required_checks")
+            existing = existing if isinstance(existing, dict) else {}
+            record["required_checks"] = {
+                selected: list(existing.get(selected, []))
+                for selected in sorted(set(declared_checks))
+            }
         record.update({"classification": classification.strip(), "expected_version": version,
                        "classified_at": head,
                        "preparation": {"head": head, "artifact": preparation_path,
@@ -4797,8 +5081,14 @@ def finish_record(action: str, classification: str | None = None, version: str |
         if action in {"capture", "inspect", "pr-check"}:
             _finish_integrated(state, coordination, repository, head)
         if action == "capture":
-            if not check or not artifact or not inputs:
+            check = _one_check(check)
+            if not artifact or not inputs:
                 raise StateError("finish: capture requires check, artifact, and affected input paths")
+            declared = record.get("declared_checks")
+            if isinstance(declared, list) and check not in declared:
+                raise StateError(
+                    f"finish: check {check!r} was not declared at classify/restage; declare it first"
+                )
             artifact_path = Path(_required_document(artifact, "release evidence artifact"))
             required = record.setdefault("required_checks", {})
             declared = set(inputs)
@@ -4809,7 +5099,8 @@ def finish_record(action: str, classification: str | None = None, version: str |
                                "artifact": str(artifact_path), "sha256": _path_sha256(artifact_path),
                                "inputs": sorted(declared)}
         elif action == "inspect":
-            if not check or not artifact:
+            check = _one_check(check)
+            if not artifact:
                 raise StateError("finish: direct human inspection requires checkpoint and human record path")
             report_path = Path(_required_document(artifact, "human inspection artifact"))
             digest = _path_sha256(report_path)
@@ -4823,7 +5114,12 @@ def finish_record(action: str, classification: str | None = None, version: str |
             if verdict != "accept":
                 raise StateError("finish: human must personally record accept at this checkpoint; Oracle stand-in cannot inspect")
         elif action == "pr-check":
+            declared = record.get("declared_checks")
             required = record.get("required_checks", {})
+            if isinstance(declared, list) and set(declared) != set(evidence):
+                raise StateError(
+                    "finish: declared selected checks and captured evidence differ; capture every declared check"
+                )
             if not required or set(required) != set(evidence):
                 raise StateError("finish: selected checks missing final evidence; recapture before PR approval")
             if any(item.get("verdict") == "reject" for item in record.get("inspection", {}).values()):
@@ -4849,7 +5145,8 @@ def finish_record(action: str, classification: str | None = None, version: str |
                     _git_output(repository, "diff", "--name-only", item["head"], head, "--", *item["inputs"])):
                     raise StateError(f"finish: affected final evidence: {selected}")
         elif action == "check":
-            if not check or check not in evidence:
+            check = _one_check(check)
+            if check not in evidence:
                 raise StateError("finish: selected check has no final evidence")
             item = evidence[check]
             if item.get("preparation_sha256") != preparation_hash:
@@ -4868,8 +5165,95 @@ def finish_record(action: str, classification: str | None = None, version: str |
     return path
 
 
+def _check_docs(root: Path) -> None:
+    """Lint the core docs and helper for portable role/harness references."""
+    skill_files = [root / "SKILL.md"]
+    skill_files.extend(sorted((root / "workflow").glob("*.md")))
+    role_files = sorted((root / "subagent-roles").glob("*.md"))
+    skill_files.extend(role_files)
+    helper = root / "bin" / "featdev.py"
+    banned = [
+        r"\bpi\b", r"\bcodex\b", r"\borca\b", r"\bherdr\b", r"\bcaveman\b",
+        r"\bponytail\b", r"multi-lane", r"ORCA_WORKTREE_ID", r"spawn_agent",
+        r"fork_turns", r"bg_wait", r"children\.list", r"contact_supervisor",
+        r"lsp_", r"pi\.subagents", r"pi-subagents", r"\.agents/skills/",
+    ]
+    helper_text = helper.read_text(encoding="utf-8")
+    helper_scan = helper_text
+    lint_start = helper_text.find("def _check_docs")
+    lint_end = helper_text.find("\ndef _self_check(", lint_start)
+    if lint_start != -1 and lint_end != -1:
+        helper_scan = helper_text[:lint_start] + helper_text[lint_end:]
+    for path, text in [(path, path.read_text(encoding="utf-8")) for path in skill_files] + [
+        (helper, helper_scan)
+    ]:
+        for pattern in banned:
+            if re.search(pattern, text, flags=re.IGNORECASE):
+                raise AssertionError(f"doc lint: {path} contains banned pattern {pattern!r}")
+    docs_text = "\n".join(path.read_text(encoding="utf-8") for path in skill_files)
+    if "https://" in docs_text:
+        raise AssertionError("doc lint: docs must not contain external URLs")
+    if "https://" in helper_scan or helper_scan.count("http://") != 1:
+        raise AssertionError("doc lint: helper must not contain external URLs")
+    if "model-selection.json" in helper_scan or "capability-map.md" in helper_scan:
+        raise AssertionError("doc lint: featdev must not read coordinator-owned artifacts")
+    if "<change>/model-selection.json" in docs_text:
+        raise AssertionError("doc lint: model selection is repo-level, not per-change")
+    for required in (
+        ".agents/workflow/model-selection.json",
+        ".agents/workflow/capability-map.md",
+        "plan-reviews.json",
+    ):
+        if required not in docs_text:
+            raise AssertionError(f"doc lint: docs must mention {required!r}")
+    for required in ("plan-dispatch", "plan-review", "human-defer", "sync", "task-status"):
+        if required not in (root / "workflow" / "lane.md").read_text(encoding="utf-8"):
+            raise AssertionError(f"doc lint: lane.md must mention {required!r}")
+    if "Role: Runner" not in (root / "workflow" / "briefs-and-handoffs.md").read_text(encoding="utf-8"):
+        raise AssertionError("doc lint: briefs must include the Runner template")
+    for role_file in role_files:
+        text = role_file.read_text(encoding="utf-8")
+        for required in ("role_id:", "workflow/briefs-and-handoffs.md", "FEATDEV_SKILL_ROOT"):
+            if required not in text:
+                raise AssertionError(f"doc lint: {role_file} is missing {required!r}")
+    expected_roles = {
+        "implementer.md": "implementer",
+        "code-reviewer.md": "code",
+        "test-reviewer.md": "test",
+        "ui-reviewer.md": "ui",
+        "oracle.md": "oracle",
+        "runner.md": "runner",
+    }
+    for filename, role_id in expected_roles.items():
+        path = root / "subagent-roles" / filename
+        if not path.is_file():
+            raise AssertionError(f"doc lint: missing role file {filename}")
+        if f"role_id: {role_id}" not in path.read_text(encoding="utf-8"):
+            raise AssertionError(f"doc lint: {filename} must declare role_id: {role_id}")
+    if (root / "subagent-roles" / "reviewer.md").exists():
+        raise AssertionError("doc lint: the combined reviewer role file must be removed")
+    if "Mutation testing" not in (root / "subagent-roles" / "test-reviewer.md").read_text(encoding="utf-8"):
+        raise AssertionError("doc lint: test-reviewer must own mutation testing")
+    if "combined code/test" not in (root / "subagent-roles" / "code-reviewer.md").read_text(encoding="utf-8"):
+        raise AssertionError("doc lint: code-reviewer must document the ordinary combined duty")
+    lane_text = (root / "workflow" / "lane.md").read_text(encoding="utf-8")
+    table_commands = set(re.findall(r"^\|\s*`([a-z][a-z-]+)", lane_text, flags=re.MULTILINE))
+    parser = _parser()
+    subparsers = next(
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    parser_commands = set(subparsers.choices)
+    missing_from_parser = table_commands - parser_commands
+    if missing_from_parser:
+        raise AssertionError(f"doc lint: table commands absent from CLI: {sorted(missing_from_parser)}")
+    for command in parser_commands:
+        if not re.search(rf"\b{re.escape(command)}\b", docs_text):
+            raise AssertionError(f"doc lint: command {command!r} is not documented")
+
+
 def _self_check() -> int:
     """Exercise the plan, derived-state, tick, coordination, and merge gates."""
+    _check_docs(Path(__file__).resolve().parent.parent)
     original_cwd = Path.cwd()
     saved_environment = os.environ.copy()
     with tempfile.TemporaryDirectory(prefix="featdev-check-") as temporary:
@@ -4934,6 +5318,26 @@ def _self_check() -> int:
             assert result == 1, (arguments, result, stderr)
             assert contains in stderr, (arguments, stderr)
 
+        # Role IDs are one canonical vocabulary; aliases are rejected rather than normalized.
+        assert _require_role("code") == "code"
+        assert _require_role("runner") == "runner"
+        for rejected in ("worker", "code_reviewer", "ui-reviewer", "reviewer"):
+            try:
+                _require_role(rejected)
+            except StateError:
+                pass
+            else:
+                raise AssertionError(f"non-canonical role {rejected!r} was accepted")
+        assert _dispatch_access("implementer") == "write"
+        assert _dispatch_access("oracle", "write") == "write"
+        assert _dispatch_access("runner") == "read-only"
+        try:
+            _dispatch_access("code", "write")
+        except StateError:
+            pass
+        else:
+            raise AssertionError("a reviewer must not receive write access")
+
         # Documentation cannot silently restore the retired capture-before-version order:
         # classification/version (step 2) must precede the release-gate/capture step (step 3).
         finish_guidance = (Path(__file__).resolve().parent.parent / "workflow/finish.md").read_text()
@@ -4965,6 +5369,9 @@ def _self_check() -> int:
         commit(finish_repo, "release source")
         os.chdir(finish_repo)
         state_derive("finishcase")
+        expect_refusal("--change", "finishcase", "dispatch", "one", "worker",
+                       "--model", "local/model", "--level", "normal", "--task", "1.1",
+                       contains="not canonical")
         preparation = workflow_dir(finish_repo) / "finishcase" / "evidence" / "preparation.md"
         preparation.parent.mkdir(parents=True, exist_ok=True)
         preparation.write_text("Human classification: patch-release. Release metadata validated.\n")
@@ -4972,11 +5379,21 @@ def _self_check() -> int:
         artifact.write_text("passed")
         classify_args = ("--change", "finishcase", "finish-record", "classify", "--classification",
                          "patch-release", "--artifact", str(preparation),
-                         "--input", "release.txt", "--input", "generated.txt")
+                         "--input", "release.txt", "--input", "generated.txt", "--check", "a")
         expect_refusal(*classify_args, contains="not merged")
         expect_refusal("--change", "finishcase", "finish-record", "capture", "--check", "a",
                        "--artifact", str(artifact), "--input", "input-a", contains="classification")
         lane_open("one", "finishcase")
+        expect_refusal("--change", "finishcase", "lane-review", "one", "runner", "PASS",
+                       "--commit", "HEAD", "--report", "report.md", contains="not required")
+        legacy_ledger = _read_state(_coordination_path("finishcase"))
+        legacy_ledger["model_selection"] = {"legacy": True}
+        _atomic_write_json(_coordination_path("finishcase"), legacy_ledger)
+        dispatch_run("one", "runner", "local/model", "normal", "1.1",
+                     key="runner/test", change="finishcase")
+        runner_ledger = _read_state(_coordination_path("finishcase"))
+        assert runner_ledger["lanes"]["one"]["dispatches"][-1]["access"] == "read-only"
+        dispatch_done("one", "runner", "runner/session", change="finishcase", key="runner/test")
         worktree = _lane_worktree_path(state_derive("finishcase"), "one")
         dispatch_keys = []
         for index, task in enumerate(("1.1", "1.2", "1.1")):
@@ -4996,17 +5413,17 @@ def _self_check() -> int:
             dispatch_run("one", "implementer", "local/model", "normal", "1.1",
                          key="retry/one", change="finishcase")
         ledger = _read_state(_coordination_path("finishcase"))
-        assert len(ledger["lanes"]["one"]["dispatches"]) == 4
-        assert len(ledger["subagents"]) == 4
+        assert len(ledger["lanes"]["one"]["dispatches"]) == 5
+        assert len(ledger["subagents"]) == 5
         dispatch_done("one", "implementer", "retry-worker", change="finishcase", key="retry/one")
         coordination_sync("finishcase")
         ledger = _read_state(_coordination_path("finishcase"))
-        assert len(ledger["subagents"]) == 4
+        assert len(ledger["subagents"]) == 5
         assert all(row["status"] == "done" for row in ledger["subagents"])
         # A dispatch ID remains the identity even when the two records have different timestamps.
         ledger["subagents"][0]["started_at"] = "earlier"
         _backfill_subagents(ledger)
-        assert len(ledger["subagents"]) == 4
+        assert len(ledger["subagents"]) == 5
         for task in ("1.1", "1.2"):
             task_tick("one", task, "finishcase")
             head = commit(worktree, f"complete {task}")
@@ -5022,6 +5439,8 @@ def _self_check() -> int:
         assert closed_view["complete"] and closed_view["phase"] == "closed"
         assert closed_view["coordinator_status"] == "done"
         assert invoke(*classify_args)[0] == 0
+        expect_refusal("--change", "finishcase", "finish-record", "capture", "--check", "b",
+                       "--artifact", str(artifact), "--input", "input-b", contains="not declared")
         (finish_repo / "input-a").write_text("dirty")
         expect_refusal("--change", "finishcase", "finish-record", "capture", "--check", "a",
                        "--artifact", str(artifact), "--input", "input-a", contains="uncommitted")
@@ -5035,15 +5454,29 @@ def _self_check() -> int:
         expect_refusal("--change", "finishcase", "finish-record", "capture", "--check", "a",
                        "--artifact", str(artifact), "--input", "input-a", contains="release preparation inputs changed")
         preparation.write_text("Human classification: patch-release. Updated metadata validated.\n")
-        restage_args = tuple("restage" if value == "classify" else value for value in classify_args)
+        restage_args = ("--change", "finishcase", "finish-record", "restage",
+                        "--artifact", str(preparation),
+                        "--input", "release.txt", "--input", "generated.txt", "--check", "a")
         assert invoke(*restage_args)[0] == 0
-        expect_refusal("--change", "finishcase", "finish-record", "pr-check", contains="missing final evidence")
+        expect_refusal("--change", "finishcase", "finish-record", "pr-check",
+                       contains="declared selected checks")
         expect_refusal("--change", "finishcase", "finish-record", "capture", "--check", "a",
                        "--artifact", str(artifact), "--input", "input-b", contains="retain all")
         artifact.write_text("recaptured")
         assert invoke("--change", "finishcase", "finish-record", "capture", "--check", "a",
                       "--artifact", str(artifact), "--input", "input-a")[0] == 0
         assert invoke("--change", "finishcase", "finish-record", "check", "--check", "a")[0] == 0
+        assert invoke("--change", "finishcase", "finish-record", "pr-check")[0] == 0
+        assert invoke("--change", "finishcase", "finish-record", "restage",
+                      "--artifact", str(preparation),
+                      "--input", "release.txt", "--input", "generated.txt",
+                      "--check", "a", "--check", "b")[0] == 0
+        expect_refusal("--change", "finishcase", "finish-record", "pr-check",
+                       contains="declared selected checks")
+        assert invoke("--change", "finishcase", "finish-record", "capture", "--check", "a",
+                      "--artifact", str(artifact), "--input", "input-a")[0] == 0
+        assert invoke("--change", "finishcase", "finish-record", "capture", "--check", "b",
+                      "--artifact", str(artifact), "--input", "input-b")[0] == 0
         assert invoke("--change", "finishcase", "finish-record", "pr-check")[0] == 0
         (finish_repo / "input-b").write_text("changed")
         commit(finish_repo, "unrelated input")
@@ -6976,18 +7409,18 @@ def _self_check() -> int:
         assert missing_writer == 1 and "author-capable dispatch" in missing_writer_error, missing_writer_error
         implementer_dispatch["worker_run_id"] = "impl/session-1"
 
-        legacy_worker_dispatch = {
-            "role": "worker", "model": "provider/worker:legacy", "level": "normal", "task": "1.1",
-            "key": "worker/legacy-missing-id", "result": "ok",
+        legacy_implementer_dispatch = {
+            "role": "implementer", "model": "provider/implementer:legacy", "level": "normal", "task": "1.1",
+            "key": "implementer/legacy-missing-id", "result": "ok",
             "started_at": "2026-09-12T00:00:00Z", "lane_head": combined_head,
         }
-        combined_dispatches.append(legacy_worker_dispatch)
+        combined_dispatches.append(legacy_implementer_dispatch)
         _write_coordination(combined_state, combined_coordination, combined_plan)
-        missing_legacy_worker, _, missing_legacy_worker_error = invoke(*combined_review_arguments)
-        assert missing_legacy_worker == 1 and "author-capable dispatch" in missing_legacy_worker_error, (
-            missing_legacy_worker, missing_legacy_worker_error
+        missing_legacy_implementer, _, missing_legacy_implementer_error = invoke(*combined_review_arguments)
+        assert missing_legacy_implementer == 1 and "author-capable dispatch" in missing_legacy_implementer_error, (
+            missing_legacy_implementer, missing_legacy_implementer_error
         )
-        combined_dispatches.remove(legacy_worker_dispatch)
+        combined_dispatches.remove(legacy_implementer_dispatch)
 
         legacy_oracle_dispatch["worker_run_id"] = None
         _write_coordination(combined_state, combined_coordination, combined_plan)
@@ -7999,6 +8432,85 @@ def _self_check() -> int:
             "--change", "reviewflex", contains="reconcile it first",
         )
 
+        # Plan-phase dispatch and review are recorded before the plan approval commit, without a lane.
+        plan_repo = root / "planreview"
+        plan_repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(plan_repo)], check=True)
+        git(plan_repo, "config", "user.email", "self-check@example.com")
+        git(plan_repo, "config", "user.name", "Self Check")
+        plan_repo.joinpath("base.txt").write_text("base\n", encoding="utf-8")
+        commit(plan_repo, "base")
+        plan_dir = plan_repo / "openspec" / "changes" / "planreview" / "plan"
+        plan_dir.mkdir(parents=True)
+        plan_payload = {
+            "schema_version": 1,
+            "change": "planreview",
+            "lanes": {"one": {"risk": "ordinary", "ui": False, "screen": False,
+                               "sensitive": False, "depends_on": []}},
+            "tasks": {"1.1": {"lane": "one", "deps": []}},
+        }
+        plan_text = json.dumps(plan_payload)
+        (plan_dir / "graph-plan.json").write_text(plan_text, encoding="utf-8")
+        (plan_dir.parent / "tasks.md").write_text("- [ ] 1.1 first\n", encoding="utf-8")
+        os.chdir(plan_repo)
+        plan_head = _plan_head(plan_repo)
+        plan_reviews = workflow_dir(plan_repo) / "planreview" / "reviews"
+        plan_reviews.mkdir(parents=True)
+        plan_report = plan_reviews / "plan-oracle-r1.md"
+        plan_report.write_text("PASS\n", encoding="utf-8")
+        plan_dispatch("oracle", "local/model", "normal", "plan", report=str(plan_report),
+                      change="planreview")
+        plan_review("oracle", "PASS", plan_head, str(plan_report), change="planreview")
+        plan_ledger, plan_ledger_path = _load_plan_ledger("planreview", plan_repo)
+        assert plan_ledger_path.is_file()
+        assert len(plan_ledger["dispatches"]) == 1
+        assert plan_ledger["dispatches"][0]["result"] == "ok"
+        assert len(plan_ledger["reviews"]) == 1
+        assert plan_ledger["reviews"][0]["verdict"] == "PASS"
+
+        # A changed working-tree plan invalidates the dispatch; restoring it allows the verdict.
+        second_report = plan_reviews / "plan-oracle-r2.md"
+        second_report.write_text("PASS\n", encoding="utf-8")
+        plan_dispatch("oracle", "local/model", "normal", "plan", key="plan/r2",
+                      report=str(second_report), change="planreview")
+        (plan_dir / "graph-plan.json").write_text(json.dumps(plan_payload, indent=2), encoding="utf-8")
+        try:
+            plan_review("oracle", "PASS", plan_head, str(second_report), change="planreview")
+        except StateError as exc:
+            assert "changed" in str(exc), str(exc)
+        else:
+            raise AssertionError("a changed plan must invalidate the plan dispatch")
+        (plan_dir / "graph-plan.json").write_text(plan_text, encoding="utf-8")
+        plan_review("oracle", "PASS", plan_head, str(second_report), change="planreview")
+
+        # A third review needs a recorded mediation; a missing report is refused.
+        third_report = plan_reviews / "plan-oracle-r3.md"
+        third_report.write_text("PASS\n", encoding="utf-8")
+        plan_dispatch("oracle", "local/model", "normal", "plan", key="plan/r3",
+                      report=str(third_report), change="planreview")
+        try:
+            plan_review("oracle", "PASS", plan_head, str(third_report), change="planreview")
+        except StateError as exc:
+            assert "two-review limit" in str(exc), str(exc)
+        else:
+            raise AssertionError("a third plan review must require mediation")
+        mediation = plan_reviews / "plan-mediation.md"
+        mediation.write_text("root cause\n", encoding="utf-8")
+        plan_review("oracle", "PASS", plan_head, str(third_report), mediation=str(mediation),
+                    change="planreview")
+        plan_ledger, _ = _load_plan_ledger("planreview", plan_repo)
+        assert len(plan_ledger["reviews"]) == 3
+
+        missing_report = plan_reviews / "plan-oracle-missing.md"
+        plan_dispatch("oracle", "local/model", "normal", "plan", key="plan/missing",
+                      report=str(missing_report), change="planreview")
+        try:
+            plan_review("oracle", "PASS", plan_head, str(missing_report), change="planreview")
+        except StateError as exc:
+            assert "missing or empty" in str(exc), str(exc)
+        else:
+            raise AssertionError("a missing plan-review report must be refused")
+
         os.chdir(root)
 
 
@@ -8034,6 +8546,30 @@ def _parser() -> argparse.ArgumentParser:
     graph = commands.add_parser("plan-graph", help="print a read-only plan view")
     graph.add_argument("plan", type=Path, metavar="<plan.json>")
     graph.add_argument("--format", choices=("md", "mermaid"), default="md")
+
+    plan_send = commands.add_parser(
+        "plan-dispatch", help="record the Oracle plan-review dispatch intent before launch"
+    )
+    plan_send.add_argument("--role", default="oracle", metavar="<role>")
+    plan_send.add_argument("--model", required=True, metavar="<model>")
+    plan_send.add_argument("--level", required=True, metavar="<level>")
+    plan_send.add_argument("--task", default="plan", metavar="<task>")
+    plan_send.add_argument("--key", metavar="<key>", help="retry identity; new dispatches generate a unique key")
+    plan_send.add_argument("--report", metavar="<path>", help="Oracle plan-review report path")
+    plan_send.add_argument("--head", metavar="<sha>", help="feature HEAD; defaults to current")
+    plan_send.add_argument("--plan", type=Path, metavar="<plan.json>")
+    _add_change_option(plan_send)
+
+    plan_reviewed = commands.add_parser(
+        "plan-review", help="record the Oracle plan-review verdict against the working-tree plan"
+    )
+    plan_reviewed.add_argument("--role", default="oracle", metavar="<role>")
+    plan_reviewed.add_argument("verdict", choices=("PASS", "MORE WORK"), metavar="<PASS|MORE WORK>")
+    plan_reviewed.add_argument("--head", required=True, metavar="<sha>")
+    plan_reviewed.add_argument("--report", required=True, metavar="<path>")
+    plan_reviewed.add_argument("--mediation", metavar="<path>", help="required after two plan reviews")
+    plan_reviewed.add_argument("--plan", type=Path, metavar="<plan.json>")
+    _add_change_option(plan_reviewed)
 
     derive = commands.add_parser("state-derive", help="derive change state from committed artifacts")
     derive.add_argument("change", metavar="<change>")
@@ -8228,7 +8764,10 @@ def _parser() -> argparse.ArgumentParser:
     finish.add_argument("action", choices=("classify", "restage", "capture", "check", "inspect", "pr-check"))
     finish.add_argument("--classification", help="human release classification from repository policy")
     finish.add_argument("--version", help="optional version label; repository tooling validates the version")
-    finish.add_argument("--check", help="selected check id")
+    finish.add_argument(
+        "--check", action="append", dest="checks", metavar="<check>",
+        help="selected check id; repeat on classify/restage to declare the selected set",
+    )
     finish.add_argument("--artifact", help="gitignored receipt or manifest")
     finish.add_argument("--input", action="append", dest="inputs", help="tracked preparation or check input path (repeat)")
     finish.add_argument("--inspection", action="append", dest="inspections",
@@ -8277,6 +8816,20 @@ def main(argv: list[str] | None = None) -> int:
             plan = _load_json(args.plan)
             output = render_markdown(plan) if args.format == "md" else render_mermaid(plan)
             print(output, end="")
+            return 0
+        if args.command == "plan-dispatch":
+            path = plan_dispatch(
+                args.role, args.model, args.level, args.task, args.key, args.report,
+                args.head, selected_change, args.plan,
+            )
+            print(f"plan-dispatch: recorded {args.role} ({path})")
+            return 0
+        if args.command == "plan-review":
+            path = plan_review(
+                args.role, args.verdict, args.head, args.report, args.mediation,
+                selected_change, args.plan,
+            )
+            print(f"plan-review: recorded {args.role}={args.verdict} ({path})")
             return 0
         if args.command == "state-derive":
             state_derive(args.change, args.source_ref)
@@ -8360,7 +8913,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "finish-record":
             path = finish_record(args.action, args.classification, args.version,
-                                 args.check, args.artifact, args.inputs, selected_change, args.inspections)
+                                 args.checks, args.artifact, args.inputs, selected_change, args.inspections)
             print(f"finish-record: {args.action} ({path})")
             return 0
         if args.command == "dashboard":

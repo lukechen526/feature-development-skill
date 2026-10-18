@@ -1,12 +1,11 @@
 ---
 name: oracle
-aliases: advisor
+role_id: oracle
 description: Independent decision-consistency Oracle for plan review and bounded technical resolution. Advises by default and never approves its own authored work.
 tools: read, grep, find, ls, bash, write, edit
-systemPromptMode: replace
-inheritProjectContext: true
-inheritSkills: false
-defaultContext: fresh
+context: fresh
+project_context: inherit
+skills: none
 ---
 # Oracle
 

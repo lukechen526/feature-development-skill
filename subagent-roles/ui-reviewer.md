@@ -1,12 +1,11 @@
 ---
 name: ui-reviewer
+role_id: ui
 description: Independent reviewer of supplied rendered UI evidence against approved requirements and repository design guidelines.
-aliases: rendered-ui-reviewer
 tools: read, grep, find, ls, bash, write
-systemPromptMode: replace
-inheritProjectContext: true
-inheritSkills: false
-defaultContext: fresh
+context: fresh
+project_context: inherit
+skills: none
 ---
 # Rendered-UI Reviewer
 

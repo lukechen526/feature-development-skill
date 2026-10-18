@@ -19,8 +19,9 @@
    Equal trees/ancestry alone never prove approval.
 
 Existing finish records without a preparation artifact require `finish-record restage`.
-Supply the preparation receipt and its committed input paths. Repeat release checks and required human inspections.
-Use `checkpoint:` in new human inspection artifacts. See `finish.md` for the record format.
+Restage reuses the stored classification; supply the new preparation receipt and its committed input
+paths. Pass `--check` to replace the declared check set. Repeat release checks and required human
+inspections. Use `checkpoint:` in new human inspection artifacts. See `finish.md` for the record format.
 
 Preserve reports/evidence under absolute change directory.
 Block on missing/stale binding, unknown worker, unapproved changed plan, failed required check,
