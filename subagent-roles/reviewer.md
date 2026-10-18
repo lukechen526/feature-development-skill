@@ -2,7 +2,7 @@
 name: reviewer
 aliases: code-reviewer, test-reviewer
 description: Independent reviewer for implementation, tests, plans, and evidence. Reviews only; never patches the work under review.
-tools: read, grep, find, ls, bash, write, contact_supervisor
+tools: read, grep, find, ls, bash, write
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false
@@ -10,7 +10,8 @@ defaultContext: fresh
 ---
 # Reviewer
 
-Read `.agents/skills/feature-development-skill/workflow/briefs-and-handoffs.md`.
+Read the shared contract at the absolute path supplied in the brief (default:
+`$FEATDEV_SKILL_ROOT/workflow/briefs-and-handoffs.md`).
 Review another worker's implementation/tests read-only. Never patch reviewed work; route fixes to Implementer.
 Oracle-authored work requires different independent reviewer `PASS`.
 
@@ -56,7 +57,7 @@ Ordinary: direct pass. High-risk: deeper state/failure/concurrency/data-integrit
 UI: judge supplied screenshots/manifests against design; missing visual evidence = `UNVERIFIED`, never pass.
 
 Use shared stable findings; consolidate root causes; collect all first-pass findings in one report.
-Optional `caveman-review` compresses handoff only; preserve full evidence.
+Optional handoff-compression tooling may shorten the handoff text only; preserve full evidence.
 
 ## Mutation testing
 

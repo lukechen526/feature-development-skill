@@ -2450,52 +2450,14 @@ def _lane_worktree_root(state: dict[str, Any]) -> Path:
     """Resolve the directory that contains per-lane worktrees.
 
     Default is ``~/.agents/worktrees``. ``FEATDEV_LANE_WORKTREE_ROOT`` (absolute
-    path) is an explicit Coordinator override. Orca-managed checkouts keep the
-    same default root; tracking in Orca is achieved by registering the lane
-    worktree as a child of the feature worktree (see ``lane_open``), not by
-    relocating it.
+    path) is an explicit Coordinator override. A recorded lane worktree is
+    authoritative for that lane's lifetime; a tracker may attach metadata to it
+    but never relocates it.
     """
     override = os.environ.get("FEATDEV_LANE_WORKTREE_ROOT", "").strip()
     if override:
         return Path(override).expanduser().resolve()
     return Path.home() / ".agents" / "worktrees"
-
-
-def _register_orca_child_worktree(repository: Path, worktree_path: Path) -> None:
-    """Best-effort Orca registration of a lane worktree as a child of the feature worktree.
-
-    Keeps the lane worktree at its default ``~/.agents/worktrees`` location while making
-    it visible in Orca under the feature worktree's lineage. Registration is optional:
-    outside Orca, or when the ``orca`` CLI is unavailable, this silently does nothing and
-    the workflow is unaffected.
-    """
-    if not os.environ.get("ORCA_WORKTREE_ID", "").strip():
-        return
-    # Only register when the feature checkout itself is the Orca-managed worktree named
-    # by the environment; sandbox fixtures and unrelated checkouts must not leak into
-    # the caller's Orca workspace.
-    if repository.as_posix() not in os.environ["ORCA_WORKTREE_ID"]:
-        return
-    try:
-        result = subprocess.run(
-            [
-                "orca", "worktree", "set",
-                "--worktree", f"path:{worktree_path}",
-                "--parent-worktree", "current",
-                "--json",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return
-    if result.returncode != 0:
-        print(
-            f"lane: note: Orca registration of {worktree_path} failed: "
-            f"{_one_line(result.stderr or result.stdout)}",
-            file=sys.stderr,
-        )
 
 
 def _lane_worktree_path(state: dict[str, Any], lane_id: str) -> Path:
@@ -2561,8 +2523,8 @@ def _lane_runtime_for_operation(
     if isinstance(recorded_path, str) and recorded_path and isinstance(recorded_ref, str) and recorded_ref:
         worktree = Path(recorded_path).expanduser().resolve()
         # A recorded worktree is authoritative for the lane's lifetime: root resolution may
-        # change between open and later operations (for example an Orca checkout adopting
-        # child-worktree lanes), and in-flight lanes must keep their existing location.
+        # change between open and later operations (for example a checkout adopting child
+        # worktrees), and in-flight lanes must keep their existing location.
         if recorded_ref != expected_ref:
             raise StateError(f"lane: lane {lane_id!r} ref is not deterministic; reconcile it first")
         if _worktree_branch(repository, worktree) != recorded_ref:
@@ -3373,7 +3335,6 @@ def lane_open(lane_id: str, change: str | None = None) -> Path:
             raise StateError(f"lane: cannot create worktree: {_one_line(result.stderr)}; retry after repair")
     if _worktree_branch(repository, expected_path) != expected_ref or not _ref_sha(repository, expected_ref):
         raise StateError(f"lane: worktree creation did not produce the expected ref {expected_ref}; reconcile it")
-    _register_orca_child_worktree(repository, expected_path)
     runtime["phase"] = "writing"
     _write_coordination(state, coordination, plan)
     return path
@@ -3395,9 +3356,9 @@ def lane_close(lane_id: str, change: str | None = None) -> Path:
         raise StateError(f"lane: lane {lane_id!r} cleanup ref is not deterministic; reconcile it first")
     # A recorded worktree is authoritative for the lane's lifetime (matching
     # _lane_runtime_for_operation): root resolution may change between open and
-    # close (FEATDEV_LANE_WORKTREE_ROOT override, Orca child-worktree adoption),
-    # so cleanup targets the recorded location and only falls back to the
-    # computed path when nothing was recorded.
+    # close (FEATDEV_LANE_WORKTREE_ROOT override, child-worktree adoption), so
+    # cleanup targets the recorded location and only falls back to the computed
+    # path when nothing was recorded.
     recorded_path = Path(recorded_path).expanduser().resolve() if recorded_path else expected_path
     recorded_ref = recorded_ref or expected_ref
     registered_branch = _worktree_branch(repository, recorded_path)
@@ -4985,7 +4946,9 @@ def _self_check() -> int:
         assert "The release gate (step 1)" not in finish_guidance
         role_directory = Path(__file__).resolve().parent.parent / "subagent-roles"
         for role_file in role_directory.glob("*.md"):
-            assert ".agents/skills/feature-development-skill/workflow/briefs-and-handoffs.md" in role_file.read_text()
+            role_text = role_file.read_text()
+            assert "workflow/briefs-and-handoffs.md" in role_text
+            assert "FEATDEV_SKILL_ROOT" in role_text
 
         # Normal dispatches, cleanup, and release recording work without application-specific files.
         finish_repo = make_repository("finishcase", "finishcase", {

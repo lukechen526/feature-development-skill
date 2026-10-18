@@ -31,7 +31,7 @@ Lost coordination: re-review/renew approval, never lose committed completion.
 No initialization. After approved planning commit:
 
 ```bash
-python3 .agents/skills/feature-development-skill/bin/featdev.py --change <change> state-derive <change>
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> state-derive <change>
 ```
 
 Default source: committed plan/tasks at feature `HEAD`; record source SHA.
@@ -40,7 +40,8 @@ Refresh after plan/task-artifact commits and before first lane mutation.
 
 ## Commands
 
-Standard-library CLI: `.agents/skills/feature-development-skill/bin/featdev.py`; no repository-specific constants.
+Standard-library CLI: `"$FEATDEV_SKILL_ROOT/bin/featdev.py"`; no repository-specific constants.
+`FEATDEV_SKILL_ROOT` is resolved by the Step 0 preflight (`roles-and-models.md`) and never hardcoded.
 Commands discover state; pass global `--change <change>` when ambiguous. No run id.
 Use command `--help` for flags; `…` below denotes required flags.
 
@@ -76,7 +77,7 @@ If affected checks cannot be determined, use the repository's documented fallbac
 Before any lane implementation dispatch, Coordinator runs:
 
 ```bash
-python3 .agents/skills/feature-development-skill/bin/featdev.py --change <change> lane-open <lane-id>
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> lane-open <lane-id>
 ```
 
 On first open, `lane-open` creates a new isolated git worktree from feature `HEAD`:
@@ -84,11 +85,10 @@ On first open, `lane-open` creates a new isolated git worktree from feature `HEA
 Worktree root: `FEATDEV_LANE_WORKTREE_ROOT` (absolute path) overrides the default; it is
 always a location under Coordinator control, never relocated per environment.
 
-Orca tracking: when the session runs inside Orca (`ORCA_WORKTREE_ID` present), `lane-open`
-additionally registers the new lane worktree via `orca worktree set --worktree path:<lane>
---parent-worktree path:<feature-checkout>` so Orca lists it as a **child worktree of the
-feature worktree** while the worktree stays at its `~/.agents/worktrees` location.
-Registration is best-effort and never blocks the workflow; failures print a note.
+Optional worktree registration: when the environment exposes a worktree-tracking command, the
+Coordinator may register the new lane worktree as a child of the feature worktree while the worktree
+stays at its `~/.agents/worktrees` location. Registration is best-effort and never blocks the
+workflow; failures print a note. The workflow itself never depends on a specific tracker.
 
 A lane's recorded worktree path is authoritative for its lifetime. This setup is mandatory;
 recovery reuses the lane worktree/ref, never the feature checkout.
@@ -166,9 +166,9 @@ brief to `.agents/workflow/<change>/briefs/<lane>-<role>-<task>.md` and hand the
 Record intent before starting worker:
 
 ```bash
-python3 .agents/skills/feature-development-skill/bin/featdev.py \
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
   --change <change> dispatch <lane-id> <role> \
-  --model <provider/model:level> --level <level> --task <task-id> [--key <key>] \
+  --model <provider/model> --level <level> --task <task-id> [--key <key>] \
   [--access <read-only|write>] [--acceptance <path>] [--evidence <path>]
 ```
 
@@ -194,7 +194,7 @@ The ONLY permitted `tasks.md` change is flipping your assigned tasks' checkboxes
 notes, sub-bullets, or wording edits there; records belong in the lane report:
 
 ```bash
-python3 .agents/skills/feature-development-skill/bin/featdev.py \
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
   --change <change> task-tick <lane-id> <task-id>
 ```
 
@@ -209,18 +209,17 @@ Use `--key` only to retry the same recorded dispatch. Use a new key for a correc
 After worker returns, Coordinator closes the exact dispatch:
 
 ```bash
-python3 .agents/skills/feature-development-skill/bin/featdev.py \
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
   --change <change> dispatch-done <lane-id> <role> --key <dispatch-key> \
   [--worker-run-id <worker-run-id>] [--tokens <n>] [--cost <x>] [--result <ok|failed>]
 ```
 
-Writer window: 60 minutes per implementation dispatch (pass `timeoutMs: 3600000` when
-spawning the worker subagent); require resumable commits. On timeout, resume-first: recover
-the run id via `subagent status`/`children.list` and revive with `subagent resume` (async
-runs keep their session 30 days; only stopped runs are non-resumable) — fresh worker from
-the live report only if revive fails.
-On timeout, inspect progress. Extend only with commit/gate progress; otherwise reset to last verified commit
-or consult Oracle about technical gap before redispatch. Never exceed applicable reset authorization.
+Writer deadline: 60 minutes per implementation dispatch (or the preflighted harness limit, whichever is
+shorter); require commits that a fresh worker can continue from. On deadline, inspect progress. If the
+harness supports continuation, continue the child; otherwise dispatch a fresh same-role worker from the
+live report. Extend only with commit/gate progress; otherwise reset to the last verified commit or
+consult the Oracle about the technical gap before redispatching. Never exceed applicable reset
+authorization.
 
 ## Testing and evidence
 
@@ -239,7 +238,7 @@ The Coordinator records a per-lane review-duty decision for code, test, and UI d
 (`full`, `focused`, or `skip`) with risk factors, acceptance coverage, checks, and rationale:
 
 ```bash
-python3 .agents/skills/feature-development-skill/bin/featdev.py --change <change> review-decision <lane-id> \
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> review-decision <lane-id> \
   --code <full|focused|skip> --test <full|focused|skip> --ui <full|focused|skip> \
   --risk-factor <factor>… --acceptance-coverage "<criteria the duties cover>" \
   --check "<runnable check>"… --rationale "<why>" [--opt-in]
@@ -260,7 +259,7 @@ An earlier ordinary-agent `PASS` at an ancestor commit can satisfy a later HEAD 
 Coordinator records the assessed intervening change:
 
 ```bash
-python3 .agents/skills/feature-development-skill/bin/featdev.py --change <change> review-reuse <lane-id> <role> \
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> review-reuse <lane-id> <role> \
   --ancestor <ancestor-sha> --intervening-diff <diff-file> \
   --assessment "<what the intervening change does not touch>" \
   [--evidence-inputs-changed yes|no]
@@ -291,7 +290,7 @@ Required passes: ordinary = combined code/test; high = separate independent code
 Coordinator records verdict before correction:
 
 ```bash
-python3 .agents/skills/feature-development-skill/bin/featdev.py \
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
   --change <change> lane-review <lane-id> <role> <PASS|MORE WORK> \
   --commit <head-sha> --report <absolute-report-path> \
   [--evidence-revision <rev>] [--evidence <path>]
@@ -318,7 +317,7 @@ Keep the plan-required reviews and human checkpoints. Record any repository-auth
 A lane merge integrates work into the feature branch. It never authorizes a PR merge into the target branch.
 
 ```bash
-python3 .agents/skills/feature-development-skill/bin/featdev.py \
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
   --change <change> human-gate <lane-id> \
   --state <waiting|approved|rejected|revoked> --commit <head-sha> --evidence-revision <rev> [--evidence <path>]
 ```
@@ -326,7 +325,7 @@ python3 .agents/skills/feature-development-skill/bin/featdev.py \
 Recorded human authorization may permit independent Oracle stand-in:
 
 ```bash
-python3 .agents/skills/feature-development-skill/bin/featdev.py \
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
   --change <change> human-gate <lane-id> \
   --state approved --commit <head-sha> --evidence-revision <rev> \
   --approved-by oracle --authorization <grant.json> --stand-in-report <report.md> \
@@ -406,7 +405,7 @@ A recorded human decision trumps the review gates only. When the human explicitl
 merge against the review gates, Coordinator may run:
 
 ```bash
-python3 .agents/skills/feature-development-skill/bin/featdev.py --change <change> lane-merge <lane-id> \
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> lane-merge <lane-id> \
   --human-override --override-reason "<the human decision>"
 ```
 
@@ -436,8 +435,8 @@ Other task-status changes/mismatches block. Exclude inherited earlier-lane ticks
 Feature branch moved: non-fast-forward merge preserving reviewed SHA/tree; never rebase passed lane.
 
 ```bash
-python3 .agents/skills/feature-development-skill/bin/featdev.py --change <change> lane-merge <lane-id>
-python3 .agents/skills/feature-development-skill/bin/featdev.py --change <change> lane-close <lane-id>
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> lane-merge <lane-id>
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> lane-close <lane-id>
 ```
 
 Combined mode: Oracle supplies the lane code/test and complete-change implementation review.

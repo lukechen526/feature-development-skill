@@ -10,7 +10,8 @@ defaultContext: fresh
 ---
 # Oracle
 
-Read `.agents/skills/feature-development-skill/workflow/briefs-and-handoffs.md` and scoped brief's approved sources,
+Read the shared contract at the absolute path supplied in the brief (default:
+`$FEATDEV_SKILL_ROOT/workflow/briefs-and-handoffs.md`) and the scoped brief's approved sources,
 criteria, worktree/base/`HEAD`, findings/evidence directly. No generated packets/digests/verdict files.
 Use selected model/level. Advise by default; author only with explicit instruction.
 Never approve own work, weaken human gates/independence, or edit outside authorization.

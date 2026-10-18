@@ -41,8 +41,8 @@ Material finding: stable ID | P0/P1/P2 | location | trigger | violated requireme
 minimal fix | observable closure check. Consolidate one root cause.
 One-line handoffs allowed; reports retain evidence/limitations.
 
-Optional installed adapters: `caveman` for handoffs; `caveman-review` for findings;
-`caveman-explore`/Cavecrew for localization justified by approved plan.
+Optional handoff-compression tooling may shorten the handoff text only; it never replaces evidence,
+paths, or exact SHAs.
 Never change selected models, roles, rules, or evidence.
 Read exact paths; return decisive output. Avoid duplicate reports/status dumps and unbounded logs.
 
@@ -55,6 +55,7 @@ Missing inputs block; never invent evidence. Plain instructions, not review pack
 
 ```text
 Role: Implementer | lane: <id> | tasks: <ids>
+Role source: <absolute path to the role file> | profile: <id or sha256>
 Worktree: <absolute path> | base: <SHA> | starting HEAD: <SHA>
 Sources: <role brief; repository rules; plan; relevant spec/design sections>
 Scope: <owned files/seams; dependencies; explicit exclusions>
@@ -69,6 +70,7 @@ Require all assigned tasks, committed work/ticks, clean tree. Specify behavior, 
 
 ```text
 Role: <code/test/UI/Oracle> | lane: <id> | mode: <initial/correction/impact>
+Role source: <absolute path to the role file> | profile: <id or sha256>
 UI reviewer briefs: evidence-ingest only — never launch/build/capture; judge supplied screenshots/manifests.
 Worktree: <absolute path> | review range: <base SHA>..<HEAD SHA>
 Sources: <role brief; rules; plan; relevant spec/design; task definitions>
@@ -90,6 +92,7 @@ These are lane candidate inputs, not final release approval. Keep integrated rel
 
 ```text
 Lane: <id> | previous reviewed SHA: <SHA> | current HEAD: <SHA>
+Role source: <absolute path to the role file> | profile: <id or sha256>
 Findings: <report paths; stable IDs; agreed closure checks>
 Changed inputs: <only changed sources, evidence, or decisions>
 Verify: <affected commands and evidence to refresh>
@@ -102,6 +105,7 @@ Wait for complete first-pass batch. Resolve disagreements before dependent edits
 
 ```text
 Operation: technical_resolution (read-only) | lane: <id> | HEAD: <SHA>
+Role source: <absolute path to the role file> | profile: <id or sha256>
 Decision needed: <one concrete question>
 Sources: <relevant requirement, code, and finding paths>
 Conflict or failure: <exact evidence; attempted approaches and results>

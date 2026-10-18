@@ -35,7 +35,7 @@ Committed contract only; no run-scoped paths/evidence.
 ```json
 {
   "schema_version": 1,
-  "change": "meal-logging",
+  "change": "example-change",
   "lanes": {
     "store": {
       "risk": "high",
@@ -94,9 +94,9 @@ Candidate acceptance and evidence do not replace integrated release evidence.
 ## Validate
 
 ```bash
-python3 .agents/skills/feature-development-skill/bin/featdev.py \
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
   plan-validate openspec/changes/<change>/plan/graph-plan.json --tasks openspec/changes/<change>/tasks.md
-python3 .agents/skills/feature-development-skill/bin/featdev.py \
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
   plan-graph openspec/changes/<change>/plan/graph-plan.json --format md
 ```
 
