@@ -1782,6 +1782,7 @@ def _status_view(state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
     for lane_id, lane in view.get("lanes", {}).items():
         if isinstance(lane, dict):
             lane["phase"] = _coordination_phase_for_display(lane, change, plan)
+            lane["inflight"] = _inflight_task_status(view, lane, plan)
             lane["human_gate"] = _human_gate_summary(
                 lane_id, lane, view.get("human_gates"), coordination_available, view.get("authorizations"),
                 view.get("review_policy") == "risk-based" and change != _SELF_REVIEW_CHANGE,

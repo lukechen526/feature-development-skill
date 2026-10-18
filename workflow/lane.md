@@ -111,6 +111,11 @@ until the Coordinator has recorded it. On every update, in this order:
 4. Write the lane phase: `writing`, `reviewing`, `fixing`, `awaiting-gate`, `merging`, `merged`.
 5. Refresh the dashboard or status view the human reads, and state the change in one line.
 
+Lane progress before merge is committed on the lane ref, not on the feature branch. `status --json` reports
+it per lane as `inflight` (for example `in-flight only (lane ref): 4/11`); `dashboard` shows it in its own
+column. The feature-branch view stays unchecked until `lane-merge`, which is what makes ticks authoritative.
+To inspect a lane candidate directly, run `state-derive <change> --ref featdev/<change>-<lane>`.
+
 Never leave a subagent update only in chat. `featdev status --json` must answer, at any moment, which
 lane is complete, which is in progress, which is under review, and what each lane is waiting for. When a
 record and an artifact disagree, the artifact wins and the record is corrected; never the reverse.
