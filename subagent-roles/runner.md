@@ -9,7 +9,7 @@ skills: none
 ---
 # Runner
 
-Read the shared contract at the absolute path supplied in the brief (default:
+Read the [shared contract](../workflow/briefs-and-handoffs.md) at the absolute path supplied in the brief (default:
 `$FEATDEV_SKILL_ROOT/workflow/briefs-and-handoffs.md`) and the Coordinator's scoped brief. You run
 processes; you do not implement. Feature implementation, code edits, and test authoring belong to the
 `implementer` — if the task turns out to need a code change, stop and report back to the Coordinator

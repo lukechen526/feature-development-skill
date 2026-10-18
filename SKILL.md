@@ -2,7 +2,7 @@
 name: feature-development-skill
 description: Coordinate an OpenSpec feature from approved plan through isolated lane implementation, independent review, gated integration, and release preparation. Use when a feature needs multi-task orchestration, plan/lane reviews, and human approval checkpoints; not for standalone edits or explanations.
 license: MIT
-compatibility: "Requires the openspec CLI, a fresh-context subagent launch capability (preflighted per harness), and the role files in subagent-roles/."
+compatibility: "Requires Python 3.9+, Git with worktree support, the OpenSpec CLI, and a harness that supports fresh-context subagents, working-directory selection, and role prompt injection."
 ---
 # Multi-Phase Feature Development Workflow
 
@@ -41,12 +41,12 @@ isolation, independent review, and gated integration.
 | Role ID | Responsibility | Authority |
 |---|---|---|
 | Coordinator | Plan, dispatch, record, review gates, lane merges, finish sequence | No implementation patches; no self-approval |
-| `implementer` | Implementation, tests, ticks, live report | Writes only the assigned lane worktree |
-| `code` | Implementation/task completeness; ordinary lanes also cover test adequacy | Read-only review; never patches |
-| `test` | Test adequacy, coverage, quality, fixtures, mutation testing | Read-only review; high-risk or selected test duty |
-| `ui` | Supplied rendered-UI evidence against approved requirements | Read-only review; never launches the app |
-| `oracle` | Plan review, mediation, authorized bounded fixes | Advice by default; authors only with explicit authorization |
-| `runner` | Long-running checks, builds, captures, external polling | Observations only; never issues a verdict |
+| [`implementer`](subagent-roles/implementer.md) | Implementation, tests, ticks, live report | Writes only the assigned lane worktree |
+| [`code`](subagent-roles/code-reviewer.md) | Implementation/task completeness; ordinary lanes also cover test adequacy | Read-only review; never patches |
+| [`test`](subagent-roles/test-reviewer.md) | Test adequacy, coverage, quality, fixtures, mutation testing | Read-only review; high-risk or selected test duty |
+| [`ui`](subagent-roles/ui-reviewer.md) | Supplied rendered-UI evidence against approved requirements | Read-only review; never launches the app |
+| [`oracle`](subagent-roles/oracle.md) | Plan review, mediation, authorized bounded fixes | Advice by default; authors only with explicit authorization |
+| [`runner`](subagent-roles/runner.md) | Long-running checks, builds, captures, external polling | Observations only; never issues a verdict |
 | Human | Model choices, approvals, release classification, PR merge | Sole source of consent |
 
 ## Workflow at a glance
@@ -106,7 +106,7 @@ Each step completes (including its human/approval gate, where present) before th
 resuming an interrupted run, re-derive from committed artifacts and continue at the current step; never
 restart completed steps merely to follow this router.
 
-1. **Step 1 — Preflight, roles, models, provisioning** (`workflow/preflight-and-roles.md`): run the harness
+1. **Step 1 — Preflight, roles, models, provisioning** ([workflow/preflight-and-roles.md](workflow/preflight-and-roles.md)): run the harness
    capability preflight once per repository/harness, record the repo-level capability map at
    `.agents/workflow/capability-map.md`, and resolve the skill root. Ask the human, through the harness's
    user-question tool, which model and thinking level each role uses, offering only choices the harness
@@ -114,11 +114,11 @@ restart completed steps merely to follow this router.
    `.agents/workflow/model-selection.json`. Define the role agents with the harness's native subagent
    tooling, or compose the role prompt when no registry exists; verify each role receives its profile;
    lock the dispatch mechanism. No role dispatch happens before this step completes.
-2. **Step 2 — Plan** (`workflow/plan.md`): author `plan/graph-plan.json` plus the OpenSpec artifacts,
+2. **Step 2 — Plan** ([workflow/plan.md](workflow/plan.md)): author `plan/graph-plan.json` plus the OpenSpec artifacts,
    validate them, record the Oracle plan-review dispatch with `plan-dispatch`, record its verdict with
    `plan-review`, obtain explicit human approval, and commit the approval checkpoint naming the
    approver. NO implementation dispatch before that checkpoint commit.
-3. **Step 3 — Lanes** (`workflow/lane.md`):
+3. **Step 3 — Lanes** ([workflow/lane.md](workflow/lane.md)):
    - dispatch one fresh implementer subagent per task;
    - implement, review, correct, and integrate lanes;
    - record every dispatch result, tick, review, and lane phase in the coordinator store before doing
@@ -129,14 +129,14 @@ restart completed steps merely to follow this router.
      --override-reason`, waiving review duties only);
    - delegate long checks or external polling to the read-only Runner when appropriate; Runner reports
      observations and never issues a verdict.
-4. **Step 4 — Finish** (`workflow/finish.md`): obtain the human release classification, apply
+4. **Step 4 — Finish** ([workflow/finish.md](workflow/finish.md)): obtain the human release classification, apply
    version/generated changes and commit the preparation, then run `finish-record classify` with the
    selected checks, capture, required human inspections, and `pr-check`. Ask separately for approval to
    open the PR; the human decides whether to merge it.
-5. **Recovery** (`workflow/recovery.md`, any step): re-derive from committed artifacts and recorded
+5. **Recovery** ([workflow/recovery.md](workflow/recovery.md), any step): re-derive from committed artifacts and recorded
    bindings; never infer approval from missing scratch or chat history.
 
-Before any dispatch, the Coordinator reads `workflow/briefs-and-handoffs.md` and sends only the relevant
+Before any dispatch, the Coordinator reads [workflow/briefs-and-handoffs.md](workflow/briefs-and-handoffs.md) and sends only the relevant
 filled template. Every role handoff follows that contract.
 
 ## Context and stopping rules

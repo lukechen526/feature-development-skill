@@ -5165,12 +5165,26 @@ def finish_record(action: str, classification: str | None = None, version: str |
     return path
 
 
+def _check_local_links(paths: list[Path]) -> None:
+    """Check local inline Markdown links without network access."""
+    # shortcut: inline links only; extend this if the docs adopt reference-style links.
+    for path in paths:
+        text = re.sub(r"```.*?```", "", path.read_text(encoding="utf-8"), flags=re.DOTALL)
+        for href in re.findall(r"\[[^\]\n]+\]\(([^\s)]+)\)", text):
+            target = urlparse(href)
+            if target.scheme or not target.path:
+                continue
+            if not (path.parent / target.path).exists():
+                raise AssertionError(f"doc lint: broken local link {href!r} in {path}")
+
+
 def _check_docs(root: Path) -> None:
     """Lint the core docs and helper for portable role/harness references."""
     skill_files = [root / "SKILL.md"]
     skill_files.extend(sorted((root / "workflow").glob("*.md")))
     role_files = sorted((root / "subagent-roles").glob("*.md"))
     skill_files.extend(role_files)
+    _check_local_links(skill_files + list(root.glob("README.md")) + sorted((root / "examples").glob("*.md")))
     helper = root / "bin" / "featdev.py"
     banned = [
         r"\bpi\b", r"\bcodex\b", r"\borca\b", r"\bherdr\b", r"\bcaveman\b",
@@ -5258,6 +5272,21 @@ def _self_check() -> int:
     saved_environment = os.environ.copy()
     with tempfile.TemporaryDirectory(prefix="featdev-check-") as temporary:
         root = Path(temporary)
+        link_doc = root / "links.md"
+        link_target = root / "target.md"
+        link_target.write_text("# Target\n", encoding="utf-8")
+        link_doc.write_text(
+            "[target](target.md) [section](#section) [mail](mailto:reader@example.test)\n"
+            "```text\n[example](not-a-real-file.md)\n```\n", encoding="utf-8",
+        )
+        _check_local_links([link_doc])
+        link_doc.write_text("[missing](missing.md)\n", encoding="utf-8")
+        try:
+            _check_local_links([link_doc])
+        except AssertionError as exc:
+            assert "broken local link" in str(exc), str(exc)
+        else:
+            raise AssertionError("a broken local Markdown link must fail the self-check")
         isolated_home = root / "home"
         isolated_home.mkdir()
         # Git has several environment channels. Clear all of them so the check cannot

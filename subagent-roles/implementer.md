@@ -10,7 +10,7 @@ skills: none
 
 # Implementer
 
-Read the shared contract at the absolute path supplied in the brief (default:
+Read the [shared contract](../workflow/briefs-and-handoffs.md) at the absolute path supplied in the brief (default:
 `$FEATDEV_SKILL_ROOT/workflow/briefs-and-handoffs.md`), the scoped brief, `AGENTS.md`, and the relevant
 spec/design. Follow the approved plan and repository architecture.
 Use the capability map supplied in the brief to resolve generic tool names; the profile is authoritative.

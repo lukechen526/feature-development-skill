@@ -4,7 +4,7 @@ All roles read this contract. Approved sources and repository rules override bri
 
 ## Context
 
-Use fresh scoped briefs from Coordinator's `briefs-and-handoffs.md`; never fork/copy Coordinator history.
+Use fresh scoped briefs from Coordinator's [briefs-and-handoffs.md](briefs-and-handoffs.md); never fork/copy Coordinator history.
 Preserve role/tasks, criteria, dependencies, owned seams, exclusions, reviewer remit, sources,
 worktree/base/`HEAD`, check owner, report/evidence paths/revision, receipt fields.
 

@@ -113,12 +113,12 @@ Rules:
 
 | Role ID | Role file | Review duty |
 |---|---|---|
-| `implementer` | `subagent-roles/implementer.md` | Implementation, tests, fixes |
-| `code` | `subagent-roles/code-reviewer.md` | Implementation/task completeness; ordinary lanes also own the combined code/test review |
-| `test` | `subagent-roles/test-reviewer.md` | Test adequacy/coverage/quality and mutation testing; high-risk lanes or an explicitly selected separate test duty |
-| `ui` | `subagent-roles/ui-reviewer.md` | Supplied rendered-UI evidence |
-| `oracle` | `subagent-roles/oracle.md` | Plan review, mediation, authorized fixes, combined review |
-| `runner` | `subagent-roles/runner.md` | Long checks and polling; observations only, no verdict |
+| `implementer` | [subagent-roles/implementer.md](../subagent-roles/implementer.md) | Implementation, tests, fixes |
+| `code` | [subagent-roles/code-reviewer.md](../subagent-roles/code-reviewer.md) | Implementation/task completeness; ordinary lanes also own the combined code/test review |
+| `test` | [subagent-roles/test-reviewer.md](../subagent-roles/test-reviewer.md) | Test adequacy/coverage/quality and mutation testing; high-risk lanes or an explicitly selected separate test duty |
+| `ui` | [subagent-roles/ui-reviewer.md](../subagent-roles/ui-reviewer.md) | Supplied rendered-UI evidence |
+| `oracle` | [subagent-roles/oracle.md](../subagent-roles/oracle.md) | Plan review, mediation, authorized fixes, combined review |
+| `runner` | [subagent-roles/runner.md](../subagent-roles/runner.md) | Long checks and polling; observations only, no verdict |
 
 The same role ID is used in the role file's `role_id`, `model-selection.json`, the positional role in
 `dispatch <lane> <role>` and `lane-review <lane> <role> <verdict>`, and `review-decision` duties.

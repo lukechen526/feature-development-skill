@@ -9,7 +9,7 @@ skills: none
 ---
 # Test Reviewer
 
-Read the shared contract at the absolute path supplied in the brief (default:
+Read the [shared contract](../workflow/briefs-and-handoffs.md) at the absolute path supplied in the brief (default:
 `$FEATDEV_SKILL_ROOT/workflow/briefs-and-handoffs.md`).
 Review test adequacy, coverage, and quality read-only. Never patch reviewed work; route fixes to
 Implementer. Use the capability map supplied in the brief to resolve generic tool names; the profile is

@@ -1,6 +1,6 @@
 # Recovery
 
-1. Re-derive committed view (`lane.md` § Derived state); inspect surviving worktrees/refs.
+1. Re-derive committed view ([lane.md](lane.md) § Derived state); inspect surviving worktrees/refs.
 2. Missing dispatch/review record: redo affected work/review, never infer completion/approval.
    Unprovable current human approval: repeat checkpoint.
    Missing decision records are not recoverable from scratch: the standard review gate applies.
@@ -21,7 +21,7 @@
 Existing finish records without a preparation artifact require `finish-record restage`.
 Restage reuses the stored classification; supply the new preparation receipt and its committed input
 paths. Pass `--check` to replace the declared check set. Repeat release checks and required human
-inspections. Use `checkpoint:` in new human inspection artifacts. See `finish.md` for the record format.
+inspections. Use `checkpoint:` in new human inspection artifacts. See [finish.md](finish.md) for the record format.
 
 Preserve reports/evidence under absolute change directory.
 Block on missing/stale binding, unknown worker, unapproved changed plan, failed required check,

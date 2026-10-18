@@ -1,6 +1,6 @@
 # Lane phase
 
-Use approved cohesive lane boundaries (`plan.md`). Implement/tick every assigned task,
+Use approved cohesive lane boundaries ([plan.md](plan.md)). Implement/tick every assigned task,
 review complete lane diff at current `HEAD`, merge bound passing work, close.
 
 ## Derived state
@@ -48,7 +48,7 @@ Refresh after plan/task-artifact commits and before first lane mutation.
 ## Commands
 
 Standard-library CLI: `"$FEATDEV_SKILL_ROOT/bin/featdev.py"`; no repository-specific constants.
-`FEATDEV_SKILL_ROOT` is resolved by the Step 0 preflight (`preflight-and-roles.md`) and never hardcoded.
+`FEATDEV_SKILL_ROOT` is resolved by the Step 0 preflight ([preflight-and-roles.md](preflight-and-roles.md)) and never hardcoded.
 Commands discover state; pass global `--change <change>` when ambiguous. No run id.
 Use command `--help` for flags; `…` below denotes required flags.
 
@@ -154,7 +154,7 @@ Before reviewer dispatch, confirm clean lane worktree, all assigned top-level ti
 check outcomes, current base/`HEAD`. Return missing items to Implementer.
 Procedural check only: no approval, generated review package, or round change.
 
-Name the lane worktree's absolute path as `Worktree:` in every lane implementation/review brief (`briefs-and-handoffs.md`).
+Name the lane worktree's absolute path as `Worktree:` in every lane implementation/review brief ([briefs-and-handoffs.md](briefs-and-handoffs.md)).
 A wrong-tree brief is a Coordinator error: correct it before dispatch.
 If wrong-tree work occurred, stop the worker and discard that work, including commits; preserve unrelated work.
 Redispatch with the corrected lane-worktree brief; never accept wrong-tree implementation.
@@ -173,7 +173,7 @@ Run independent checks there; keep review read-only and never patch reviewed wor
 
 ## Implementation
 
-Fill `briefs-and-handoffs.md` implementation template; apply its handoff-context rules. Write the filled
+Fill [briefs-and-handoffs.md](briefs-and-handoffs.md) implementation template; apply its handoff-context rules. Write the filled
 brief to `.agents/workflow/<change>/briefs/<lane>-<role>-<task>.md` and hand the worker that absolute path.
 Record intent before starting worker:
 
@@ -289,7 +289,7 @@ python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> review-reuse <lan
 
 ## Targeted review at lane HEAD
 
-Start only after every lane task is implemented/ticked. Use `briefs-and-handoffs.md` review template;
+Start only after every lane task is implemented/ticked. Use [briefs-and-handoffs.md](briefs-and-handoffs.md) review template;
 include changed files and all plan flags. Read worktree/approved sources/evidence directly.
 Never consume generated review packages, deterministic preflight results, digests, or verdict files.
 
@@ -328,7 +328,7 @@ Use shared stable findings; collect all first-pass verdicts into one deduplicate
 ## Human checkpoint
 
 Plan `ui`, `screen`, or `sensitive` requires checkpoint; flags are declared, never inferred from diff.
-Definitions: `plan.md`. No such flag: `human-gate` refuses. Screen lanes also require `--evidence`.
+Definitions: [plan.md](plan.md). No such flag: `human-gate` refuses. Screen lanes also require `--evidence`.
 Repository guides define the required UI states, environments, visual variants, and capture commands.
 Keep the plan-required reviews and human checkpoints. Record any repository-authorized waiver explicitly.
 A lane merge integrates work into the feature branch. It never authorizes a PR merge into the target branch.
@@ -383,7 +383,7 @@ Target-branch merge never authorizable; helper never performs it.
 Authorization never waives a check or independent review that the risk decision requires:
 the interactive and authorized paths run the same selected non-human checks, and the authorized
 gate still gets its own current Oracle stand-in acceptance judgment. No separate technical
-pre-PR Oracle pass is invented when the normal finish path does not require one (see `finish.md`).
+pre-PR Oracle pass is invented when the normal finish path does not require one (see [finish.md](finish.md)).
 
 Missing/stale/revoked/unbound/wrong-commit approval blocks merge.
 Later writes/corrections/stale evidence require affected reviews and fresh human approval.
@@ -426,7 +426,7 @@ Coordinator never patches/approves own implementation; reviewers never patch rev
 
 Repository guides select the primary environment for lane checks and evidence.
 Run the repository's full release matrix only after all lanes merge into the feature branch.
-See `finish.md` for the release sequence. No platform or runtime version is fixed by this skill.
+See [finish.md](finish.md) for the release sequence. No platform or runtime version is fixed by this skill.
 
 ## Merge and close
 
@@ -489,7 +489,7 @@ Fast-forward the lane into the feature branch at the exact Oracle-reviewed candi
 Changed pre-merge base, candidate, acceptance, evidence, or eligibility invalidates that approval.
 Fallback requires an approved mode change and fresh standard review.
 
-After this lane merge, run `finish.md` on the feature branch.
+After this lane merge, run [finish.md](finish.md) on the feature branch.
 Classification, version changes, generated artifacts, and final release evidence happen there.
 Later release-preparation commits do not undo a recorded lane merge or approve the new release evidence.
 The combined record's `final` duty means implementation coherence, not final release approval.
