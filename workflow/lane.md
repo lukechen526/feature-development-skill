@@ -12,8 +12,11 @@ Committed records:
 Coordinator store, gitignored, under `<feature-checkout>/.agents/workflow/<change>/`:
 - `state.json`: derived snapshot only. Never edit it; it is rebuilt from committed artifacts.
 - `coordination.json`: the definitive coordinator store. Holds each lane's `status`, `status_reason`,
-  per-task state (`pending | in_progress | done | blocked`), worktrees, dispatches, reviews, authorizations,
-  human gates and merge records.
+  per-task state (`pending | in_progress | done | blocked`), `worktree` and `worktree_present`,
+  `review_status` (`state`, `round`, `reviewer`, reviewed commit, report path), `escalation`
+  (`required`, `rounds`, `state`, `decision`, options), dispatches, reviews, authorizations, human gates
+  and merge records. A top-level `subagents` list tracks every dispatched subagent: `run_id`, `role`,
+  `lane`, `task`, `model`, `level`, `access`, `worktree`, `status`, `result`, timestamps.
 - `model-selection.json`: per-role model/thinking answers and the provisioning mechanism.
 - `briefs/`: one file per dispatch, named `<lane>-<role>-<task-or-round>.md`.
 - `reviews/`: one report per review, named `<lane>-<role>-r<round>.md`.
@@ -126,6 +129,11 @@ cannot infer are recorded with `task-status <lane> <task> --status blocked --rea
 Ownership is enforced, not just documented: `sync` and `task-status` refuse to run outside the feature
 checkout, so a worker in a lane worktree cannot write the coordinator store. Workers only tick tasks.
 
+Read the store, never chat history. When the human asks "how is lane X", when a new session starts, and
+before every dispatch, decision or merge, read `coordination.json` (or `featdev.py status --json`, which
+reads it) and answer from that. Chat history, memory of earlier turns, dashboard screenshots and derived
+`state.json` are not status sources; they can be stale or incomplete.
+
 Never leave a subagent update only in chat. `featdev status --json` must answer, at any moment, which
 lane is complete, which is in progress, which is under review, and what each lane is waiting for. When a
 record and an artifact disagree, the artifact wins and the record is corrected; never the reverse.
@@ -170,6 +178,19 @@ For a combined Oracle dispatch, pass the final acceptance and evidence paths so 
 snapshots their canonical paths and hashes before launch; standard dispatches may omit them.
 
 Implement every assigned task using relevant canonical sources.
+
+### One fresh worker subagent per task (mandatory)
+
+Dispatch a **new** implementer subagent for each task ID in a lane. One worker never implements two tasks.
+
+1. Record the dispatch, write the brief for that single task, launch a fresh session.
+2. The worker implements only that task, commits it, ticks it, updates the report, and stops.
+3. The Coordinator verifies the commit and tick, closes the dispatch, runs `sync`, then dispatches the
+   next task to a new worker.
+
+Reuse a session only for a correction to the same task, and only while the brief is unchanged. Never reuse a
+worker across tasks to save time: a failure must stay inside one task, and each brief must be read fresh.
+Parallel workers are not allowed inside one lane; they share a worktree and would collide.
 After each task: focused checks, exact output, genuine completion tick committed with work.
 The ONLY permitted `tasks.md` change is flipping your assigned tasks' checkboxes — never add
 notes, sub-bullets, or wording edits there; records belong in the lane report:

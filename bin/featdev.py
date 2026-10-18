@@ -658,7 +658,7 @@ def state_derive(change: str, source_ref: str | None = None, checkout: Path | No
 
 _COORDINATION_FIELDS = (
     "phase", "worktree", "ref", "base", "dispatches", "reviews", "merge", "cleanup", "mediations",
-    "decisions", "status", "status_reason", "task_states",
+    "decisions", "status", "status_reason", "task_states", "review_status", "escalation",
 )
 
 # Task states the coordinator store tracks per lane. "done" here is a lane-local claim; only a
@@ -690,6 +690,8 @@ def _coordination_lane(lane: dict[str, Any] | None = None) -> dict[str, Any]:
         "status": None,
         "status_reason": None,
         "task_states": {},
+        "review_status": None,
+        "escalation": None,
     }
     for key, default in defaults.items():
         if key not in value:
@@ -749,6 +751,7 @@ def coordination_sync(change: str | None = None, checkout: Path | None = None) -
     _, state, plan = _state_context(change, checkout)
     _require_coordinator_cwd(state, "sync")
     coordination = _load_coordination(state, plan)
+    _backfill_subagents(coordination)
     for lane_id, lane in coordination.get("lanes", {}).items():
         if not isinstance(lane, dict):
             continue
@@ -778,6 +781,12 @@ def coordination_sync(change: str | None = None, checkout: Path | None = None) -
                 continue
             tasks[task_id] = {"status": "pending", "updated_at": prior.get("updated_at")}
         lane["task_states"] = tasks
+        lane["review_status"] = _lane_review_status(lane)
+        lane["escalation"] = _lane_escalation_status(lane)
+        worktree_path = lane.get("worktree")
+        lane["worktree_present"] = bool(
+            isinstance(worktree_path, str) and Path(worktree_path).is_dir()
+        )
         states = {row.get("status") for row in tasks.values()}
         if assigned and all(row.get("status") == "done" for row in tasks.values()):
             lane["status"], lane["status_reason"] = "done", None
@@ -826,6 +835,112 @@ def coordination_task_status(
     _write_coordination(state, coordination, plan)
     path = _coordination_path(str(state.get("change")), Path(str(state.get("feature_checkout"))))
     return path
+
+
+def _backfill_subagents(coordination: dict[str, Any]) -> None:
+    """Seed the subagent list from recorded lane dispatches (older runs, recovered stores)."""
+    rows = coordination.get("subagents")
+    if not isinstance(rows, list):
+        rows = []
+    known = {
+        (row.get("lane"), row.get("role"), row.get("task"), row.get("started_at"))
+        for row in rows if isinstance(row, dict)
+    }
+    for lane_id, lane in (coordination.get("lanes") or {}).items():
+        if not isinstance(lane, dict):
+            continue
+        for row in lane.get("dispatches", []):
+            if not isinstance(row, dict):
+                continue
+            identity = (lane_id, row.get("role"), row.get("task"), row.get("started_at"))
+            if identity in known:
+                continue
+            result = row.get("result")
+            rows.append({
+                "run_id": row.get("worker_run_id"),
+                "key": row.get("key"),
+                "lane": lane_id,
+                "role": row.get("role"),
+                "task": row.get("task"),
+                "model": row.get("model"),
+                "level": row.get("level"),
+                "access": row.get("access"),
+                "worktree": lane.get("worktree"),
+                "status": "running" if result in (None, "open") else ("done" if result == "ok" else "failed"),
+                "result": result,
+                "started_at": row.get("started_at"),
+                "updated_at": _now_iso(),
+            })
+            known.add(identity)
+    coordination["subagents"] = rows
+
+
+def _register_subagent(
+    coordination: dict[str, Any], lane_id: str, role: str, model: str, level: str,
+    task: str | None, key: str | None, access: str | None, worktree: str | None,
+) -> None:
+    rows = coordination.get("subagents")
+    if not isinstance(rows, list):
+        rows = []
+    rows.append({
+        "run_id": None, "key": key, "lane": lane_id, "role": role, "task": task,
+        "model": model, "level": level, "access": access, "worktree": worktree,
+        "status": "running", "started_at": _now_iso(), "updated_at": _now_iso(),
+    })
+    coordination["subagents"] = rows
+
+
+def _close_subagent(
+    coordination: dict[str, Any], lane_id: str, role: str, run_id: str | None, result: str | None,
+) -> None:
+    rows = coordination.get("subagents")
+    if not isinstance(rows, list):
+        return
+    candidates = [
+        row for row in rows
+        if isinstance(row, dict) and row.get("lane") == lane_id and row.get("role") == role
+        and row.get("status") == "running"
+    ]
+    if not candidates:
+        return
+    row = candidates[-1]
+    row["status"] = "done" if result in (None, "ok") else "failed"
+    if run_id:
+        row["run_id"] = run_id
+    row["result"] = result
+    row["updated_at"] = _now_iso()
+
+
+def _lane_review_status(lane: dict[str, Any]) -> dict[str, Any] | None:
+    reviews = [row for row in lane.get("reviews", []) if isinstance(row, dict)]
+    if not reviews:
+        return None
+    last = reviews[-1]
+    return {
+        "state": "passed" if last.get("verdict") == "PASS" else "changes_requested",
+        "round": len(reviews),
+        "reviewer": last.get("role"),
+        "commit": last.get("commit"),
+        "report": last.get("report"),
+    }
+
+
+def _lane_escalation_status(lane: dict[str, Any]) -> dict[str, Any] | None:
+    reviews = [row for row in lane.get("reviews", []) if isinstance(row, dict)]
+    more_work = [row for row in reviews if row.get("verdict") == "MORE WORK"]
+    mediated = [row for row in lane.get("mediations", []) if isinstance(row, dict)]
+    if not more_work:
+        return None
+    required = reviews[-1].get("verdict") == "MORE WORK" and len(more_work) >= 2 and not mediated
+    decision = mediated[-1].get("decision") if mediated else None
+    return {
+        "required": required,
+        "rounds": len(reviews),
+        "more_work_rounds": len(more_work),
+        "state": "awaiting-human" if required else ("mediated" if decision else "none"),
+        "decision": decision,
+        "options": ["revise", "approve"] if required else [],
+    }
 
 
 def _review_mode(plan: dict[str, Any]) -> str:
@@ -1123,6 +1238,7 @@ def _new_coordination(state: dict[str, Any], plan: dict[str, Any]) -> dict[str, 
         "feature_checkout": state["feature_checkout"],
         "branch": state.get("branch") or "HEAD",
         "review_mode": _review_mode(plan),
+        "subagents": [],
         "lanes": {
             lane_id: _coordination_lane()
             for lane_id in plan.get("lanes", {})
@@ -1167,7 +1283,7 @@ def _load_coordination(state: dict[str, Any], plan: dict[str, Any]) -> dict[str,
     if not isinstance(lanes, dict):
         raise StateError("state: coordination lanes are missing; repair or remove the coordination data")
     result = _new_coordination(state, plan)
-    for key in ("dispatches", "reviews", "worktrees", "model_selection", "authorizations", "human_gates", "review_policy", "finish"):
+    for key in ("dispatches", "reviews", "worktrees", "model_selection", "authorizations", "human_gates", "review_policy", "finish", "subagents"):
         if key in value:
             result[key] = value[key]
     for lane_id in plan.get("lanes", {}):
@@ -1216,6 +1332,7 @@ def _overlay_coordination(
     view["coordination_path"] = str(
         _coordination_path(str(state["change"]), Path(str(state["feature_checkout"])))
     )
+    view["subagents"] = coordination.get("subagents") if isinstance(coordination.get("subagents"), list) else []
     view["coordination_available"] = coordination.get("_available", True) is not False
     if not view["coordination_available"]:
         view["coordination_error"] = str(coordination.get("_error") or "coordination data is unavailable")
@@ -1663,6 +1780,7 @@ def dispatch_run(
     )
     # _dispatch_intent updates the merged copy, so copy only the transient dispatch list back.
     runtime["dispatches"] = merged_view["dispatches"]
+    _register_subagent(coordination, lane_id, role, model, level, task, key, access, str(worktree))
     _write_coordination(state, coordination, plan)
     return path
 
@@ -1733,6 +1851,7 @@ def dispatch_done(
     _complete_dispatch({**state, "lanes": {lane_id: merged_view}}, lane_id, role,
                        worker_run_id, tokens, cost, result)
     runtime["dispatches"] = merged_view["dispatches"]
+    _close_subagent(coordination, lane_id, role, worker_run_id, result)
     _write_coordination(state, coordination, plan)
     return path
 
@@ -2005,10 +2124,33 @@ def _status_text(view: dict[str, Any]) -> str:
             done_count = sum(1 for status_value in states.values() if status_value == "done")
             detail = ", ".join(f"{task_id}={status_value}" for task_id, status_value in states.items())
             reason = lane.get("coordinator_status_reason")
+            review = lane.get("review_status") if isinstance(lane.get("review_status"), dict) else None
+            review_note = ""
+            if review:
+                review_note = (
+                    f"; review {review.get('state')} r{review.get('round')} "
+                    f"by {review.get('reviewer')} at {str(review.get('commit'))[:12]}"
+                )
+            escalation = lane.get("escalation") if isinstance(lane.get("escalation"), dict) else None
+            escalation_note = ""
+            if escalation:
+                escalation_note = (
+                    f"; escalation {escalation.get('state')}"
+                    + (f" ({', '.join(escalation.get('options') or [])})" if escalation.get("options") else "")
+                )
             lines.append(
                 f"coordinator: {lane.get('coordinator_status')}; {done_count}/{len(states)} done"
                 f" [{detail}]" + (f"; reason: {reason}" if reason else "")
+                + review_note + escalation_note
             )
+    subagents = view.get("subagents")
+    if isinstance(subagents, list) and subagents:
+        running = [row for row in subagents if isinstance(row, dict) and row.get("status") == "running"]
+        summary = ", ".join(
+            f"{row.get('role')}@{row.get('lane')}:{row.get('status')}"
+            for row in subagents[-6:] if isinstance(row, dict)
+        )
+        lines.append(f"subagents: {len(running)} running of {len(subagents)} [{summary}]")
     return "\n".join(lines) + "\n"
 
 

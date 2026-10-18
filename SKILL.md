@@ -49,7 +49,8 @@ The Coordinator MUST work through these steps strictly in order. Do NOT batch, r
    agent directory), verify each agent resolves with the expected tools, and lock the dispatch mechanism.
    No worker or Oracle dispatch happens before this step completes.
 2. **Step 2 — Plan** (`workflow/plan.md`): author `plan/graph-plan.json` + OpenSpec artifacts, validate, dispatch Oracle `plan_review`, obtain human approval, commit the approval checkpoint naming the approver. NO implementation dispatch before that checkpoint commit.
-3. **Step 3 — Lanes** (`workflow/lane.md`): implement/review/integrate lanes; record every subagent update
+3. **Step 3 — Lanes** (`workflow/lane.md`): dispatch one fresh worker subagent per task;
+   implement/review/integrate lanes; record every subagent update
    in the coordinator store before doing anything else (dispatch result, ticks, reviews, lane phase), so
    `status` always answers which lane is complete, in progress, under review, or waiting; current-HEAD reviews, bounded corrections, merge/close gates, risk-based review decisions and ancestor reuse (opt-in/shadow; legacy gates stay authoritative for this change), human-override merges (`lane-merge --human-override --override-reason`, waiving review duties only), Orca child-worktree registration of lanes.
 4. **Step 4 — Finish** (`workflow/finish.md`): classification/version/integrated commit before final evidence, selected release checks, direct human integrated inspection for deferred UI, separate PR/merge approvals.
