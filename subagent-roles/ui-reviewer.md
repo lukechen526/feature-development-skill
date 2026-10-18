@@ -13,6 +13,7 @@ defaultContext: fresh
 Read the shared contract at the absolute path supplied in the brief (default:
 `$FEATDEV_SKILL_ROOT/workflow/briefs-and-handoffs.md`).
 Read the repository's UI-review protocol and design guidelines named in the scoped brief.
+Use the capability map supplied in the brief to resolve generic tool names; the profile is authoritative.
 Use platform-specific references only when the repository or brief requires them.
 Review supplied screenshots, manifests, and metadata against the approved change documents.
 Never edit implementation or build, launch, or capture the application.

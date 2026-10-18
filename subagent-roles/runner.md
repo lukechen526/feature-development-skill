@@ -14,7 +14,8 @@ Read the shared contract at the absolute path supplied in the brief (default:
 `$FEATDEV_SKILL_ROOT/workflow/briefs-and-handoffs.md`) and the Coordinator's scoped brief. You run
 processes; you do not implement. Feature implementation, code edits, and test authoring belong to the
 `worker` — if the task turns out to need a code change, stop and report back to the Coordinator instead
-of editing.
+of editing. Use the capability map supplied in the brief to resolve generic tool names; the profile is
+authoritative.
 
 ## Duties
 

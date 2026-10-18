@@ -17,7 +17,11 @@ Coordinator store, gitignored, under `<feature-checkout>/.agents/workflow/<chang
   (`required`, `rounds`, `state`, `decision`, options), dispatches, reviews, authorizations, human gates
   and merge records. A top-level `subagents` list tracks every dispatched subagent: `run_id`, `role`,
   `lane`, `task`, `model`, `level`, `access`, `worktree`, `status`, `result`, timestamps.
-- `model-selection.json`: per-role model/thinking answers and the provisioning mechanism.
+- `capability-map.md`: the preflight mapping from generic workflow capabilities to this harness's
+  concrete tools and operations. Required before the first dispatch; it may name the harness because it
+  is a runtime artifact, not part of the skill.
+- `model-selection.json`: per-role model/thinking answers, the launch profiles, and the path/hash of the
+  capability map.
 - `briefs/`: one file per dispatch, named `<lane>-<role>-<task-or-round>.md`.
 - `reviews/`: one report per review, named `<lane>-<role>-r<round>.md`.
 - `reports/`: lane live reports, named `<lane>-report.md`.

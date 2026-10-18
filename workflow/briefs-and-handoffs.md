@@ -21,15 +21,17 @@ Every handoff artifact has one home, under the coordinator store:
 
 | Artifact | Path |
 |---|---|
+| Capability map | `.agents/workflow/<change>/capability-map.md` |
 | Filled brief | `.agents/workflow/<change>/briefs/<lane>-<role>-<task-or-round>.md` |
 | Lane live report | `.agents/workflow/<change>/reports/<lane>-report.md` |
 | Review report | `.agents/workflow/<change>/reviews/<lane>-<role>-r<round>.md` |
 | Oracle plan review | `.agents/workflow/<change>/reviews/plan-<role>-r<round>.md` |
 | Evidence and logs | `.agents/workflow/<change>/evidence/<lane>/<revision>/` |
 
-The Coordinator writes the brief before dispatch and passes its absolute path. The worker writes the
-report at the named path, updating it after every commit and check. A later session must find every
-artifact by pattern, without asking the Coordinator. Missing directory: create it, do not relocate it.
+The Coordinator writes the brief before dispatch and passes its absolute path, together with the
+capability map's absolute path. The worker writes the report at the named path, updating it after every
+commit and check. A later session must find every artifact by pattern, without asking the Coordinator.
+Missing directory: create it, do not relocate it.
 
 ## Output
 
@@ -56,6 +58,7 @@ Missing inputs block; never invent evidence. Plain instructions, not review pack
 ```text
 Role: Implementer | lane: <id> | tasks: <ids>
 Role source: <absolute path to the role file> | profile: <id or sha256>
+Capability map: <absolute path to capability-map.md> | sha256: <hash>
 Worktree: <absolute path> | base: <SHA> | starting HEAD: <SHA>
 Sources: <role brief; repository rules; plan; relevant spec/design sections>
 Scope: <owned files/seams; dependencies; explicit exclusions>
@@ -71,6 +74,7 @@ Require all assigned tasks, committed work/ticks, clean tree. Specify behavior, 
 ```text
 Role: <code/test/UI/Oracle> | lane: <id> | mode: <initial/correction/impact>
 Role source: <absolute path to the role file> | profile: <id or sha256>
+Capability map: <absolute path to capability-map.md> | sha256: <hash>
 UI reviewer briefs: evidence-ingest only — never launch/build/capture; judge supplied screenshots/manifests.
 Worktree: <absolute path> | review range: <base SHA>..<HEAD SHA>
 Sources: <role brief; rules; plan; relevant spec/design; task definitions>
@@ -93,6 +97,7 @@ These are lane candidate inputs, not final release approval. Keep integrated rel
 ```text
 Lane: <id> | previous reviewed SHA: <SHA> | current HEAD: <SHA>
 Role source: <absolute path to the role file> | profile: <id or sha256>
+Capability map: <absolute path to capability-map.md> | sha256: <hash>
 Findings: <report paths; stable IDs; agreed closure checks>
 Changed inputs: <only changed sources, evidence, or decisions>
 Verify: <affected commands and evidence to refresh>
@@ -106,6 +111,7 @@ Wait for complete first-pass batch. Resolve disagreements before dependent edits
 ```text
 Operation: technical_resolution (read-only) | lane: <id> | HEAD: <SHA>
 Role source: <absolute path to the role file> | profile: <id or sha256>
+Capability map: <absolute path to capability-map.md> | sha256: <hash>
 Decision needed: <one concrete question>
 Sources: <relevant requirement, code, and finding paths>
 Conflict or failure: <exact evidence; attempted approaches and results>

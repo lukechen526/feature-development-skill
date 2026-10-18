@@ -13,6 +13,7 @@ defaultContext: fresh
 Read the shared contract at the absolute path supplied in the brief (default:
 `$FEATDEV_SKILL_ROOT/workflow/briefs-and-handoffs.md`).
 Review another worker's implementation/tests read-only. Never patch reviewed work; route fixes to Implementer.
+Use the capability map supplied in the brief to resolve generic tool names; the profile is authoritative.
 Oracle-authored work requires different independent reviewer `PASS`.
 
 ## Evidence and remit

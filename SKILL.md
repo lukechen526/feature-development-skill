@@ -20,7 +20,7 @@ Two different merges exist:
 All lane merges precede finish. Finish prepares the feature branch for a PR.
 Human approval to open a PR never authorizes its merge.
 
-Coordinator store: `.agents/workflow/<change>/` holds `coordination.json`,
+Coordinator store: `.agents/workflow/<change>/` holds `capability-map.md`, `coordination.json`,
 `model-selection.json`, `briefs/`, `reviews/`, `reports/` and `evidence/`. It is gitignored; every brief
 and review lives there at a predictable name, never in chat or a scratch path.
 Lane lifecycle: implementation → review 1 → fix → review 2 (two-round max); then Oracle-authored
@@ -50,7 +50,8 @@ Missing required helper or unmet human gate: stop; never invent substitutes or c
 The Coordinator MUST work through these steps strictly in order. Do NOT batch, reorder, or skip ahead. Each step completes (including its human/approval gate, where present) before the next begins. When resuming an interrupted run, re-derive from committed artifacts and continue at the current step; never restart completed steps merely to follow this router.
 
 1. **Step 1 — Preflight, roles, models, provisioning** (`workflow/roles-and-models.md`): first run the
-   harness capability preflight and resolve the skill root. Then ask the human, through the harness's
+   harness capability preflight, record the capability map under `.agents/workflow/<change>/`, and
+   resolve the skill root. Then ask the human, through the harness's
    user-question tool, which model and thinking level each role uses, offering only choices the harness
    can actually select. Record the answers and the resolved launch profiles in
    `.agents/workflow/<change>/model-selection.json`. Then define the role agents with the harness's

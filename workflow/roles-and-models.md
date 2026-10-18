@@ -43,9 +43,44 @@ A mechanism change on a later run is a new preflight. There is no silent fallbac
 
 Write the preflight to `.agents/workflow/<change>/preflight.json`, or to the `harness`, `skill_root`,
 and `profiles` sections of `model-selection.json` created in Step 1. Include the harness name and
-version, the capability matrix, the resolved skill root, the featdev path, and one launch profile per
-role: role file, prompt hash, mechanism, working directory, model and thinking requested versus
-effective, tool policy, continuation and stop support, gaps, and human acknowledgement.
+version, the capability matrix, the resolved skill root, the featdev path, the capability map path and
+hash, and one launch profile per role: role file, prompt hash, mechanism, working directory, model and
+thinking requested versus effective, tool policy, continuation and stop support, gaps, and human
+acknowledgement.
+
+### Record the capability map
+
+Before defining roles, write `.agents/workflow/<change>/capability-map.md`: a short, one-page mapping
+from each generic capability in the table above to the concrete tool or operation this harness exposes.
+It is a runtime artifact, not part of the skill, so it may name the harness and its tools.
+
+Required columns:
+
+| Generic capability | Harness tool or operation | Invocation | Supported | Fallback / limitation |
+|---|---|---|---|---|
+| Fresh launch | <tool or operation> | <arguments> | yes | — |
+| Working directory | ... | ... | yes / no | ... |
+| Prompt injection | ... | ... | yes / no | ... |
+| Model | ... | ... | yes / no | session default; human acknowledged |
+| Thinking | ... | ... | yes / no | session default; human acknowledged |
+| Tools | ... | ... | yes / no | prompt-only; report validation |
+| Wait / notify | ... | ... | yes / no | poll / event |
+| Status | ... | ... | yes / no | ... |
+| Message / continue | ... | ... | yes / no | fresh dispatch |
+| Resume | ... | ... | yes / no | fresh dispatch |
+| Stop | ... | ... | yes / no | coordinator deadline |
+| Timeout | ... | ... | yes / no | coordinator deadline |
+| Structured output | ... | ... | yes / no | report file |
+| Parent / supervisor message | ... | ... | yes / no | return a blocked result |
+| Model enumeration | ... | ... | yes / no | human free text |
+
+Every capability in the Step 0 table must have a row. Use `unsupported` or `not exposed` explicitly;
+never leave a blank. If the harness exposes more than one mechanism, name the mechanism the row
+applies to.
+
+Reference the map from `model-selection.json` as `capability_map` (absolute path) and
+`capability_map_sha256`. The Coordinator reads it before every dispatch, and every brief carries its
+absolute path. A different harness or mechanism invalidates the map and requires a new preflight.
 
 ## Step 1 — ask the human (no implicit defaults)
 
@@ -86,6 +121,8 @@ Write the answers to a gitignored file under the coordinator store:
   "asked_at": "<ISO-8601>",
   "asked_with": "question-tool | interview | chat",
   "skill_root": "<absolute path>",
+  "capability_map": "<absolute path to .agents/workflow/<change>/capability-map.md>",
+  "capability_map_sha256": "<hash>",
   "harness": {
     "name": "<name>",
     "version": "<version>",
