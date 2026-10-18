@@ -8,7 +8,7 @@
    unchanged evidence inputs; a broken binding reverts that duty to the standard review gate.
    Human authorization and combined-Oracle approvals are never reused or recovered by ancestry.
    A deferred-to-integrated decision is not an approval: recover its exact lane commit and
-   eligibility or require the early lane checkpoint. Lost directed human inspection checkpoints
+   eligibility or require the early lane checkpoint. Lost repository-defined human inspection checkpoints
    must be repeated personally; a changed integrated HEAD or inspection record cannot be
    repaired by Oracle stand-in or by a preauthorized PR approval.
 3. Before same-worktree redispatch, use dispatch key to prove prior session absent, stopped, or released.
@@ -17,6 +17,10 @@
 5. Check ancestry and recorded intents; never double-dispatch, double-merge, or double-remove.
    Combined review also requires recorded base, candidate, acceptance/evidence bindings, and exact post-merge `HEAD`.
    Equal trees/ancestry alone never prove approval.
+
+Existing finish records without a preparation artifact require `finish-record restage`.
+Supply the preparation receipt and its committed input paths. Repeat release checks and required human inspections.
+Use `checkpoint:` in new human inspection artifacts. See `finish.md` for the record format.
 
 Preserve reports/evidence under absolute change directory.
 Block on missing/stale binding, unknown worker, unapproved changed plan, failed required check,

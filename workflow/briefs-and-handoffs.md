@@ -82,8 +82,9 @@ Deliver: <report path; PASS or MORE WORK; limitations>
 
 Correction/impact: include previous reviewed SHA, correction range, full lane range.
 Preserve full-lane access; investigate relevant dependencies only.
-Combined Oracle: whole-change target base, feature/lane base, code/test/final duties, provenance, final acceptance
+Combined Oracle: whole-change target base, feature/lane base, code/test/complete-change implementation duties, provenance, candidate acceptance
 and evidence files; dispatch with both paths so their canonical paths and hashes are snapshotted before launch.
+These are lane candidate inputs, not final release approval. Keep integrated release evidence in separate files.
 
 ## Correction continuation
 

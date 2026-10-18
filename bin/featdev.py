@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any
@@ -653,13 +654,9 @@ _COORDINATION_FIELDS = (
 # committed and merged tick makes it authoritative on the feature branch.
 _TASK_STATES = ("pending", "in_progress", "done", "blocked")
 
-# Review-duty decision vocabulary (design D5).
+# Review-duty decision vocabulary.
 _DECISION_DUTIES = ("code", "test", "ui")
 _DECISION_MODES = ("full", "focused", "skip")
-# Design D6: the change that introduces the risk-based gates cannot use them to merge its
-# own lanes. The archive/main activation has completed; this guard remains as a permanent
-# self-hosting bar for the recorded change name.
-_SELF_REVIEW_CHANGE = "optimize-testing-and-review-velocity"
 
 
 def _coordination_lane(lane: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -744,6 +741,8 @@ def coordination_sync(change: str | None = None, checkout: Path | None = None) -
         if not isinstance(lane, dict):
             continue
         done, head = _lane_ref_progress(state, lane, plan)
+        merged_done = set(state["checked_tasks"])
+        done |= merged_done
         assigned = _coordinator_lane_tasks(lane_id, lane, plan)
         previous = lane.get("task_states") if isinstance(lane.get("task_states"), dict) else {}
         open_dispatch = next(
@@ -759,7 +758,9 @@ def coordination_sync(change: str | None = None, checkout: Path | None = None) -
         for task_id in assigned:
             prior = previous.get(task_id) if isinstance(previous.get(task_id), dict) else {}
             if task_id in done:
-                tasks[task_id] = {"status": "done", "commit": head, "updated_at": prior.get("updated_at")}
+                tasks[task_id] = {"status": "done",
+                                  "commit": state["source_sha"] if task_id in merged_done else head,
+                                  "updated_at": prior.get("updated_at")}
                 continue
             if prior.get("status") == "blocked":
                 tasks[task_id] = prior
@@ -831,7 +832,7 @@ def _backfill_subagents(coordination: dict[str, Any]) -> None:
     if not isinstance(rows, list):
         rows = []
     known = {
-        (row.get("lane"), row.get("role"), row.get("task"), row.get("started_at"))
+        (row.get("lane"), row.get("key") or (row.get("role"), row.get("task"), row.get("started_at")))
         for row in rows if isinstance(row, dict)
     }
     for lane_id, lane in (coordination.get("lanes") or {}).items():
@@ -840,7 +841,7 @@ def _backfill_subagents(coordination: dict[str, Any]) -> None:
         for row in lane.get("dispatches", []):
             if not isinstance(row, dict):
                 continue
-            identity = (lane_id, row.get("role"), row.get("task"), row.get("started_at"))
+            identity = (lane_id, row.get("key") or (row.get("role"), row.get("task"), row.get("started_at")))
             if identity in known:
                 continue
             result = row.get("result")
@@ -870,6 +871,8 @@ def _register_subagent(
     rows = coordination.get("subagents")
     if not isinstance(rows, list):
         rows = []
+    if any(row.get("lane") == lane_id and row.get("key") == key for row in rows):
+        return
     rows.append({
         "run_id": None, "key": key, "lane": lane_id, "role": role, "task": task,
         "model": model, "level": level, "access": access, "worktree": worktree,
@@ -880,6 +883,7 @@ def _register_subagent(
 
 def _close_subagent(
     coordination: dict[str, Any], lane_id: str, role: str, run_id: str | None, result: str | None,
+    key: str | None = None,
 ) -> None:
     rows = coordination.get("subagents")
     if not isinstance(rows, list):
@@ -888,6 +892,7 @@ def _close_subagent(
         row for row in rows
         if isinstance(row, dict) and row.get("lane") == lane_id and row.get("role") == role
         and row.get("status") == "running"
+        and (key is None or row.get("key") == key)
     ]
     if not candidates:
         return
@@ -940,7 +945,7 @@ def _review_mode(plan: dict[str, Any]) -> str:
 def _validate_decision_record(
     lane: dict[str, Any], decision: object, oracle_authored: bool = False
 ) -> None:
-    """Validate decision-record shape and the mechanical risk invariants (design D5)."""
+    """Validate decision-record shape and the mechanical risk invariants."""
     if not isinstance(decision, dict):
         raise StateError("lane: review decision record is malformed; record it with review-decision")
     duties = decision.get("duties")
@@ -1037,7 +1042,7 @@ def review_decision(
     """Record the Coordinator's per-lane review-duty decision for code/test/UI.
 
     Without --opt-in the record is shadow-only: it is persisted and displayed, but the
-    standard review gates stay authoritative (design D6). With --opt-in the coordination
+    standard review gates stay authoritative. With --opt-in the coordination
     review policy becomes 'risk-based' and lane-merge honors the selected duties.
     """
     path, state, plan = _state_context(change)
@@ -1046,11 +1051,6 @@ def review_decision(
     if _review_mode(plan) == "combined-single-lane":
         raise StateError(
             "lane: combined review keeps the exact Oracle binding; decision records are not honored in combined mode"
-        )
-    if opt_in and state.get("change") == _SELF_REVIEW_CHANGE:
-        raise StateError(
-            "lane: design D6 forbids the archived self-review change from relaxing its own review gates; "
-            "--opt-in is refused for its own lanes"
         )
     coordination, runtime = _coordination_lane_for(state, plan, lane_id)
     if not isinstance(rationale, str) or not rationale.strip():
@@ -1098,7 +1098,7 @@ def review_reuse(
 ) -> Path:
     """Record assessed reuse of an ordinary agent PASS recorded at an ancestor commit.
 
-    Design D5: an ancestor verdict can satisfy a later HEAD only when the Coordinator
+    Review reuse: an ancestor verdict can satisfy a later HEAD only when the Coordinator
     records the intervening diff, whether evidence inputs changed, and an assessment.
     Affected/uncertain inputs require fresh re-review instead. Human authorization and
     combined-Oracle approvals stay exact-bound: reuse never applies to them.
@@ -1111,9 +1111,9 @@ def review_reuse(
         raise StateError(
             "lane: combined review approvals stay exact-bound; ancestor reuse is not honored in combined mode"
         )
-    if state.get("change") == _SELF_REVIEW_CHANGE or coordination.get("review_policy") != "risk-based":
-        # Design D5/D6: assessed reuse is a risk-policy relaxation. It requires the active
-        # risk-based policy, and this change can never grant it to its own lanes.
+    if coordination.get("review_policy") != "risk-based":
+        # Review policy: assessed reuse is a risk-policy relaxation. It requires the active
+        # risk-based policy selected by the Coordinator.
         raise StateError(
             "lane: ancestor reuse requires the risk-based review policy; record the Coordinator "
             "decision with review-decision --opt-in first"
@@ -1237,7 +1237,7 @@ def _new_coordination(state: dict[str, Any], plan: dict[str, Any]) -> dict[str, 
         "model_selection": None,
         "authorizations": {},
         "human_gates": {},
-        # The standard gates stay authoritative by default (design D6).
+        # The standard gates stay authoritative by default.
         # 'risk-based' is an explicit Coordinator opt-in recorded here.
         "review_policy": "legacy",
         "finish": {},
@@ -1624,7 +1624,7 @@ def _dispatch_intent(
     if lane.get("complete"):
         raise StateError(f"lane: lane {lane_id!r} is already complete from committed ticks")
     change = state.get("change") or "change"
-    dispatch_key = key or f"{change}/{lane_id}/{role}"
+    dispatch_key = key or f"{change}/{lane_id}/{role}/{task}/{uuid.uuid4().hex}"
     if not dispatch_key:
         raise StateError("state: dispatch key must not be empty; change --key")
     if not isinstance(lane_head, str) or not lane_head:
@@ -1723,13 +1723,14 @@ def dispatch_run(
     runtime["worktree"] = str(worktree)
     runtime["ref"] = recorded_ref
     lane_head = _git_output(worktree, "rev-parse", "HEAD")
-    _dispatch_intent(
+    dispatch_key = _dispatch_intent(
         {**state, "lanes": {lane_id: {**merged_view, "worktree": str(worktree), "ref": recorded_ref}}},
         lane_id, role, model, level, task, key, lane_head, access, acceptance, evidence,
     )
     # _dispatch_intent updates the merged copy, so copy only the transient dispatch list back.
     runtime["dispatches"] = merged_view["dispatches"]
-    _register_subagent(coordination, lane_id, role, model, level, task, key, access, str(worktree))
+    _register_subagent(coordination, lane_id, role, model, level, task, dispatch_key,
+                       _dispatch_access(role, access), str(worktree))
     _write_coordination(state, coordination, plan)
     return path
 
@@ -1742,6 +1743,7 @@ def _complete_dispatch(
     tokens: int | None = None,
     cost: str | None = None,
     result: str | None = None,
+    key: str | None = None,
 ) -> None:
     lane = _state_lane(state, lane_id)
     _reject_finished_lane(lane_id, lane)
@@ -1751,6 +1753,7 @@ def _complete_dispatch(
     open_records = [
         record for record in dispatches
         if isinstance(record, dict) and record.get("role") == role and record.get("result") is None
+        and (key is None or record.get("key") == key)
     ]
     if len(open_records) > 1:
         open_records = open_records[-1:]
@@ -1758,6 +1761,7 @@ def _complete_dispatch(
         completed = [
             record for record in reversed(dispatches)
             if isinstance(record, dict) and record.get("role") == role and record.get("result") is not None
+            and (key is None or record.get("key") == key)
         ]
         if not completed:
             raise StateError(f"state: role {role!r} has no open dispatch; dispatch it first")
@@ -1792,15 +1796,16 @@ def dispatch_done(
     cost: str | None = None,
     result: str | None = None,
     change: str | None = None,
+    key: str | None = None,
 ) -> Path:
     path, state, plan = _state_context(change)
     coordination, runtime = _coordination_lane_for(state, plan, lane_id)
     merged_view = dict(state["lanes"][lane_id])
     merged_view.update(runtime)
     _complete_dispatch({**state, "lanes": {lane_id: merged_view}}, lane_id, role,
-                       worker_run_id, tokens, cost, result)
+                       worker_run_id, tokens, cost, result, key)
     runtime["dispatches"] = merged_view["dispatches"]
-    _close_subagent(coordination, lane_id, role, worker_run_id, result)
+    _close_subagent(coordination, lane_id, role, worker_run_id, result, key)
     _write_coordination(state, coordination, plan)
     return path
 
@@ -2003,7 +2008,7 @@ def _status_view(state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
             }
             lane["human_gate"] = _human_gate_summary(
                 lane_id, lane, view.get("human_gates"), coordination_available, view.get("authorizations"),
-                view.get("review_policy") == "risk-based" and change != _SELF_REVIEW_CHANGE,
+                view.get("review_policy") == "risk-based",
             )
     if view.get("coordination_available", True):
         try:
@@ -2930,15 +2935,12 @@ def human_defer(lane_id: str, commit: str, evidence_revision: str, rationale: st
     path, state, plan = _state_context(change)
     lane = _state_lane(state, lane_id)
     _reject_finished_lane(lane_id, lane)
-    if state.get("change") == _SELF_REVIEW_CHANGE or _review_mode(plan) == "combined-single-lane":
-        raise StateError("lane: design D6 forbids self-use or combined review deferral")
+    if _review_mode(plan) == "combined-single-lane":
+        raise StateError("lane: combined review does not allow checkpoint deferral")
     if (not (lane.get("ui") or lane.get("screen")) or lane.get("sensitive")
             or lane.get("risk") == "high"):
         raise StateError("lane: sensitive, high-risk, or non-UI lanes cannot defer the human checkpoint")
-    if risk_assessment != "low" or not isinstance(rationale, str) or not rationale.strip() or any(
-        keyword not in rationale.lower() for keyword in
-        ("bounded", "reversible", "medical", "safety", "privacy", "sharing", "data-integrity", "content")
-    ):
+    if risk_assessment != "low" or not isinstance(rationale, str) or not rationale.strip():
         raise StateError("lane: deferral requires low-risk assessment and rationale for bounded, reversible impact and each excluded sensitive effect")
     coordination, runtime = _coordination_lane_for(state, plan, lane_id)
     if coordination.get("review_policy") != "risk-based":
@@ -2967,7 +2969,7 @@ def human_defer(lane_id: str, commit: str, evidence_revision: str, rationale: st
                     "evidence_sha256": _path_sha256(Path(evidence_path)) if evidence_path else None},
         "rationale": rationale.strip(), "risk_assessment": risk_assessment,
         "bounded": True, "reversible": True,
-        "excluded_effects": ["medical", "safety", "privacy", "sharing", "data-integrity", "content-correctness"],
+        "excluded_effects": ["safety", "privacy", "sharing", "data-integrity", "content-correctness"],
     }
     _write_coordination(state, coordination, plan)
     return path
@@ -2975,7 +2977,7 @@ def human_defer(lane_id: str, commit: str, evidence_revision: str, rationale: st
 
 def _lane_requires_human_gate(lane: dict[str, Any]) -> bool:
     # A plan declaration, not an inferred state: `sensitive` marks a lane that touches
-    # user-facing wording or content, safety, privacy, or medically sensitive material.
+    # user-facing wording or content, safety, privacy, or other sensitive material.
     return bool(lane.get("ui") or lane.get("screen") or lane.get("sensitive"))
 
 
@@ -3109,7 +3111,7 @@ def _validate_human_gate(
                 or gate.get("risk_assessment") != "low"
                 or gate.get("approved_by") is not None or gate.get("authorization") is not None
                 or gate.get("bounded") is not True or gate.get("reversible") is not True
-                or set(gate.get("excluded_effects", [])) != {"medical", "safety", "privacy", "sharing", "data-integrity", "content-correctness"}):
+                or not {"safety", "privacy", "sharing", "data-integrity", "content-correctness"}.issubset(gate.get("excluded_effects", []))):
             raise StateError("lane: deferred checkpoint is ineligible or stale; obtain early human approval")
         evidence_path = binding.get("evidence_path")
         if lane.get("screen") and not evidence_path:
@@ -3716,7 +3718,7 @@ def _combined_lane_review(
     state: dict[str, Any],
     plan: dict[str, Any],
 ) -> Path:
-    """Record one exact-HEAD Oracle pass covering lane code/test and final review."""
+    """Record one exact-HEAD Oracle pass covering lane code/test and implementation coherence."""
     if role != "code":
         raise StateError("lane: combined review must use role 'code'; the Oracle supplies the combined duty")
     if verdict not in {"PASS", "MORE WORK"}:
@@ -3789,7 +3791,7 @@ def _combined_lane_review(
     report_path = _review_report(report)
     evidence_path = _review_binding_path(evidence)
     if not evidence_path:
-        raise StateError("lane: combined review needs final evidence; provide --evidence")
+        raise StateError("lane: combined review needs candidate evidence; provide --evidence")
     acceptance_path = _required_document(acceptance, "combined acceptance document")
     if acceptance_path == report_path:
         raise StateError(
@@ -4382,9 +4384,9 @@ def _validate_completed_combined_lane_merge(
     merge_commit = _git_commit(repository, merge_commit)
     recorded_base = _git_commit(repository, recorded_base)
     feature_head = _git_output(repository, "rev-parse", feature_branch)
-    if feature_head != reviewed_head or merge_commit != reviewed_head:
+    if merge_commit != reviewed_head or not _is_ancestor(repository, merge_commit, feature_head):
         raise StateError(
-            f"lane: completed combined lane {lane_id!r} is not at exact reviewed HEAD {reviewed_head}; "
+            f"lane: completed combined lane {lane_id!r} does not preserve reviewed commit {reviewed_head}; "
             "reconcile the feature branch and revalidate"
         )
     review = _validate_combined_review(
@@ -4460,14 +4462,9 @@ def _validate_completed_lane_merge(
             )
     _validate_lane_reviews(
         lane_id, operation_lane, reviewed_head,
-        # Lanes of the archived self-review change merge under standard authority regardless
-        # of any scratch opt-in (design D6), so decision records recovered from a merge
-        # record are ignored.
-        decisions=None if state.get("change") == _SELF_REVIEW_CHANGE
-        else _decisions_from_merge(runtime.get("merge")),
+        decisions=_decisions_from_merge(runtime.get("merge")),
         repository=repository,
-        allow_reuse=coordination.get("review_policy") == "risk-based"
-        and state.get("change") != _SELF_REVIEW_CHANGE,
+        allow_reuse=coordination.get("review_policy") == "risk-based",
     )
     if recorded:
         # The tool validated this gate when it performed the merge, and its one-use grant is already
@@ -4476,8 +4473,7 @@ def _validate_completed_lane_merge(
     # A hand-resolved recovery has no recorded validation, so the human gate must still hold here,
     # and its one-use grant is consumed by this validation so the recovery cannot be replayed.
     _validate_human_gate(lane_id, operation_lane, reviewed_head, coordination, approved_plan_sha256,
-                         allow_deferred=coordination.get("review_policy") == "risk-based"
-                         and state.get("change") != _SELF_REVIEW_CHANGE)
+                         allow_deferred=coordination.get("review_policy") == "risk-based")
     gates = coordination.get("human_gates") or {}
     gate = gates.get(lane_id) if isinstance(gates, dict) else None
     authorization = gate.get("authorization") if isinstance(gate, dict) else None
@@ -4507,7 +4503,7 @@ def lane_merge(
     coordination, runtime = _coordination_lane_for(state, plan, lane_id)
     combined_mode = _review_mode(plan) == "combined-single-lane"
     if human_override:
-        # A recorded human decision trumps the review gates. Design D5 restricts the
+        # A recorded human decision trumps the review gates. The workflow restricts the
         # override to waivable review duties: it can never waive clean-tree, task-tick
         # ownership/completeness, lane-base/ancestry validation, current required
         # evidence, or human authorization integrity, so those checks still run below.
@@ -4562,8 +4558,7 @@ def lane_merge(
         override_lane.update(runtime)
         _validate_human_gate(
             lane_id, override_lane, head, coordination, state.get("plan_sha256"),
-            allow_deferred=coordination.get("review_policy") == "risk-based"
-            and state.get("change") != _SELF_REVIEW_CHANGE,
+            allow_deferred=coordination.get("review_policy") == "risk-based",
         )
         if _is_ancestor(repository, head, feature_head):
             merge_commit = feature_head
@@ -4650,15 +4645,10 @@ def lane_merge(
     feature_head = _git_output(repository, "rev-parse", branch)
     base = _lane_merge_base(repository, ref, feature_head)
     _validate_resolved_lane_base(repository, base, head, feature_head)
-    # Design D5/D6: decision-driven review selection only under the explicit risk-based
+    # Review policy: decision-driven review selection only under the explicit risk-based
     # policy; a missing decision record (or standard policy) falls back to the standard gate.
-    # Lanes of the archived self-review change keep the standard authority no matter what a
-    # scratch opt-in recorded: the change cannot relax its own review gates (design D6).
     honored_decision = None
-    policy_relaxed = (
-        coordination.get("review_policy") == "risk-based"
-        and state.get("change") != _SELF_REVIEW_CHANGE
-    )
+    policy_relaxed = coordination.get("review_policy") == "risk-based"
     if policy_relaxed and runtime.get("decisions") is not None:
         honored_decision = runtime.get("decisions")
         _validate_decision_record(
@@ -4753,44 +4743,50 @@ def lane_merge(
     return path
 
 
-def _finish_version(repository: Path) -> tuple[str, str]:
-    source = repository / "App/project.yml"
-    generated = repository / "App/PregnancyTracker.xcodeproj/project.pbxproj"
-    if not source.is_file() or not generated.is_file():
-        raise StateError("finish: version source or generated project is missing; regenerate before capture")
-    match = re.findall(r"^\s*MARKETING_VERSION:\s*['\"]?([0-9]+(?:\.[0-9]+){1,2})", source.read_text(), re.M)
-    if len(match) != 1 or f"MARKETING_VERSION = {match[0]};" not in generated.read_text():
-        raise StateError("finish: version and generated project disagree; regenerate and commit before capture")
-    return match[0], hashlib.sha256(source.read_bytes() + generated.read_bytes()).hexdigest()
+def _finish_preparation(record: dict[str, Any], repository: Path, head: str) -> str:
+    """Check the supplied release-preparation artifact and its committed inputs."""
+    preparation = record.get("preparation")
+    if not isinstance(preparation, dict):
+        raise StateError("finish: release preparation artifact is missing; restage with --artifact and --input")
+    artifact = _required_document(preparation.get("artifact"), "release preparation artifact")
+    digest = _path_sha256(Path(artifact))
+    if digest != preparation.get("sha256"):
+        raise StateError("finish: release preparation artifact changed; restage and recapture")
+    source = preparation["head"]
+    if source != head and (not _is_ancestor(repository, source, head) or
+        _git_output(repository, "diff", "--name-only", source, head, "--", *preparation["inputs"])):
+        raise StateError("finish: release preparation inputs changed; restage and recapture")
+    return digest
 
 
-def _human_inspection_verdict(path: Path, runtime: str) -> str | None:
+def _human_inspection_verdict(path: Path, checkpoint: str) -> str | None:
     """Read unique authoritative fields, never quoted/history/observation substrings."""
     fields: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
-        match = re.fullmatch(r"(inspector|runtime|verdict):\s*(.*?)\s*", line)
+        match = re.fullmatch(r"(inspector|checkpoint|verdict):\s*(.*?)\s*", line)
         if match:
             if match[1] in fields:
                 return None
             fields[match[1]] = match[2]
-    if fields.get("inspector") == "human" and fields.get("runtime") == runtime and fields.get("verdict") in {"accept", "reject"}:
+    if (fields.get("inspector") == "human" and fields.get("checkpoint") == checkpoint
+            and fields.get("verdict") in {"accept", "reject"}):
         return fields["verdict"]
     return None
 
 
-def _human_inspection_accepts(path: Path, runtime: str) -> bool:
-    return _human_inspection_verdict(path, runtime) == "accept"
+def _human_inspection_accepts(path: Path, checkpoint: str) -> bool:
+    return _human_inspection_verdict(path, checkpoint) == "accept"
 
 
 def _finish_integrated(state: dict[str, Any], coordination: dict[str, Any], repository: Path, head: str) -> None:
     lanes = state.get("lanes", {})
     recorded = coordination.get("lanes", {})
     if not isinstance(lanes, dict) or not lanes or not isinstance(recorded, dict):
-        raise StateError("finish: no completed integrated lanes; merge assigned lanes before final capture")
+        raise StateError("finish: no completed integrated lanes; merge assigned lanes into the feature branch first")
     for lane_id, lane in lanes.items():
         merge = recorded.get(lane_id, {}).get("merge") if isinstance(recorded.get(lane_id), dict) else None
         if not isinstance(lane, dict) or lane.get("complete") is not True or not isinstance(merge, dict):
-            raise StateError(f"finish: lane {lane_id} not merged; integrate all assigned ticks before final capture")
+            raise StateError(f"finish: lane {lane_id} not merged into the feature branch; integrate all assigned ticks first")
         merged_head = merge.get("merge_commit")
         if not isinstance(merged_head, str) or not _is_ancestor(repository, merged_head, head):
             raise StateError(f"finish: lane {lane_id} merge commit is not in integrated HEAD")
@@ -4798,8 +4794,9 @@ def _finish_integrated(state: dict[str, Any], coordination: dict[str, Any], repo
 
 def finish_record(action: str, classification: str | None = None, version: str | None = None,
                   check: str | None = None, artifact: str | None = None,
-                  inputs: list[str] | None = None, change: str | None = None) -> Path:
-    """Bind final receipts to committed integrated source, preserving unrelated checks on later HEADs."""
+                  inputs: list[str] | None = None, change: str | None = None,
+                  inspections: list[str] | None = None) -> Path:
+    """Bind repository-defined release artifacts to committed feature-branch inputs."""
     path, state, plan = _state_context(change)
     repository = Path(state["feature_checkout"])
     coordination = _load_coordination(state, plan)
@@ -4808,15 +4805,13 @@ def finish_record(action: str, classification: str | None = None, version: str |
     head = _git_output(repository, "rev-parse", "HEAD")
     record = coordination.setdefault("finish", {})
     if action in {"classify", "restage"}:
-        if classification not in {"pre-release", "minor-update", "feature-update"} or not version:
-            raise StateError("finish: record a human classification and expected marketing version")
+        _finish_integrated(state, coordination, repository, head)
+        if not classification or not classification.strip() or not artifact or not inputs:
+            raise StateError("finish: record human classification, release preparation --artifact, and committed --input paths")
+        preparation_path = _required_document(artifact, "release preparation artifact")
         if action == "classify" and (record.get("evidence") or record.get("required_checks")):
-            raise StateError("finish: classification/version after final evidence; use restage and recapture")
+            raise StateError("finish: classification after final evidence; use restage and recapture")
         if action == "restage":
-            _finish_integrated(state, coordination, repository, head)
-            actual_version, _ = _finish_version(repository)
-            if version != actual_version:
-                raise StateError("finish: restage requires committed regenerated expected version")
             if not record.get("classification"):
                 raise StateError("finish: classify before restage")
             required = record.setdefault("required_checks", {})
@@ -4824,67 +4819,70 @@ def finish_record(action: str, classification: str | None = None, version: str |
                 required.setdefault(selected, item["inputs"])
             record["evidence"] = {}
             record["inspection"] = {}
-        record.update({"classification": classification, "expected_version": version, "classified_at": head})
+        record.update({"classification": classification.strip(), "expected_version": version,
+                       "classified_at": head,
+                       "preparation": {"head": head, "artifact": preparation_path,
+                                       "sha256": _path_sha256(Path(preparation_path)),
+                                       "inputs": sorted(set(inputs))}})
+        if inspections is not None:
+            if any(not checkpoint.strip() for checkpoint in inspections):
+                raise StateError("finish: inspection checkpoint names must be non-empty")
+            record["required_inspections"] = sorted(set(inspections))
     else:
         if not record.get("classification"):
             raise StateError("finish: human release classification must precede final capture")
-        actual_version, version_hash = _finish_version(repository)
-        if actual_version != record.get("expected_version"):
-            raise StateError("finish: marketing version differs from classification; commit required version first")
+        preparation_hash = _finish_preparation(record, repository, head)
         evidence = record.setdefault("evidence", {})
         if action in {"capture", "inspect", "pr-check"}:
             _finish_integrated(state, coordination, repository, head)
         if action == "capture":
             if not check or not artifact or not inputs:
                 raise StateError("finish: capture requires check, artifact, and affected input paths")
-            artifact_path = Path(artifact).resolve()
-            digest = _path_sha256(artifact_path)
+            artifact_path = Path(_required_document(artifact, "release evidence artifact"))
             required = record.setdefault("required_checks", {})
             declared = set(inputs)
             if check in required and not set(required[check]).issubset(declared):
                 raise StateError("finish: recapture must retain all selected check input dependencies")
             required[check] = sorted(declared)
-            evidence[check] = {"head": head, "version_sha256": version_hash,
-                               "artifact": str(artifact_path), "sha256": digest,
+            evidence[check] = {"head": head, "preparation_sha256": preparation_hash,
+                               "artifact": str(artifact_path), "sha256": _path_sha256(artifact_path),
                                "inputs": sorted(declared)}
         elif action == "inspect":
-            if check not in {"ios-27.0", "ios-26.5", "ios-18.6"} or not artifact:
-                raise StateError("finish: direct human inspection requires runtime and human record path")
-            report_path = Path(artifact).resolve()
+            if not check or not artifact:
+                raise StateError("finish: direct human inspection requires checkpoint and human record path")
+            report_path = Path(_required_document(artifact, "human inspection artifact"))
             digest = _path_sha256(report_path)
             verdict = _human_inspection_verdict(report_path, check)
+            if verdict in {"accept", "reject"}:
+                record.setdefault("inspection", {})[check] = {
+                    "head": head, "artifact": str(report_path), "sha256": digest,
+                    "preparation_sha256": preparation_hash, "verdict": verdict}
             if verdict == "reject":
-                record.setdefault("inspection", {})[check] = {"head": head, "artifact": str(report_path),
-                    "sha256": digest, "version_sha256": version_hash, "verdict": "reject"}
                 _write_coordination(state, coordination, plan)
             if verdict != "accept":
-                raise StateError("finish: human must personally record accept on this runtime; Oracle stand-in cannot inspect")
-            record.setdefault("inspection", {})[check] = {"head": head, "artifact": str(report_path),
-                                                        "sha256": digest, "version_sha256": version_hash, "verdict": "accept"}
+                raise StateError("finish: human must personally record accept at this checkpoint; Oracle stand-in cannot inspect")
         elif action == "pr-check":
             required = record.get("required_checks", {})
             if not required or set(required) != set(evidence):
                 raise StateError("finish: selected checks missing final evidence; recapture before PR approval")
             if any(item.get("verdict") == "reject" for item in record.get("inspection", {}).values()):
                 raise StateError("finish: rejected human inspection blocks PR approval")
-            changed_ui = any(
-                (lane.get("ui") or lane.get("screen")) and isinstance(
-                    coordination.get("lanes", {}).get(lane_id, {}).get("merge"), dict)
-                for lane_id, lane in state.get("lanes", {}).items()
-            )
             deferred = any(isinstance(gate, dict) and gate.get("state") == "deferred-to-integrated"
                            for gate in coordination.get("human_gates", {}).values())
-            if changed_ui or deferred:
-                for runtime in ("ios-27.0", "ios-26.5", "ios-18.6"):
-                    item = record.get("inspection", {}).get(runtime)
-                    if not isinstance(item, dict) or item.get("head") != head or item.get("version_sha256") != version_hash:
-                        raise StateError(f"finish: changed-UI checkpoint blocks PR approval; human three-runtime inspection missing/stale: {runtime}")
-                    report_path = Path(item["artifact"])
-                    if _path_sha256(report_path) != item["sha256"] or not _human_inspection_accepts(report_path, runtime):
-                        raise StateError(f"finish: changed/rejected human inspection: {runtime}")
-            for selected in evidence:
-                item = evidence[selected]
-                if item.get("version_sha256") != version_hash or _path_sha256(Path(item["artifact"])) != item["sha256"]:
+            checkpoints = record.get("required_inspections", [])
+            if deferred and not checkpoints:
+                raise StateError("finish: deferred UI requires declared human inspection checkpoints; restage with --inspection")
+            for checkpoint in checkpoints:
+                item = record.get("inspection", {}).get(checkpoint)
+                if (not isinstance(item, dict) or item.get("head") != head
+                        or item.get("preparation_sha256") != preparation_hash):
+                    raise StateError(f"finish: human inspection missing/stale: {checkpoint}")
+                report_path = Path(item["artifact"])
+                if _path_sha256(report_path) != item["sha256"] or not _human_inspection_accepts(report_path, checkpoint):
+                    raise StateError(f"finish: changed/rejected human inspection: {checkpoint}")
+            for selected, item in evidence.items():
+                if (item.get("preparation_sha256") != preparation_hash
+                        or _path_sha256(Path(item["artifact"])) != item["sha256"]):
                     raise StateError(f"finish: final evidence changed: {selected}")
                 if item["head"] != head and (not _is_ancestor(repository, item["head"], head) or
                     _git_output(repository, "diff", "--name-only", item["head"], head, "--", *item["inputs"])):
@@ -4893,8 +4891,8 @@ def finish_record(action: str, classification: str | None = None, version: str |
             if not check or check not in evidence:
                 raise StateError("finish: selected check has no final evidence")
             item = evidence[check]
-            if item.get("version_sha256") != version_hash:
-                raise StateError("finish: version changed after evidence; recapture affected evidence")
+            if item.get("preparation_sha256") != preparation_hash:
+                raise StateError("finish: release preparation changed after evidence; recapture")
             if _path_sha256(Path(item["artifact"])) != item["sha256"]:
                 raise StateError("finish: final evidence artifact changed; recapture")
             if item["head"] != head:
@@ -4903,8 +4901,6 @@ def finish_record(action: str, classification: str | None = None, version: str |
                 changed = _git_output(repository, "diff", "--name-only", item["head"], head, "--", *item["inputs"])
                 if changed:
                     raise StateError("finish: affected evidence/review inputs changed; recapture selected check")
-                # Only unchanged declared inputs survive. Coordinator must still verify the
-                # repository receipt/reuse proof and independently reassess any affected review.
         else:
             raise StateError("finish: unknown action")
     _write_coordination(state, coordination, plan)
@@ -4987,62 +4983,101 @@ def _self_check() -> int:
         assert "capture only after" not in finish_guidance.lower().replace("classification and version are complete", "")
         assert "no workflow CLI command" not in finish_guidance
         assert "The release gate (step 1)" not in finish_guidance
+        role_directory = Path(__file__).resolve().parent.parent / "subagent-roles"
+        for role_file in role_directory.glob("*.md"):
+            assert ".agents/skills/feature-development-skill/workflow/briefs-and-handoffs.md" in role_file.read_text()
 
-        # Finish ordering: classification -> generated/committed version -> exact-HEAD capture.
+        # Normal dispatches, cleanup, and release recording work without application-specific files.
         finish_repo = make_repository("finishcase", "finishcase", {
             "schema_version": 1, "change": "finishcase",
             "lanes": {"one": {"risk": "ordinary", "ui": False, "screen": False,
                                "sensitive": False, "depends_on": []}},
-            "tasks": {"1.1": {"lane": "one", "deps": []}},
-        }, "- [ ] 1.1 first\n")
-        (finish_repo / ".gitignore").write_text(".agents/tmp/\n")
-        (finish_repo / "App/PregnancyTracker.xcodeproj").mkdir(parents=True)
-        (finish_repo / "App/project.yml").write_text("MARKETING_VERSION: 0.2\n")
-        (finish_repo / "App/PregnancyTracker.xcodeproj/project.pbxproj").write_text("MARKETING_VERSION = 0.2;\n")
+            "tasks": {"1.1": {"lane": "one", "deps": []},
+                      "1.2": {"lane": "one", "deps": ["1.1"]}},
+        }, "- [ ] 1.1 first\n- [ ] 1.2 second\n")
+        (finish_repo / "release.txt").write_text("release metadata\n")
+        (finish_repo / "generated.txt").write_text("generated metadata\n")
         (finish_repo / "input-a").write_text("a")
         (finish_repo / "input-b").write_text("b")
-        commit(finish_repo, "version and integrated source")
+        commit(finish_repo, "release source")
         os.chdir(finish_repo)
         state_derive("finishcase")
-        artifact = finish_repo / ".agents/tmp/receipt.json"
-        artifact.parent.mkdir(parents=True, exist_ok=True)
+        preparation = workflow_dir(finish_repo) / "finishcase" / "evidence" / "preparation.md"
+        preparation.parent.mkdir(parents=True, exist_ok=True)
+        preparation.write_text("Human classification: patch-release. Release metadata validated.\n")
+        artifact = preparation.with_name("receipt.json")
         artifact.write_text("passed")
+        classify_args = ("--change", "finishcase", "finish-record", "classify", "--classification",
+                         "patch-release", "--artifact", str(preparation),
+                         "--input", "release.txt", "--input", "generated.txt")
+        expect_refusal(*classify_args, contains="not merged")
         expect_refusal("--change", "finishcase", "finish-record", "capture", "--check", "a",
                        "--artifact", str(artifact), "--input", "input-a", contains="classification")
-        assert invoke("--change", "finishcase", "finish-record", "classify", "--classification",
-                      "pre-release", "--version", "0.2")[0] == 0
+        lane_open("one", "finishcase")
+        worktree = _lane_worktree_path(state_derive("finishcase"), "one")
+        dispatch_keys = []
+        for index, task in enumerate(("1.1", "1.2", "1.1")):
+            result, output, error = invoke("--change", "finishcase", "dispatch", "one", "implementer",
+                                           "--model", "local/model", "--level", "normal", "--task", task)
+            assert result == 0, error
+            ledger = _read_state(_coordination_path("finishcase"))
+            dispatch_key = ledger["lanes"]["one"]["dispatches"][-1]["key"]
+            assert f"key={dispatch_key}" in output
+            assert dispatch_key not in dispatch_keys
+            dispatch_keys.append(dispatch_key)
+            result, _, error = invoke("--change", "finishcase", "dispatch-done", "one", "implementer",
+                                       "--key", dispatch_key, "--worker-run-id", f"worker-{index}")
+            assert result == 0, error
+        # Retrying one explicit identity never creates a second subagent record.
+        for _ in range(2):
+            dispatch_run("one", "implementer", "local/model", "normal", "1.1",
+                         key="retry/one", change="finishcase")
+        ledger = _read_state(_coordination_path("finishcase"))
+        assert len(ledger["lanes"]["one"]["dispatches"]) == 4
+        assert len(ledger["subagents"]) == 4
+        dispatch_done("one", "implementer", "retry-worker", change="finishcase", key="retry/one")
+        coordination_sync("finishcase")
+        ledger = _read_state(_coordination_path("finishcase"))
+        assert len(ledger["subagents"]) == 4
+        assert all(row["status"] == "done" for row in ledger["subagents"])
+        # A dispatch ID remains the identity even when the two records have different timestamps.
+        ledger["subagents"][0]["started_at"] = "earlier"
+        _backfill_subagents(ledger)
+        assert len(ledger["subagents"]) == 4
+        for task in ("1.1", "1.2"):
+            task_tick("one", task, "finishcase")
+            head = commit(worktree, f"complete {task}")
+        review = preparation.with_name("lane-review.md")
+        review.write_text("PASS\n")
+        lane_review("one", "code", "PASS", head, review, change="finishcase")
+        lane_merge("one", "finishcase")
+        lane_close("one", "finishcase")
+        closed = coordination_sync("finishcase")["lanes"]["one"]
+        assert closed["status"] == "done", closed
+        assert closed["tasks"] == {"1.1": "done", "1.2": "done"}, closed
+        closed_view = json.loads(status("finishcase", True))["lanes"]["one"]
+        assert closed_view["complete"] and closed_view["phase"] == "closed"
+        assert closed_view["coordinator_status"] == "done"
+        assert invoke(*classify_args)[0] == 0
         (finish_repo / "input-a").write_text("dirty")
         expect_refusal("--change", "finishcase", "finish-record", "capture", "--check", "a",
                        "--artifact", str(artifact), "--input", "input-a", contains="uncommitted")
         (finish_repo / "input-a").write_text("a")
-        expect_refusal("--change", "finishcase", "finish-record", "capture", "--check", "a",
-                       "--artifact", str(artifact), "--input", "input-a", contains="not merged")
-        expect_refusal("--change", "finishcase", "finish-record", "pr-check", contains="not merged")
-        (finish_repo / "openspec/changes/finishcase/tasks.md").write_text("- [x] 1.1 first\n")
-        integrated_head = commit(finish_repo, "merge lane and tick")
-        finish_state = _read_state(state_derive("finishcase"))
-        finish_plan = json.loads((finish_repo / "openspec/changes/finishcase/plan/graph-plan.json").read_text())
-        finish_coord = _load_coordination(finish_state, finish_plan)
-        finish_coord["lanes"]["one"]["merge"] = {"reviewed_head": integrated_head,
-                                                       "merge_commit": integrated_head}
-        _write_coordination(finish_state, finish_coord, finish_plan)
         assert invoke("--change", "finishcase", "finish-record", "capture", "--check", "a",
                       "--artifact", str(artifact), "--input", "input-a")[0] == 0
-        (finish_repo / "App/project.yml").write_text("MARKETING_VERSION: 0.3\n")
-        (finish_repo / "App/PregnancyTracker.xcodeproj/project.pbxproj").write_text("MARKETING_VERSION = 0.3;\n")
-        commit(finish_repo, "late version bump")
+        (finish_repo / "release.txt").write_text("updated release metadata\n")
+        commit(finish_repo, "late release change")
         expect_refusal("--change", "finishcase", "finish-record", "check", "--check", "a",
-                       contains="marketing version differs")
+                       contains="release preparation inputs changed")
         expect_refusal("--change", "finishcase", "finish-record", "capture", "--check", "a",
-                       "--artifact", str(artifact), "--input", "input-a", contains="marketing version differs")
-        expect_refusal("--change", "finishcase", "finish-record", "restage", "--classification",
-                       "feature-update", "--version", "0.4", contains="committed regenerated")
-        assert invoke("--change", "finishcase", "finish-record", "restage", "--classification",
-                      "feature-update", "--version", "0.3")[0] == 0
+                       "--artifact", str(artifact), "--input", "input-a", contains="release preparation inputs changed")
+        preparation.write_text("Human classification: patch-release. Updated metadata validated.\n")
+        restage_args = tuple("restage" if value == "classify" else value for value in classify_args)
+        assert invoke(*restage_args)[0] == 0
         expect_refusal("--change", "finishcase", "finish-record", "pr-check", contains="missing final evidence")
         expect_refusal("--change", "finishcase", "finish-record", "capture", "--check", "a",
                        "--artifact", str(artifact), "--input", "input-b", contains="retain all")
-        artifact.write_text("recaptured 0.3")
+        artifact.write_text("recaptured")
         assert invoke("--change", "finishcase", "finish-record", "capture", "--check", "a",
                       "--artifact", str(artifact), "--input", "input-a")[0] == 0
         assert invoke("--change", "finishcase", "finish-record", "check", "--check", "a")[0] == 0
@@ -5054,18 +5089,18 @@ def _self_check() -> int:
         commit(finish_repo, "relevant input")
         expect_refusal("--change", "finishcase", "finish-record", "check", "--check", "a",
                        contains="affected evidence")
+        preparation.write_text("changed after approval")
+        expect_refusal("--change", "finishcase", "finish-record", "pr-check", contains="preparation artifact changed")
         os.chdir(root)
 
         # Deferred UI: merge after selected duties, never consume authorization; PR
-        # requires three direct human acceptances bound to the integrated HEAD.
+        # requires the declared human acceptances bound to the integrated HEAD.
         ui_plan = {"schema_version": 1, "change": "defercase", "lanes": {
             "ui": {"risk": "ordinary", "ui": True, "screen": True, "sensitive": False, "depends_on": []}},
             "tasks": {"1.1": {"lane": "ui", "deps": []}}}
         ui_repo = make_repository("defercase", "defercase", ui_plan, "- [ ] 1.1 UI\n")
         (ui_repo / ".gitignore").write_text(".agents/tmp/\n")
-        (ui_repo / "App/PregnancyTracker.xcodeproj").mkdir(parents=True)
-        (ui_repo / "App/project.yml").write_text("MARKETING_VERSION: 0.2\n")
-        (ui_repo / "App/PregnancyTracker.xcodeproj/project.pbxproj").write_text("MARKETING_VERSION = 0.2;\n")
+        (ui_repo / "release.txt").write_text("release metadata\n")
         commit(ui_repo, "version source")
         os.chdir(ui_repo)
         state_derive("defercase")
@@ -5081,7 +5116,7 @@ def _self_check() -> int:
         ui_coord = _load_coordination(ui_state, ui_plan)
         ui_coord["authorizations"]["unused"] = {"status": "active"}
         _write_coordination(ui_state, ui_coord, ui_plan)
-        defer_rationale = "bounded reversible cosmetic UI; no medical/safety/privacy/sharing/data-integrity/content effect"
+        defer_rationale = "bounded reversible cosmetic UI; no safety/privacy/sharing/data-integrity/content effect"
         screen_evidence = ui_repo / ".agents" / "workflow" / "defercase" / "screen-receipt.json"
         screen_evidence.parent.mkdir(parents=True, exist_ok=True)
         screen_evidence.write_text("current screen evidence")
@@ -5161,18 +5196,28 @@ def _self_check() -> int:
             raise AssertionError("stale deferral accepted")
         lane_merge("ui", "defercase")
         assert _load_coordination(_read_state(state_derive("defercase", checkout=ui_repo)), ui_plan)["authorizations"]["unused"]["status"] == "active"
-        assert invoke("--change", "defercase", "finish-record", "classify", "--classification", "pre-release", "--version", "0.2")[0] == 0
+        preparation = screen_evidence.with_name("preparation.md")
+        preparation.write_text("Human classification: preview. Release preparation validated.\n")
+        assert invoke("--change", "defercase", "finish-record", "classify", "--classification", "preview",
+                      "--artifact", str(preparation), "--input", "release.txt",
+                      "--inspection", "desktop", "--inspection", "mobile")[0] == 0
         assert invoke("--change", "defercase", "finish-record", "capture", "--check", "static:check",
-                      "--artifact", str(screen_evidence), "--input", "App/project.yml")[0] == 0
+                      "--artifact", str(screen_evidence), "--input", "release.txt")[0] == 0
         expect_refusal("--change", "defercase", "finish-record", "pr-check", contains="inspection missing")
-        for runtime in ("ios-27.0", "ios-26.5", "ios-18.6"):
-            report = ui_repo / ".agents" / "workflow" / "defercase" / f"{runtime}.md"
+        for checkpoint in ("desktop", "mobile"):
+            report = ui_repo / ".agents" / "workflow" / "defercase" / f"{checkpoint}.md"
             report.parent.mkdir(parents=True, exist_ok=True)
-            report.write_text(f"inspector: human\nruntime: {runtime}\nverdict: accept\n")
-            assert invoke("--change", "defercase", "finish-record", "inspect", "--check", runtime,
+            report.write_text(f"inspector: human\ncheckpoint: {checkpoint}\nverdict: accept\n")
+            assert invoke("--change", "defercase", "finish-record", "inspect", "--check", checkpoint,
                           "--artifact", str(report))[0] == 0
         assert invoke("--change", "defercase", "finish-record", "pr-check")[0] == 0
-        # A normally checkpointed merged changed-UI lane still needs integrated inspection.
+        declared = _read_state(_coordination_path("defercase", ui_repo))
+        no_checkpoints = json.loads(json.dumps(declared))
+        no_checkpoints["finish"]["required_inspections"] = []
+        _atomic_write_json(_coordination_path("defercase", ui_repo), no_checkpoints)
+        expect_refusal("--change", "defercase", "finish-record", "pr-check", contains="declared human inspection")
+        _atomic_write_json(_coordination_path("defercase", ui_repo), declared)
+        # Repository-declared inspections also apply without a lane deferral.
         normal_gate = _read_state(_coordination_path("defercase", ui_repo))
         saved_gate = json.loads(json.dumps(normal_gate))
         normal_gate["human_gates"]["ui"]["state"] = "accepted"
@@ -5180,37 +5225,37 @@ def _self_check() -> int:
         _atomic_write_json(_coordination_path("defercase", ui_repo), normal_gate)
         expect_refusal("--change", "defercase", "finish-record", "pr-check", contains="inspection missing")
         _atomic_write_json(_coordination_path("defercase", ui_repo), saved_gate)
-        separate_reject = ui_repo / ".agents" / "workflow" / "defercase" / "later-ios-18.6.md"
-        separate_reject.write_text('inspector: human\nruntime: ios-18.6\nverdict: reject\nprevious verdict: accept\n')
-        expect_refusal("--change", "defercase", "finish-record", "inspect", "--check", "ios-18.6",
+        separate_reject = ui_repo / ".agents" / "workflow" / "defercase" / "later-mobile.md"
+        separate_reject.write_text('inspector: human\ncheckpoint: mobile\nverdict: reject\nprevious verdict: accept\n')
+        expect_refusal("--change", "defercase", "finish-record", "inspect", "--check", "mobile",
                        "--artifact", str(separate_reject), contains="personally record accept")
         expect_refusal("--change", "defercase", "finish-record", "pr-check", contains="rejected human inspection")
-        separate_reject.write_text('inspector: human\nruntime: ios-18.6\nverdict: accept\n')
-        assert invoke("--change", "defercase", "finish-record", "inspect", "--check", "ios-18.6",
+        separate_reject.write_text('inspector: human\ncheckpoint: mobile\nverdict: accept\n')
+        assert invoke("--change", "defercase", "finish-record", "inspect", "--check", "mobile",
                       "--artifact", str(separate_reject))[0] == 0
         assert invoke("--change", "defercase", "finish-record", "pr-check")[0] == 0
-        report.write_text('inspector: human\nruntime: ios-18.6\nverdict: reject\nprevious verdict: accept\n')
-        assert invoke("--change", "defercase", "finish-record", "inspect", "--check", "ios-18.6",
+        report.write_text('inspector: human\ncheckpoint: mobile\nverdict: reject\nprevious verdict: accept\n')
+        assert invoke("--change", "defercase", "finish-record", "inspect", "--check", "mobile",
                       "--artifact", str(report))[0] == 1
-        expect_refusal("--change", "defercase", "finish-record", "inspect", "--check", "ios-18.6",
+        expect_refusal("--change", "defercase", "finish-record", "inspect", "--check", "mobile",
                        "--artifact", str(report), contains="personally record accept")
         # Even if a stored hash is refreshed externally, re-parse authoritative verdict.
         inspection_state = _read_state(state_derive("defercase", checkout=ui_repo))
         inspection_coord = _load_coordination(inspection_state, ui_plan)
-        inspection_coord["finish"]["inspection"]["ios-18.6"]["sha256"] = _path_sha256(report)
+        inspection_coord["finish"]["inspection"]["mobile"]["sha256"] = _path_sha256(report)
         _write_coordination(inspection_state, inspection_coord, ui_plan)
         expect_refusal("--change", "defercase", "finish-record", "pr-check", contains="rejected human inspection")
-        report.write_text('inspector: human\nruntime: ios-18.6\nverdict: accept\nverdict: reject\n')
-        expect_refusal("--change", "defercase", "finish-record", "inspect", "--check", "ios-18.6",
+        report.write_text('inspector: human\ncheckpoint: mobile\nverdict: accept\nverdict: reject\n')
+        expect_refusal("--change", "defercase", "finish-record", "inspect", "--check", "mobile",
                        "--artifact", str(report), contains="personally record accept")
         expect_refusal("--change", "defercase", "finish-record", "pr-check", contains="rejected human inspection")
-        report.write_text("inspector: human\nruntime: ios-18.6\nverdict: accept\n")
-        assert invoke("--change", "defercase", "finish-record", "inspect", "--check", "ios-18.6",
+        report.write_text("inspector: human\ncheckpoint: mobile\nverdict: accept\n")
+        assert invoke("--change", "defercase", "finish-record", "inspect", "--check", "mobile",
                       "--artifact", str(report))[0] == 0
         assert invoke("--change", "defercase", "finish-record", "pr-check")[0] == 0
-        report.write_text("inspector: oracle\nruntime: ios-18.6\nverdict: accept\n")
+        report.write_text("inspector: oracle\ncheckpoint: mobile\nverdict: accept\n")
         expect_refusal("--change", "defercase", "finish-record", "pr-check", contains="changed/rejected")
-        report.write_text("inspector: human\nruntime: ios-18.6\nverdict: accept\n")
+        report.write_text("inspector: human\ncheckpoint: mobile\nverdict: accept\n")
         (ui_repo / "new-input").write_text("changed")
         commit(ui_repo, "changed after human inspection")
         expect_refusal("--change", "defercase", "finish-record", "pr-check", contains="inspection missing/stale")
@@ -6718,7 +6763,7 @@ def _self_check() -> int:
                 raise AssertionError(f"a {case_name} must not satisfy the merge gate")
 
         # Combined single-lane mode records one independent Oracle pass for code/test and the
-        # whole-change final duty. The fast-forward preserves that exact candidate SHA, while
+        # whole-change implementation duty. The fast-forward preserves that exact candidate SHA, while
         # moved bases, candidate HEADs, and changed untracked binding files fail closed.
         combined_plan = {
             "schema_version": 1,
@@ -6736,7 +6781,8 @@ def _self_check() -> int:
         os.chdir(combined_repository)
         combined_base = git(combined_repository, "rev-parse", "HEAD")
         lane_open("only", "combined")
-        dispatch_run("only", "implementer", "provider/worker:low", "low", "1.1", change="combined")
+        dispatch_run("only", "implementer", "provider/worker:low", "low", "1.1",
+                     key="combined/only/implementer", change="combined")
         dispatch_done("only", "implementer", "impl/session-1", 20, "0.1", "ok", "combined")
         combined_coordination_path = _coordination_path("combined", combined_repository)
         combined_coordination = _read_state(combined_coordination_path)
@@ -7154,6 +7200,24 @@ def _self_check() -> int:
             raise AssertionError("changed combined acceptance must block post-close recovery")
         combined_acceptance.write_text("classification: pre-release\nversion: 0.2+1\n", encoding="utf-8")
         lane_merge("only", "combined")
+        # Release preparation follows the lane merge and can advance the feature branch.
+        (combined_repository / "release.txt").write_text("repository-defined release metadata\n")
+        release_head = commit(combined_repository, "prepare release after lane merge")
+        assert release_head != combined_head
+        lane_merge("only", "combined")
+        release_preparation = workflow_dir(combined_repository) / "combined" / "evidence" / "preparation.md"
+        release_preparation.parent.mkdir(parents=True, exist_ok=True)
+        release_preparation.write_text("Human classification: stable. Metadata and generated artifacts checked.\n")
+        finish_record("classify", classification="stable", artifact=str(release_preparation),
+                      inputs=["release.txt"], change="combined")
+        # Candidate review alone does not establish final release readiness.
+        expect_refusal("finish-record", "pr-check", "--change", "combined", contains="missing final evidence")
+        release_evidence = release_preparation.with_name("release-check.md")
+        release_evidence.write_text("Release checks passed on integrated HEAD.\n")
+        finish_record("capture", check="release-check", artifact=str(release_evidence),
+                      inputs=["release.txt", "implementation.txt"], change="combined")
+        finish_record("pr-check", change="combined")
+        lane_merge("only", "combined")
         # Removing the merge record must not turn matching ticks and trees into approval.
         recovered_coordination = _read_state(combined_coordination_path)
         recovered_coordination["lanes"]["only"]["merge"] = None
@@ -7348,7 +7412,7 @@ def _self_check() -> int:
             _write_coordination(screen_state, valid_screen_coordination, screen_plan)
         os.chdir(root)
 
-        # Design D5/D6: risk-based review decisions and ancestor reuse are opt-in.
+        # Review policy: risk-based review decisions and ancestor reuse are opt-in.
         # Every standard gate still blocks: shadow records never relax the standard gates,
         # the relaxed path honors only what a recorded decision selects, and the explicit
         # human override is restricted to waivable review duties.
@@ -7974,68 +8038,6 @@ def _self_check() -> int:
 
         os.chdir(root)
 
-        # RW-C02 regression: the change that introduces the risk-based gates cannot use
-        # them on its own lanes (design D6). Own-change --opt-in refuses, reuse without the
-        # policy refuses, and even a hand-set risk-based policy cannot relax the merge.
-        self_plan = {
-            "schema_version": 1,
-            "change": "optimize-testing-and-review-velocity",
-            "lanes": {
-                "only": {"risk": "ordinary", "ui": False, "screen": False, "sensitive": False, "depends_on": []},
-            },
-            "tasks": {"1.1": {"lane": "only", "deps": []}},
-        }
-        self_repository = make_repository(
-            "self-repository", "optimize-testing-and-review-velocity", self_plan, "- [ ] 1.1 only\n"
-        )
-        self_change = "optimize-testing-and-review-velocity"
-        os.chdir(self_repository)
-        self_open_result, _, self_open_error = invoke("lane-open", "only", "--change", self_change)
-        assert self_open_result == 0, self_open_error
-        self_coordination_path = _coordination_path(self_change, self_repository)
-        self_coordination = _read_state(self_coordination_path)
-        only_worktree = Path(self_coordination["lanes"]["only"]["worktree"])
-        subprocess.run(["git", "-C", str(only_worktree), "commit", "--allow-empty", "-q", "-m", "only work"], check=True)
-        task_tick("only", "1.1", self_change)
-        subprocess.run(
-            ["git", "-C", str(only_worktree), "add", f"openspec/changes/{self_change}/tasks.md"], check=True
-        )
-        subprocess.run(["git", "-C", str(only_worktree), "commit", "-q", "-m", "only tick"], check=True)
-        only_head = git(only_worktree, "rev-parse", "HEAD")
-        expect_refusal(
-            "review-decision", "only", "--change", self_change,
-            "--code", "skip", "--test", "skip", "--ui", "skip",
-            "--acceptance-coverage", "1.1", "--rationale", "self-relaxation attempt", "--opt-in",
-            contains="relaxing its own review gates",
-        )
-        garbage_self_diff = root / "self-garbage.diff"
-        garbage_self_diff.write_text("NOT AN INTERVENING DIFF\n", encoding="utf-8")
-        expect_refusal(
-            "review-reuse", "only", "code", "--change", self_change,
-            "--ancestor", only_head, "--intervening-diff", str(garbage_self_diff),
-            "--assessment", "nothing touched",
-            contains="risk-based review policy",
-        )
-        shadow_result, _, shadow_error = invoke(
-            "review-decision", "only", "--change", self_change,
-            "--code", "skip", "--test", "skip", "--ui", "skip",
-            "--risk-factor", "shadow-only recording stays observable",
-            "--acceptance-coverage", "1.1", "--rationale", "shadow-only under legacy authority",
-        )
-        assert shadow_result == 0, shadow_error
-        self_coordination = _read_state(self_coordination_path)
-        assert self_coordination["review_policy"] == "legacy"
-        self_coordination["review_policy"] = "risk-based"
-        _atomic_write_json(self_coordination_path, self_coordination)
-        subprocess.run(
-            ["git", "-C", str(only_worktree), "commit", "--allow-empty", "-q", "-m", "only follow-up"],
-            check=True,
-        )
-        expect_refusal(
-            "lane-merge", "only", "--change", self_change,
-            contains="required review 'code' is missing",
-        )
-        os.chdir(root)
 
     os.chdir(original_cwd)
     os.environ.clear()
@@ -8054,7 +8056,7 @@ def _selected_change(args: argparse.Namespace) -> str | None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = _ArgumentParser(
-        description="Validate committed feature-development state and record review/finish decisions. See docs/testing.md for impact-based test selection; the standard review gates apply unless a change opts in via review-decision --opt-in.",
+        description="Validate committed feature-development state and record review/finish decisions. Use repository guides for test selection; the standard review gates apply unless a change opts in via review-decision --opt-in.",
         epilog=FIELD_TABLE,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -8085,7 +8087,7 @@ def _parser() -> argparse.ArgumentParser:
     send.add_argument("--model", required=True, metavar="<model>")
     send.add_argument("--level", required=True, metavar="<level>")
     send.add_argument("--task", required=True, metavar="<task>")
-    send.add_argument("--key", metavar="<key>")
+    send.add_argument("--key", metavar="<key>", help="retry identity; new dispatches generate a unique key")
     send.add_argument(
         "--access", choices=("read-only", "write"),
         help="dispatch access; implementers default to write, reviewers and Oracle advice to read-only",
@@ -8103,6 +8105,7 @@ def _parser() -> argparse.ArgumentParser:
     sent = commands.add_parser("dispatch-done", help="record a temporary worker outcome")
     sent.add_argument("lane", metavar="<lane>")
     sent.add_argument("role", metavar="<role>")
+    sent.add_argument("--key", help="complete the dispatch with this unique key")
     sent.add_argument("--worker-run-id", metavar="<worker-run-id>")
     sent.add_argument("--tokens", type=int, metavar="<n>")
     sent.add_argument("--cost", metavar="<x>")
@@ -8127,7 +8130,7 @@ def _parser() -> argparse.ArgumentParser:
     reviewed.add_argument("--evidence", metavar="<path>")
     reviewed.add_argument(
         "--combined", "--combined-final", dest="combined", action="store_true",
-        help="record the eligible single-lane Oracle/code/final review",
+        help="record the eligible single-lane Oracle implementation review",
     )
     reviewed.add_argument(
         "--oracle-provenance", "--reviewer", "--oracle", dest="oracle_provenance", metavar="<id>",
@@ -8140,7 +8143,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     reviewed.add_argument(
         "--acceptance", "--acceptance-path", dest="acceptance", metavar="<path>",
-        help="final acceptance document (combined mode)",
+        help="candidate acceptance document (combined mode)",
     )
     _add_change_option(reviewed)
 
@@ -8194,7 +8197,7 @@ def _parser() -> argparse.ArgumentParser:
         epilog=(
             "Without --opt-in the record is shadow-only under the standard review gates. With\n"
             "--opt-in the change's review policy becomes risk-based and lane-merge honors the\n"
-            "selected duties (the archived self-review change is always refused). Skips are\n"
+            "selected duties. Skips are\n"
             "low-risk only, never PASS."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -8234,7 +8237,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     _add_change_option(reuse)
 
-    defer = commands.add_parser("human-defer", help="record bounded low-risk UI deferral to direct three-runtime integrated human inspection (opt-in)")
+    defer = commands.add_parser("human-defer", help="record bounded low-risk UI deferral to repository-defined integrated human inspection (opt-in)")
     defer.add_argument("lane")
     defer.add_argument("--commit", required=True)
     defer.add_argument("--evidence-revision", required=True)
@@ -8260,11 +8263,13 @@ def _parser() -> argparse.ArgumentParser:
 
     finish = commands.add_parser("finish-record", help="bind classification/version before final capture; restage after changes and recapture before PR")
     finish.add_argument("action", choices=("classify", "restage", "capture", "check", "inspect", "pr-check"))
-    finish.add_argument("--classification", choices=("pre-release", "minor-update", "feature-update"))
-    finish.add_argument("--version", help="human-classified expected marketing version")
+    finish.add_argument("--classification", help="human release classification from repository policy")
+    finish.add_argument("--version", help="optional version label; repository tooling validates the version")
     finish.add_argument("--check", help="selected check id")
     finish.add_argument("--artifact", help="gitignored receipt or manifest")
-    finish.add_argument("--input", action="append", dest="inputs", help="tracked input path affected by check (repeat)")
+    finish.add_argument("--input", action="append", dest="inputs", help="tracked preparation or check input path (repeat)")
+    finish.add_argument("--inspection", action="append", dest="inspections",
+                        help="required human inspection checkpoint for classify/restage (repeat)")
     _add_change_option(finish)
 
     dashboard_command = commands.add_parser("dashboard", help="render or serve the live coordination dashboard")
@@ -8323,11 +8328,12 @@ def main(argv: list[str] | None = None) -> int:
                 args.lane, args.role, args.model, args.level, args.task, args.key, selected_change,
                 args.access, args.acceptance, args.evidence,
             )
-            print(f"dispatch: recorded {args.lane}/{args.role} ({path})")
+            key = args.key or _read_state(path)["lanes"][args.lane]["dispatches"][-1]["key"]
+            print(f"dispatch: recorded {args.lane}/{args.role} key={key} ({path})")
             return 0
         if args.command == "dispatch-done":
             path = dispatch_done(
-                args.lane, args.role, args.worker_run_id, args.tokens, args.cost, args.result, selected_change
+                args.lane, args.role, args.worker_run_id, args.tokens, args.cost, args.result, selected_change, args.key
             )
             print(f"dispatch-done: recorded {args.lane}/{args.role} ({path})")
             return 0
@@ -8391,7 +8397,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "finish-record":
             path = finish_record(args.action, args.classification, args.version,
-                                 args.check, args.artifact, args.inputs, selected_change)
+                                 args.check, args.artifact, args.inputs, selected_change, args.inspections)
             print(f"finish-record: {args.action} ({path})")
             return 0
         if args.command == "dashboard":

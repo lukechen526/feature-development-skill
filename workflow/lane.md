@@ -10,7 +10,7 @@ Committed records:
 - `openspec/changes/<change>/plan/graph-plan.json`: assignments, dependencies, risk/UI flags.
 
 Coordinator store, gitignored, under `<feature-checkout>/.agents/workflow/<change>/`:
-- `state.json`: derived snapshot only. Never edit it; it is rebuilt from committed artifacts.
+- Derived state is rebuilt in memory from committed artifacts. There is no persisted `state.json`.
 - `coordination.json`: the definitive coordinator store. Holds each lane's `status`, `status_reason`,
   per-task state (`pending | in_progress | done | blocked`), `worktree` and `worktree_present`,
   `review_status` (`state`, `round`, `reviewer`, reviewed commit, report path), `escalation`
@@ -23,8 +23,7 @@ Coordinator store, gitignored, under `<feature-checkout>/.agents/workflow/<chang
 - `reports/`: lane live reports, named `<lane>-report.md`.
 
 Every artifact a later session needs lives here. A brief or review at any other path is a Coordinator error.
-The store is created on demand; `state-derive` appends `.agents/workflow/` to `.gitignore` when the rule is
-missing.
+The store is created on demand. `state-derive` ignores `.agents/workflow/` through the local Git exclude file.
 
 Only `featdev.py` writes state; atomic/idempotent. Lost state: re-derive.
 Lost coordination: re-review/renew approval, never lose committed completion.
@@ -65,12 +64,10 @@ Use command `--help` for flags; `…` below denotes required flags.
 | `dashboard [--serve]` | live page over `coordination.json`; `--serve` re-reads it on every request and the page reloads every 2 s |
 | `dashboard [--output <path>]` | offline state dashboard |
 
-Combined commands/bindings: `finish.md` § Combined single-lane review; guarded `--ff-only`.
-Repository testing reference owns test/evidence commands and reuse rules; briefs assign focused checks.
-Impact-based selection is the default for all changes: lane work runs the impact-selected focused
-checks on the primary runtime (`suite_runner.py impact` → `gate-check` per `docs/testing.md` § Lane and
-pre-PR selection); batch selected flow/group legs with `tools/run_maestro.sh batch <item>...`.
-Unknown reachability selects the full fallback (`suite all`, full widget matrix, full Swift suites).
+Combined lane integration uses the guarded `--ff-only` path described under Merge and close below.
+Repository guides own test selection, commands, evidence formats, and reuse rules.
+Briefs name the exact focused checks and their execution owners.
+If affected checks cannot be determined, use the repository's documented fallback or ask the human.
 
 ## Readiness and worktrees
 
@@ -122,8 +119,8 @@ it per lane as `inflight` (for example `in-flight only (lane ref): 4/11`); `dash
 column. The feature-branch view stays unchecked until `lane-merge`, which is what makes ticks authoritative.
 To inspect a lane candidate directly, run `state-derive <change> --ref featdev/<change>-<lane>`.
 
-The coordinator refreshes it with `featdev.py sync` after every subagent update. That command reads
-each lane ref's committed ticks, then writes `done`, `in_progress`, `pending` or `blocked` per task and the
+The coordinator refreshes it with `featdev.py sync` after every subagent update.
+Sync reads feature-branch ticks for merged work and lane-ref ticks for unmerged work. It writes `done`, `in_progress`, `pending` or `blocked` per task and the
 lane status (`pending | in_progress | blocked | done`) into `coordination.json`. Blocked cases that a sync
 cannot infer are recorded with `task-status <lane> <task> --status blocked --reason "<why>"`.
 
@@ -206,11 +203,14 @@ throughout the dispatch: update it after every commit, capture, or check so a fr
 can resume from the report alone if the session is lost. Assign one execution owner per check. Commit code/ticks/version/generated files before expensive final capture.
 Later writes invalidate affected evidence; full logs stay in files, handoffs contain decisive results/paths.
 
-After worker returns, Coordinator closes intent:
+Each dispatch receives a unique key. Keep that key with the harness run ID.
+Use `--key` only to retry the same recorded dispatch. Use a new key for a correction or another task.
+
+After worker returns, Coordinator closes the exact dispatch:
 
 ```bash
 python3 .agents/skills/feature-development-skill/bin/featdev.py \
-  --change <change> dispatch-done <lane-id> <role> \
+  --change <change> dispatch-done <lane-id> <role> --key <dispatch-key> \
   [--worker-run-id <worker-run-id>] [--tokens <n>] [--cost <x>] [--result <ok|failed>]
 ```
 
@@ -248,7 +248,7 @@ python3 .agents/skills/feature-development-skill/bin/featdev.py --change <change
 - `skip` is explicit and never labeled `PASS`; status and dashboard display it as `skipped`.
 - High-risk lanes cannot skip code or test review; a lane without the `ui`/`screen` flags has
   no UI duty and must record `--ui skip`.
-- Non-self-hosting (design D6): without `--opt-in` the record is shadow-only — persisted and
+- Without `--opt-in` the record is shadow-only — persisted and
   displayed, but lane-merge keeps the standard review gates. With `--opt-in` the
   change's review policy becomes `risk-based` and lane-merge honors the selected duties.
 - A missing decision record, or recording without `--opt-in`, always falls back to the
@@ -286,7 +286,7 @@ Risk-calibrated reachable issues only; no defensive coding/unnecessary complexit
 Added-code finding must name prevented failure.
 
 Required passes: ordinary = combined code/test; high = separate independent code and test;
-`ui: true` adds rendered-UI review of supplied screenshots (UI reviewer ingests evidence only — never launches a simulator); `screen: true` adds current changed-screen evidence before merge.
+`ui: true` adds rendered-UI review of supplied screenshots (UI reviewer ingests evidence only — never launches the application); `screen: true` adds current changed-screen evidence before merge.
 
 Coordinator records verdict before correction:
 
@@ -313,7 +313,9 @@ Use shared stable findings; collect all first-pass verdicts into one deduplicate
 
 Plan `ui`, `screen`, or `sensitive` requires checkpoint; flags are declared, never inferred from diff.
 Definitions: `plan.md`. No such flag: `human-gate` refuses. Screen lanes also require `--evidence`.
-Repository lane policy takes precedence over flag-based review/checkpoint defaults throughout this workflow: a UI lane selects impacted Screen & E2E flows from changed files via the impact map or otherwise visibly changes App UI, requires three-variant iOS 27.0 captures + UI agent review and default human evidence approval (an explicit human waiver recorded in the change's coordination record for exactly one lane lets UI agent review + automated PASSes close it, expires at merge, is never standing or assumed, and preserves evidence/provenance rules and later human spot-checks); non-UI lanes auto-close on current code/test review PASS without captures, UI/human evidence review or human merge sign-off, while separately directed manual checks and explicit target-branch PR/merge consent remain intact.
+Repository guides define the required UI states, environments, visual variants, and capture commands.
+Keep the plan-required reviews and human checkpoints. Record any repository-authorized waiver explicitly.
+A lane merge integrates work into the feature branch. It never authorizes a PR merge into the target branch.
 
 ```bash
 python3 .agents/skills/feature-development-skill/bin/featdev.py \
@@ -381,11 +383,9 @@ Coordinator never patches/approves own implementation; reviewers never patch rev
 
 ## Testing runtimes
 
-**Lane work: single newest runtime only** — the specific version is owned by the repository's
-testing reference (`docs/testing.md` § Runtime impact matrix) and may change over time. All development-time evidence —
-builds, suites, E2E/flow runs, captures — runs on that one runtime during lanes. Older-runtime
-runs are not part of any lane; the full multi-runtime release gate runs once, after all lanes
-merge (see `finish.md` + repository testing reference).
+Repository guides select the primary environment for lane checks and evidence.
+Run the repository's full release matrix only after all lanes merge into the feature branch.
+See `finish.md` for the release sequence. No platform or runtime version is fixed by this skill.
 
 ## Merge and close
 
@@ -440,8 +440,14 @@ python3 .agents/skills/feature-development-skill/bin/featdev.py --change <change
 python3 .agents/skills/feature-development-skill/bin/featdev.py --change <change> lane-close <lane-id>
 ```
 
-Combined mode: follow `finish.md` before merge. Oracle supplies ordinary code/test duty.
-Require current tasks/ticks/UI/human gates/version/acceptance/evidence.
-Fast-forward only from recorded lane base to exact Oracle-reviewed candidate.
-Changed base/candidate/acceptance/evidence/eligibility invalidates approval;
-fallback requires approved mode change and fresh standard review.
+Combined mode: Oracle supplies the lane code/test and complete-change implementation review.
+Require current tasks, ticks, UI review, human checkpoints, and candidate acceptance/evidence.
+Fast-forward the lane into the feature branch at the exact Oracle-reviewed candidate.
+Changed pre-merge base, candidate, acceptance, evidence, or eligibility invalidates that approval.
+Fallback requires an approved mode change and fresh standard review.
+
+After this lane merge, run `finish.md` on the feature branch.
+Classification, version changes, generated artifacts, and final release evidence happen there.
+Later release-preparation commits do not undo a recorded lane merge or approve the new release evidence.
+The combined record's `final` duty means implementation coherence, not final release approval.
+PR-opening approval and the human's PR merge into the target branch remain separate.

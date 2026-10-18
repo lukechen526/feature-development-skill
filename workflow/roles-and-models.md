@@ -53,7 +53,7 @@ Write the answers to a gitignored file under the coordinator store:
 
 The Coordinator reads this file before every dispatch. It re-asks only when the human requests a change,
 when a recorded model is no longer available, or when the change name does not match. `.agents/workflow/`
-must be gitignored; `featdev.py state-derive` appends that rule when it is missing.
+must be gitignored; `featdev.py state-derive` adds a local Git exclude rule when it is missing.
 
 Verify each selected model against the live list the harness reports. A model that is not offered is
 recorded as unavailable with the reason, and the human is asked again.

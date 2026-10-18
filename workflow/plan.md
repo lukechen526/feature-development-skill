@@ -69,7 +69,7 @@ Committed contract only; no run-scoped paths/evidence.
 | `lanes.<id>.risk` | yes | `ordinary` or `high` |
 | `lanes.<id>.ui` | yes | boolean; user-facing appearance/interaction |
 | `lanes.<id>.screen` | yes | boolean; rendered-screen evidence needed |
-| `lanes.<id>.sensitive` | yes | boolean; user-facing wording/content correctness, safety, privacy, medical sensitivity |
+| `lanes.<id>.sensitive` | yes | boolean; user-facing wording/content correctness, safety, privacy, other sensitive content |
 | `lanes.<id>.depends_on` | no | lane IDs; default none |
 | `tasks` | yes | task-id object |
 | `tasks.<id>.lane` | yes | owning lane ID |
@@ -80,14 +80,16 @@ Roughly 2–4 tasks/lane is reviewability guidance, not validation rule.
 
 Declared flags drive gates, never inferred from diff:
 - `risk: high`: separate code/test reviews; ordinary combines them.
-- `ui: true`: rendered-UI review of supplied screenshots/manifests (UI reviewer ingests evidence only; never launches a simulator).
+- `ui: true`: rendered-UI review of supplied screenshots/manifests (UI reviewer ingests evidence only; never launches the application).
 - `screen: true`: current changed-screen evidence before merge.
 - Any `ui`/`screen`/`sensitive`: per-lane human checkpoint.
 
 `combined-single-lane`: exactly one ordinary-risk lane.
-Independent Oracle covers lane code/test plus complete-change final duty.
+Independent Oracle covers lane code/test plus complete-change implementation duty.
 UI/human gates, acceptance evidence, independence, risk classification remain.
-Unknown/ineligible mode fails validation. Equal trees never replace exact reviewed commit.
+Unknown/ineligible mode fails validation. Equal trees never replace the exact reviewed lane commit.
+Combined mode still merges the lane into the feature branch before the finish phase.
+Candidate acceptance and evidence do not replace integrated release evidence.
 
 ## Validate
 

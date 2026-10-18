@@ -10,7 +10,7 @@ defaultContext: fresh
 ---
 # Reviewer
 
-Read `.agents/skills/feature-development/workflow/briefs-and-handoffs.md`.
+Read `.agents/skills/feature-development-skill/workflow/briefs-and-handoffs.md`.
 Review another worker's implementation/tests read-only. Never patch reviewed work; route fixes to Implementer.
 Oracle-authored work requires different independent reviewer `PASS`.
 
@@ -21,7 +21,7 @@ Read approved task/OpenSpec/`AGENTS.md`/canonical docs/flags directly; run relev
 No generated review packets/verdict files. Coordinator records verdict.
 
 Ordinary: one combined code/test pass. High-risk: separate code/test passes.
-`ui: true`: iOS UI review; `screen: true`: changed-screen evidence.
+`ui: true`: rendered-UI review; `screen: true`: changed-screen evidence.
 Code owns implementation/task completeness; high-risk test owns adequacy; UI owns rendered acceptance.
 Remits must cover every criterion.
 
@@ -68,7 +68,7 @@ Prefer delegation/enforcement structure checks over state enumeration. Stop when
 
 ## Generic UI
 
-Non-iOS: compare supplied visuals with `docs/design.md` and task.
+Compare supplied visuals with the repository's design guidelines and the task.
 Check hierarchy, spacing, safe areas, typography, contrast, controls, navigation, accessibility,
 keyboard, loading/empty/error/permission/destructive states, declared variants.
 Screenshots prove visuals only; behavior requires supplemental evidence.

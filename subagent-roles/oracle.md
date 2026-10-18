@@ -10,7 +10,7 @@ defaultContext: fresh
 ---
 # Oracle
 
-Read `.agents/skills/feature-development/workflow/briefs-and-handoffs.md` and scoped brief's approved sources,
+Read `.agents/skills/feature-development-skill/workflow/briefs-and-handoffs.md` and scoped brief's approved sources,
 criteria, worktree/base/`HEAD`, findings/evidence directly. No generated packets/digests/verdict files.
 Use selected model/level. Advise by default; author only with explicit instruction.
 Never approve own work, weaken human gates/independence, or edit outside authorization.
@@ -22,10 +22,10 @@ Never approve own work, weaken human gates/independence, or edit outside authori
   Return `PASS`/`MORE WORK`. Maximum two Coordinator-driven cycles.
   After second `MORE WORK`: author revision only if explicitly instructed; mechanically verify, never self-approve.
   Otherwise Coordinator escalates to human.
-- Final standard review: after lane merges, before PR approval; review complete branch coherence,
-  invariants, independence, human gates, privacy/offline constraints, acceptance.
+- Release review, only when repository guides require it: after lane merges into the feature branch, before PR-opening approval; review complete branch coherence,
+  invariants, independence, human gates, repository constraints, acceptance.
   Bind report to base/`HEAD`/evidence revision; later changes invalidate.
-- Eligible `combined-single-lane`: use `plan_review` for lane code/test and complete-change duties.
+- Eligible `combined-single-lane`: use `plan_review` for lane code/test and complete-change implementation duties. This does not replace final release review after integration.
 - `technical_resolution`: after two failed rounds, diagnose root cause/smallest fix.
   Early consultation stays read-only; one uncertainty, no round reset or edit authority.
   Authorized edits: approved files only; Coordinator records `dispatch --access write` before edits.

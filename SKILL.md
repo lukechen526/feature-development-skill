@@ -11,18 +11,25 @@ Continue authorized work until that outcome, a concrete blocker, or a required h
 Coordinator manages planning/integration; dispatched workers write implementation/tests/UI fixes. Reviews remain independent.
 
 Records: committed `tasks.md` ticks = completion; committed `plan/graph-plan.json` = contract;
-feature-branch commits = merges. Derived state and scratch never prove completion or approval.
+feature-branch commits record lane integration. Derived state and scratch never prove completion or approval.
 
-Coordinator store: `.agents/workflow/<change>/` holds `state.json`, `coordination.json`,
+Two different merges exist:
+1. **Lane merge:** Coordinator merges a reviewed lane into the feature branch with `lane-merge`.
+2. **PR merge:** The human merges the feature branch into the target branch, usually `main`.
+
+All lane merges precede finish. Finish prepares the feature branch for a PR.
+Human approval to open a PR never authorizes its merge.
+
+Coordinator store: `.agents/workflow/<change>/` holds `coordination.json`,
 `model-selection.json`, `briefs/`, `reviews/`, `reports/` and `evidence/`. It is gitignored; every brief
 and review lives there at a predictable name, never in chat or a scratch path.
 Lane lifecycle: implementation → review 1 → fix → review 2 (two-round max); then Oracle-authored
-fix → independent review → human gate. Lanes test on a single newest runtime only; after all
-lanes merge, human classification and required version/generated changes are committed
-before final release capture/review on integrated HEAD, then separate human approval opens
-PR (no additional Oracle review before PR). A recorded low-risk UI checkpoint may defer
-only on the opt-in path, with direct human three-runtime integrated inspection before PR;
-this change itself retains legacy early checkpoints and full release matrix.
+fix → independent review → human gate where required. Repository guides define test environments.
+After all lanes merge into the feature branch, obtain human release classification.
+Commit required version changes and generated artifacts before final release evidence and review.
+Ask separately for approval to open the PR. The human later decides whether to merge the PR.
+An opt-in low-risk UI checkpoint may defer to direct human inspection of integrated artifacts.
+Repository guides define the inspection checkpoints.
 Implementation worker timeout: 60 minutes per dispatch, dispatched `async: true` (background —
 session stays interactive). Workers are resumable: on timeout, recover the run id via
 `subagent status`/`children.list` and revive with `subagent resume` (30-day session retention;
@@ -52,8 +59,8 @@ The Coordinator MUST work through these steps strictly in order. Do NOT batch, r
 3. **Step 3 — Lanes** (`workflow/lane.md`): dispatch one fresh worker subagent per task;
    implement/review/integrate lanes; record every subagent update
    in the coordinator store before doing anything else (dispatch result, ticks, reviews, lane phase), so
-   `status` always answers which lane is complete, in progress, under review, or waiting; current-HEAD reviews, bounded corrections, merge/close gates, risk-based review decisions and ancestor reuse (opt-in/shadow; legacy gates stay authoritative for this change), human-override merges (`lane-merge --human-override --override-reason`, waiving review duties only), Orca child-worktree registration of lanes.
-4. **Step 4 — Finish** (`workflow/finish.md`): classification/version/integrated commit before final evidence, selected release checks, direct human integrated inspection for deferred UI, separate PR/merge approvals.
+   `status` always answers which lane is complete, in progress, under review, or waiting; current-HEAD reviews, bounded corrections, merge/close gates, risk-based review decisions and ancestor reuse (opt-in/shadow; standard gates apply without opt-in), human-override merges (`lane-merge --human-override --override-reason`, waiving review duties only), Orca child-worktree registration of lanes.
+4. **Step 4 — Finish** (`workflow/finish.md`): classification/version/integrated commit before final evidence, selected release checks, direct human integrated inspection for deferred UI, separate PR-opening approval and human PR merge.
 5. **Recovery** (`workflow/recovery.md`, any step): re-derive, never infer approval from missing scratch.
 
 Before any dispatch, Coordinator reads `workflow/briefs-and-handoffs.md`; send only relevant filled template. Every role handoff follows `workflow/briefs-and-handoffs.md`.
