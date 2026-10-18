@@ -92,9 +92,9 @@ Unknown/ineligible mode fails validation. Equal trees never replace exact review
 ## Validate
 
 ```bash
-python3 .agents/skills/feature-development/bin/featdev.py \
+python3 .agents/skills/feature-development-skill/bin/featdev.py \
   plan-validate openspec/changes/<change>/plan/graph-plan.json --tasks openspec/changes/<change>/tasks.md
-python3 .agents/skills/feature-development/bin/featdev.py \
+python3 .agents/skills/feature-development-skill/bin/featdev.py \
   plan-graph openspec/changes/<change>/plan/graph-plan.json --format md
 ```
 

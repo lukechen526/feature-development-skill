@@ -1,8 +1,8 @@
 ---
-name: feature-development
+name: feature-development-skill
 description: Coordinate OpenSpec feature plans, lane dispatch/review, and gated integration. Use for feature orchestration, not standalone edits or explanations.
 license: MIT
-compatibility: "Requires the openspec CLI, the repository role agents under .agents/agents/, and one worker-dispatch mechanism."
+compatibility: "Requires the openspec CLI, one worker-dispatch mechanism, and the role files in subagent-roles/."
 ---
 # Feature Development Coordinator
 

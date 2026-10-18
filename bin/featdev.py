@@ -384,16 +384,16 @@ def _ensure_workflow_ignored(root: Path) -> None:
         return
 
 
-def _derived_state_path(change: str, checkout: Path | None = None) -> Path:
-    root = (checkout or Path.cwd()).resolve()
-    return workflow_dir(root) / _safe_change(change) / "state.json"
-
 
 def _coordination_path(change: str, checkout: Path | None = None) -> Path:
-    return _derived_state_path(change, checkout).with_name("coordination.json")
+    root = (checkout or Path.cwd()).resolve()
+    return workflow_dir(root) / _safe_change(change) / "coordination.json"
 
 
-def _read_state(path: Path) -> dict[str, Any]:
+def _read_state(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    path = Path(value)
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -601,7 +601,7 @@ def _derived_task_views(plan: dict[str, Any], checked_tasks: set[str]) -> dict[s
     return tasks
 
 
-def state_derive(change: str, source_ref: str | None = None, checkout: Path | None = None) -> Path:
+def state_derive(change: str, source_ref: str | None = None, checkout: Path | None = None) -> dict[str, Any]:
     change = _safe_change(change)
     repository = (checkout or Path.cwd()).resolve()
     _ensure_workflow_ignored(repository)
@@ -641,19 +641,7 @@ def state_derive(change: str, source_ref: str | None = None, checkout: Path | No
         "lanes": lanes,
         "ready_lanes": ready_lanes,
     }
-    path = _derived_state_path(change, repository)
-    _guard_derived_state_target(path)
-    _atomic_write_json(path, state)
-    # Deriving refreshes the rendered dashboard through the same best-effort path the
-    # coordination-writing commands use, so a changed state is visible without a separate
-    # render command. Missing or malformed coordination does not fail the derivation.
-    try:
-        coordination = _load_coordination(state, plan)
-    except StateError:
-        coordination = _new_coordination(state, plan)
-        coordination["_available"] = False
-    _render_dashboard_best_effort(change, repository, coordination, plan)
-    return path
+    return state
 
 
 _COORDINATION_FIELDS = (
@@ -1364,14 +1352,14 @@ def _render_dashboard_best_effort(
     changed state is visible without running a separate render command.
     """
     try:
-        derived_path = _derived_state_path(change, checkout)
-        derived = _read_state(derived_path)
+        derived = state_derive(change, None, checkout)
         current_plan = plan or json.loads(
             _committed_file(checkout, str(derived["source_sha"]),
                             f"openspec/changes/{change}/plan/graph-plan.json")
         )
         render_dashboard(
-            derived_path, _overlay_coordination(derived, coordination, current_plan), current_plan
+            workflow_dir(checkout) / change / "dashboard.html",
+            _overlay_coordination(derived, coordination, current_plan), current_plan,
         )
     except (OSError, StateError, PlanError, json.JSONDecodeError):
         pass
@@ -1419,30 +1407,6 @@ def _infer_change(checkout: Path) -> str:
     )
 
 
-def _find_state(change: str | None = None, checkout: Path | None = None) -> Path:
-    root = (checkout or Path.cwd()).resolve()
-    if change:
-        path = _derived_state_path(_safe_change(change), root)
-        if not path.is_file():
-            raise StateError(f"state: no derived state for change {change!r}; run state-derive <change>")
-        return path
-    paths: list[Path] = []
-    candidates = list(sorted(workflow_dir(root).glob("*/state.json")))
-    candidates += list(sorted((root / ".agents" / "tmp").glob("featdev-*/state.json")))
-    for path in candidates:
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(value, dict) and value.get("change") and not value.get("run_id"):
-            paths.append(path)
-    if len(paths) == 1:
-        return paths[0]
-    if len(paths) > 1:
-        names = ", ".join(path.parent.name.removeprefix("featdev-") for path in paths)
-        raise StateError(f"state: multiple derived states ({names}); provide --change")
-    raise StateError("state: no derived state found; run state-derive <change>")
-
 
 def _state_context(
     change: str | None = None,
@@ -1451,14 +1415,8 @@ def _state_context(
 ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     root = (checkout or Path.cwd()).resolve()
     requested = _safe_change(change) if change else None
-    try:
-        path = _find_state(requested, root)
-    except StateError as exc:
-        if not str(exc).startswith("state: no derived state"):
-            raise
-        selected = requested or _infer_change(root)
-        path = state_derive(selected, None, root)
-    state = _read_state(path)
+    selected = requested or _infer_change(root)
+    state = state_derive(selected, None, root)
     if state.get("run_id"):
         raise StateError("state: legacy run state is not a source of truth; derive the change state")
     checkout_value = state.get("feature_checkout")
@@ -1468,16 +1426,7 @@ def _state_context(
     state_change = state.get("change")
     if not isinstance(state_change, str) or not state_change:
         raise StateError("state: change is missing; re-derive the state")
-    current = _state_git(repository, "rev-parse", "--verify", "HEAD^{commit}")
-    current_head = current.stdout.strip()
-    if current.returncode or not current_head:
-        raise StateError("state: feature checkout has no committed HEAD; repair the checkout")
     plan_relative = f"openspec/changes/{state_change}/plan/graph-plan.json"
-    plan_text = _committed_file(repository, current_head, plan_relative)
-    expected_hash = hashlib.sha256(plan_text.encode("utf-8")).hexdigest()
-    if state.get("source_sha") != current_head or state.get("plan_sha256") != expected_hash:
-        path = state_derive(state_change, None, repository)
-        state = _read_state(path)
     source_sha = state.get("source_sha")
     if not isinstance(source_sha, str) or not source_sha:
         raise StateError("state: source SHA is missing; re-derive the state")
@@ -1498,7 +1447,7 @@ def _state_context(
         coordination["_available"] = False
         coordination["_error"] = _one_line(exc)
     view = _overlay_coordination(state, coordination, plan)
-    return path, view, plan
+    return _coordination_path(state_change, repository), view, plan
 
 
 def _git_commit(checkout: Path, revision: str) -> str:
@@ -4753,7 +4702,6 @@ def lane_merge(
     # fail: an interrupted refresh must never leave a one-use grant active on disk. The projection
     # refresh does not mutate coordination, so no second write is needed after it.
     _write_coordination(state, coordination, plan)
-    state_derive(change_name, None, repository)
     return path
 
 
@@ -5074,14 +5022,14 @@ def _self_check() -> int:
         os.chdir(ui_repo)
         state_derive("defercase")
         lane_open("ui", "defercase")
-        ui_worktree = _lane_worktree_path(_read_state(_derived_state_path("defercase", ui_repo)), "ui")
+        ui_worktree = _lane_worktree_path(_read_state(state_derive("defercase", checkout=ui_repo)), "ui")
         task_tick("ui", "1.1", "defercase")
         ui_head = commit(ui_worktree, "UI lane and tick")
         review_decision("ui", {"code": "skip", "test": "skip", "ui": "skip"}, [],
                         "1.1 checked", ["static:check"], "bounded reversible cosmetic UI", True, "defercase")
         expect_refusal("--change", "defercase", "lane-merge", "ui", contains="human gate")
         # A grant sitting unused cannot be consumed by deferral.
-        ui_state = _read_state(_derived_state_path("defercase", ui_repo))
+        ui_state = _read_state(state_derive("defercase", checkout=ui_repo))
         ui_coord = _load_coordination(ui_state, ui_plan)
         ui_coord["authorizations"]["unused"] = {"status": "active"}
         _write_coordination(ui_state, ui_coord, ui_plan)
@@ -5164,7 +5112,7 @@ def _self_check() -> int:
         else:
             raise AssertionError("stale deferral accepted")
         lane_merge("ui", "defercase")
-        assert _load_coordination(_read_state(_derived_state_path("defercase", ui_repo)), ui_plan)["authorizations"]["unused"]["status"] == "active"
+        assert _load_coordination(_read_state(state_derive("defercase", checkout=ui_repo)), ui_plan)["authorizations"]["unused"]["status"] == "active"
         assert invoke("--change", "defercase", "finish-record", "classify", "--classification", "pre-release", "--version", "0.2")[0] == 0
         assert invoke("--change", "defercase", "finish-record", "capture", "--check", "static:check",
                       "--artifact", str(screen_evidence), "--input", "App/project.yml")[0] == 0
@@ -5199,7 +5147,7 @@ def _self_check() -> int:
         expect_refusal("--change", "defercase", "finish-record", "inspect", "--check", "ios-18.6",
                        "--artifact", str(report), contains="personally record accept")
         # Even if a stored hash is refreshed externally, re-parse authoritative verdict.
-        inspection_state = _read_state(_derived_state_path("defercase", ui_repo))
+        inspection_state = _read_state(state_derive("defercase", checkout=ui_repo))
         inspection_coord = _load_coordination(inspection_state, ui_plan)
         inspection_coord["finish"]["inspection"]["ios-18.6"]["sha256"] = _path_sha256(report)
         _write_coordination(inspection_state, inspection_coord, ui_plan)
@@ -5340,8 +5288,7 @@ def _self_check() -> int:
         derived_repository = make_repository(
             "derived-repository", "derived", derived_plan, "- [ ] 1.1 root\n- [ ] 2.1 child\n"
         )
-        derived_path = state_derive("derived", checkout=derived_repository)
-        derived_state = _read_state(derived_path)
+        derived_state = state_derive("derived", checkout=derived_repository)
         derived_head = git(derived_repository, "rev-parse", "HEAD")
         assert derived_state["source_sha"] == derived_head
         assert "run_id" not in derived_state
@@ -5353,19 +5300,16 @@ def _self_check() -> int:
         _atomic_write_json(legacy, {"run_id": "old-run", "change": "derived", "checked_tasks": ["1.1"]})
         legacy_bytes = legacy.read_bytes()
         state_derive("derived", checkout=derived_repository)
-        assert _find_state("derived", derived_repository) == derived_path.resolve()
+        assert not (derived_repository / ".agents" / "workflow" / "derived" / "state.json").exists()
         assert legacy.exists(), "legacy scratch must not be selected or overwritten"
         assert legacy.read_bytes() == legacy_bytes, "legacy scratch must remain byte-identical"
-        assert _read_state(derived_path)["checked_tasks"] == []
         old_hash = derived_state["plan_sha256"]
         derived_tasks = derived_repository / "openspec" / "changes" / "derived" / "tasks.md"
         derived_tasks.write_text("- [x] 1.1 root\n- [ ] 2.1 child\n", encoding="utf-8")
         # Uncommitted ticks are not source truth.
-        state_derive("derived", checkout=derived_repository)
-        assert _read_state(derived_path)["checked_tasks"] == []
+        assert state_derive("derived", checkout=derived_repository)["checked_tasks"] == []
         derived_head = commit(derived_repository, "tick root")
-        state_derive("derived", checkout=derived_repository)
-        derived_state = _read_state(derived_path)
+        derived_state = state_derive("derived", checkout=derived_repository)
         assert derived_state["source_sha"] == derived_head
         assert derived_state["checked_tasks"] == ["1.1"]
         assert derived_state["lanes"]["root"]["complete"]
@@ -5379,8 +5323,7 @@ def _self_check() -> int:
         derived_plan["lanes"]["root"]["screen"] = True
         derived_plan_path.write_text(json.dumps(derived_plan), encoding="utf-8")
         revised_head = commit(derived_repository, "revise plan")
-        state_derive("derived", checkout=derived_repository)
-        revised_state = _read_state(derived_path)
+        revised_state = state_derive("derived", checkout=derived_repository)
         assert revised_state["plan_sha256"] != old_hash
         assert revised_state["plan_revision"] == revised_head
         candidate_branch = git(derived_repository, "branch", "--show-current")
@@ -5390,8 +5333,7 @@ def _self_check() -> int:
         candidate_head = commit(derived_repository, "tick child")
         git(derived_repository, "checkout", "-q", "main")
         main_head = git(derived_repository, "rev-parse", "HEAD")
-        state_derive("derived", "candidate", derived_repository)
-        candidate_state = _read_state(derived_path)
+        candidate_state = state_derive("derived", "candidate", derived_repository)
         assert candidate_state["source_ref"] == "candidate"
         assert candidate_state["source_sha"] == candidate_head and candidate_head != main_head
         fresh_clone = root / "derived-fresh-clone"
@@ -5400,8 +5342,7 @@ def _self_check() -> int:
         # Git configuration copies ignored files during a test.
         import shutil
         shutil.rmtree(fresh_clone / ".agents", ignore_errors=True)
-        fresh_path = state_derive("derived", checkout=fresh_clone)
-        assert _read_state(fresh_path)["source_sha"] == main_head
+        assert state_derive("derived", checkout=fresh_clone)["source_sha"] == main_head
         assert not (fresh_clone / ".agents" / "tmp" / "featdev-old-run").exists()
 
         # Readiness is one computation for status, dashboard, and lane-open. A lane may
@@ -5697,18 +5638,26 @@ def _self_check() -> int:
         refresh_repository = make_repository(
             "refresh-repository", "refresh", refresh_plan, "- [ ] 1.1 refresh work\n"
         )
-        refresh_dashboard = _derived_state_path("refresh", refresh_repository).parent / "dashboard.html"
+        refresh_dashboard = workflow_dir(refresh_repository) / "refresh" / "dashboard.html"
         if refresh_dashboard.exists():
             refresh_dashboard.unlink()
-        state_derive("refresh", checkout=refresh_repository)
-        assert refresh_dashboard.is_file(), "state-derive must refresh the rendered dashboard"
+        os.chdir(refresh_repository)
+        try:
+            dashboard("refresh", refresh_dashboard)
+        finally:
+            os.chdir(root)
+        assert refresh_dashboard.is_file(), "the dashboard command must render the page"
         pending_page = refresh_dashboard.read_text(encoding="utf-8")
         assert "1.1" in pending_page and "pending" in pending_page, pending_page
         (refresh_repository / "openspec" / "changes" / "refresh" / "tasks.md").write_text(
             "- [x] 1.1 refresh work\n", encoding="utf-8"
         )
         commit(refresh_repository, "refresh tick")
-        state_derive("refresh", checkout=refresh_repository)
+        os.chdir(refresh_repository)
+        try:
+            dashboard("refresh", refresh_dashboard)
+        finally:
+            os.chdir(root)
         refreshed_page = refresh_dashboard.read_text(encoding="utf-8")
         assert refreshed_page != pending_page, "a changed state must reach the rendered dashboard"
         assert "complete" in refreshed_page, refreshed_page
@@ -5750,7 +5699,7 @@ def _self_check() -> int:
         result, status_output, status_error = invoke("status", "--change", "flow")
         assert result == 0, status_error
         assert "change: flow" in status_output and "ready lanes: a" in status_output
-        flow_state_path = _derived_state_path("flow", flow_repository)
+        flow_state_path = state_derive("flow", checkout=flow_repository)
         flow_state = _read_state(flow_state_path)
         assert "run_id" not in flow_state
         result, _, stderr = invoke("lane-open", "a", "--change", "flow")
@@ -5880,12 +5829,10 @@ def _self_check() -> int:
         real_state_derive = globals()["state_derive"]
 
         def corrupt_candidate_state(change_name, source_ref=None, checkout=None):
-            candidate_path = real_state_derive(change_name, source_ref, checkout)
+            candidate_state = real_state_derive(change_name, source_ref, checkout)
             if change_name == "flow" and source_ref == b_head:
-                candidate_state = _read_state(candidate_path)
-                candidate_state["source_sha"] = "0" * 40
-                _atomic_write_json(candidate_path, candidate_state)
-            return candidate_path
+                return {**candidate_state, "source_sha": "0" * 40}
+            return candidate_state
 
         globals()["state_derive"] = corrupt_candidate_state
         try:
@@ -5908,14 +5855,12 @@ def _self_check() -> int:
         unavailable_page = unavailable_dashboard_path.read_text(encoding="utf-8")
         assert "Dispatch view unavailable" in unavailable_page, unavailable_page
         state_derive("flow", checkout=flow_repository)
-        stale_flow_state = _read_state(flow_state_path)
-        stale_flow_state["source_sha"] = "0" * 40
-        _atomic_write_json(flow_state_path, stale_flow_state)
         current_flow_head = git(flow_repository, "rev-parse", "HEAD")
         result, stale_status, stale_error = invoke("status", "--change", "flow")
         assert result == 0, stale_error
         assert f"source: {current_flow_head}\n" in stale_status, stale_status
-        assert _read_state(flow_state_path)["source_sha"] == current_flow_head
+        # There is no persisted derived state to go stale: the store is coordination.json only.
+        assert not (workflow_dir(flow_repository) / "flow" / "state.json").exists()
         expect_refusal("lane-merge", "b", "--change", "flow", contains="required review 'code'")
         lane_review("b", "code", "PASS", b_head, replacement_report, "flow-r1", change="flow")
         # An unfinished dispatch on a terminal lane is stale before any worktree-head
@@ -6551,29 +6496,8 @@ def _self_check() -> int:
         # there must not leave a one-use grant active on disk. Derive first so the only
         # state_derive call left inside lane_merge is the post-merge refresh being tested.
         state_derive("grant", None, grant_repository)
-        real_state_derive = state_derive
-
-        def failing_refresh(change_name, source_ref=None, checkout=None):
-            # Only the post-merge refresh fails: the pre-merge candidate derivation is legitimate
-            # work and is distinguished by its committed source_ref.
-            if source_ref is None:
-                raise StateError("simulated projection failure")
-            return real_state_derive(change_name, source_ref, checkout)
-
-        # Rebind through globals() rather than assigning a local: a plain assignment would make
-        # state_derive a local name for the whole self-check body and break every later use.
-        globals()["state_derive"] = failing_refresh
-        try:
-            lane_merge("alpha", "grant")
-        except StateError as exc:
-            assert "simulated projection failure" in str(exc), str(exc)
-        else:
-            raise AssertionError("the simulated projection failure must surface")
-        finally:
-            globals()["state_derive"] = real_state_derive
+        lane_merge("alpha", "grant")
         persisted = _read_state(_coordination_path("grant", grant_repository))
-        # The merge itself must have landed and been recorded before the refresh failed; if the
-        # phase is not merged here, the failure came from somewhere before the durable write.
         assert persisted["lanes"]["alpha"].get("phase") == "merged", persisted["lanes"]["alpha"]
         assert persisted["authorizations"]["grant-a1"]["status"] == "consumed", persisted["authorizations"]
         # Repair the projection, then confirm the retry is idempotent rather than a second merge.
@@ -8335,8 +8259,8 @@ def main(argv: list[str] | None = None) -> int:
             print(output, end="")
             return 0
         if args.command == "state-derive":
-            path = state_derive(args.change, args.source_ref)
-            print(f"state-derive: derived {args.change} ({path})")
+            state_derive(args.change, args.source_ref)
+            print(f"state-derive: derived {args.change} in memory (coordination.json is the store)")
             return 0
         if args.command == "task-tick":
             path = task_tick(args.lane, args.task, selected_change)

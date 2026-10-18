@@ -32,7 +32,7 @@ Lost coordination: re-review/renew approval, never lose committed completion.
 No initialization. After approved planning commit:
 
 ```bash
-python3 .agents/skills/feature-development/bin/featdev.py --change <change> state-derive <change>
+python3 .agents/skills/feature-development-skill/bin/featdev.py --change <change> state-derive <change>
 ```
 
 Default source: committed plan/tasks at feature `HEAD`; record source SHA.
@@ -41,7 +41,7 @@ Refresh after plan/task-artifact commits and before first lane mutation.
 
 ## Commands
 
-Standard-library CLI: `.agents/skills/feature-development/bin/featdev.py`; no repository-specific constants.
+Standard-library CLI: `.agents/skills/feature-development-skill/bin/featdev.py`; no repository-specific constants.
 Commands discover state; pass global `--change <change>` when ambiguous. No run id.
 Use command `--help` for flags; `…` below denotes required flags.
 
@@ -78,7 +78,7 @@ Unknown reachability selects the full fallback (`suite all`, full widget matrix,
 Before any lane implementation dispatch, Coordinator runs:
 
 ```bash
-python3 .agents/skills/feature-development/bin/featdev.py --change <change> lane-open <lane-id>
+python3 .agents/skills/feature-development-skill/bin/featdev.py --change <change> lane-open <lane-id>
 ```
 
 On first open, `lane-open` creates a new isolated git worktree from feature `HEAD`:
@@ -168,7 +168,7 @@ brief to `.agents/workflow/<change>/briefs/<lane>-<role>-<task>.md` and hand the
 Record intent before starting worker:
 
 ```bash
-python3 .agents/skills/feature-development/bin/featdev.py \
+python3 .agents/skills/feature-development-skill/bin/featdev.py \
   --change <change> dispatch <lane-id> <role> \
   --model <provider/model:level> --level <level> --task <task-id> [--key <key>] \
   [--access <read-only|write>] [--acceptance <path>] [--evidence <path>]
@@ -196,7 +196,7 @@ The ONLY permitted `tasks.md` change is flipping your assigned tasks' checkboxes
 notes, sub-bullets, or wording edits there; records belong in the lane report:
 
 ```bash
-python3 .agents/skills/feature-development/bin/featdev.py \
+python3 .agents/skills/feature-development-skill/bin/featdev.py \
   --change <change> task-tick <lane-id> <task-id>
 ```
 
@@ -208,7 +208,7 @@ Later writes invalidate affected evidence; full logs stay in files, handoffs con
 After worker returns, Coordinator closes intent:
 
 ```bash
-python3 .agents/skills/feature-development/bin/featdev.py \
+python3 .agents/skills/feature-development-skill/bin/featdev.py \
   --change <change> dispatch-done <lane-id> <role> \
   [--worker-run-id <worker-run-id>] [--tokens <n>] [--cost <x>] [--result <ok|failed>]
 ```
@@ -238,7 +238,7 @@ The Coordinator records a per-lane review-duty decision for code, test, and UI d
 (`full`, `focused`, or `skip`) with risk factors, acceptance coverage, checks, and rationale:
 
 ```bash
-python3 .agents/skills/feature-development/bin/featdev.py --change <change> review-decision <lane-id> \
+python3 .agents/skills/feature-development-skill/bin/featdev.py --change <change> review-decision <lane-id> \
   --code <full|focused|skip> --test <full|focused|skip> --ui <full|focused|skip> \
   --risk-factor <factor>… --acceptance-coverage "<criteria the duties cover>" \
   --check "<runnable check>"… --rationale "<why>" [--opt-in]
@@ -259,7 +259,7 @@ An earlier ordinary-agent `PASS` at an ancestor commit can satisfy a later HEAD 
 Coordinator records the assessed intervening change:
 
 ```bash
-python3 .agents/skills/feature-development/bin/featdev.py --change <change> review-reuse <lane-id> <role> \
+python3 .agents/skills/feature-development-skill/bin/featdev.py --change <change> review-reuse <lane-id> <role> \
   --ancestor <ancestor-sha> --intervening-diff <diff-file> \
   --assessment "<what the intervening change does not touch>" \
   [--evidence-inputs-changed yes|no]
@@ -290,7 +290,7 @@ Required passes: ordinary = combined code/test; high = separate independent code
 Coordinator records verdict before correction:
 
 ```bash
-python3 .agents/skills/feature-development/bin/featdev.py \
+python3 .agents/skills/feature-development-skill/bin/featdev.py \
   --change <change> lane-review <lane-id> <role> <PASS|MORE WORK> \
   --commit <head-sha> --report <absolute-report-path> \
   [--evidence-revision <rev>] [--evidence <path>]
@@ -315,7 +315,7 @@ Definitions: `plan.md`. No such flag: `human-gate` refuses. Screen lanes also re
 Repository lane policy takes precedence over flag-based review/checkpoint defaults throughout this workflow: a UI lane selects impacted Screen & E2E flows from changed files via the impact map or otherwise visibly changes App UI, requires three-variant iOS 27.0 captures + UI agent review and default human evidence approval (an explicit human waiver recorded in the change's coordination record for exactly one lane lets UI agent review + automated PASSes close it, expires at merge, is never standing or assumed, and preserves evidence/provenance rules and later human spot-checks); non-UI lanes auto-close on current code/test review PASS without captures, UI/human evidence review or human merge sign-off, while separately directed manual checks and explicit target-branch PR/merge consent remain intact.
 
 ```bash
-python3 .agents/skills/feature-development/bin/featdev.py \
+python3 .agents/skills/feature-development-skill/bin/featdev.py \
   --change <change> human-gate <lane-id> \
   --state <waiting|approved|rejected|revoked> --commit <head-sha> --evidence-revision <rev> [--evidence <path>]
 ```
@@ -323,7 +323,7 @@ python3 .agents/skills/feature-development/bin/featdev.py \
 Recorded human authorization may permit independent Oracle stand-in:
 
 ```bash
-python3 .agents/skills/feature-development/bin/featdev.py \
+python3 .agents/skills/feature-development-skill/bin/featdev.py \
   --change <change> human-gate <lane-id> \
   --state approved --commit <head-sha> --evidence-revision <rev> \
   --approved-by oracle --authorization <grant.json> --stand-in-report <report.md> \
@@ -405,7 +405,7 @@ A recorded human decision trumps the review gates only. When the human explicitl
 merge against the review gates, Coordinator may run:
 
 ```bash
-python3 .agents/skills/feature-development/bin/featdev.py --change <change> lane-merge <lane-id> \
+python3 .agents/skills/feature-development-skill/bin/featdev.py --change <change> lane-merge <lane-id> \
   --human-override --override-reason "<the human decision>"
 ```
 
@@ -435,8 +435,8 @@ Other task-status changes/mismatches block. Exclude inherited earlier-lane ticks
 Feature branch moved: non-fast-forward merge preserving reviewed SHA/tree; never rebase passed lane.
 
 ```bash
-python3 .agents/skills/feature-development/bin/featdev.py --change <change> lane-merge <lane-id>
-python3 .agents/skills/feature-development/bin/featdev.py --change <change> lane-close <lane-id>
+python3 .agents/skills/feature-development-skill/bin/featdev.py --change <change> lane-merge <lane-id>
+python3 .agents/skills/feature-development-skill/bin/featdev.py --change <change> lane-close <lane-id>
 ```
 
 Combined mode: follow `finish.md` before merge. Oracle supplies ordinary code/test duty.
