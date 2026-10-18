@@ -2195,7 +2195,13 @@ def _review_summary(reviews: object) -> tuple[str, str]:
     return (f"r{max(rounds)}" if rounds else "none"), ", ".join(labels) or "none"
 
 
-def _dashboard_html(state: dict[str, Any], plan: dict[str, Any], run_dir: Path) -> str:
+def _dashboard_html(
+    state: dict[str, Any], plan: dict[str, Any], run_dir: Path, refresh_seconds: int = 0
+) -> str:
+    refresh_script = (
+        f"<script>window.setTimeout(function () {{ window.location.reload(); }}, {refresh_seconds * 1000});</script>"
+        if refresh_seconds > 0 else ""
+    )
     view = _status_view(state, plan)
     state_lanes = view.get("lanes") if isinstance(view.get("lanes"), dict) else {}
     plan_lanes = plan.get("lanes") if isinstance(plan.get("lanes"), dict) else {}
@@ -2337,7 +2343,8 @@ small {{ opacity: .8; }}
 {dispatch_html}
 <table><thead><tr><th>Lane</th><th>Tokens</th><th>Spend</th></tr></thead>
 <tbody>{''.join(cost_rows)}</tbody></table></section>
-<footer><small>Rendered from derived state {html.escape(str(run_dir / 'state.json'), quote=True)}; coordination is temporary and never task truth.</small></footer>
+<footer><small>Live view of {html.escape(str(run_dir / 'coordination.json'), quote=True)}; git commits remain authoritative for completion.</small></footer>
+{refresh_script}
 </body>
 </html>
 """
@@ -2349,9 +2356,50 @@ def render_dashboard(state_path: Path, state: dict[str, Any], plan: dict[str, An
     return target
 
 
-def dashboard(change: str | None = None, output: Path | None = None) -> Path:
-    state_path, state, plan = _state_context(change, coordination_optional=True)
-    return render_dashboard(state_path, state, plan, output)
+def dashboard(
+    change: str | None = None, output: Path | None = None,
+    serve: bool = False, port: int = 8765, refresh_seconds: int = 2,
+) -> Path | None:
+    """Render the dashboard. With serve=True the page re-reads coordination.json live."""
+    if not serve:
+        state_path, state, plan = _state_context(change, coordination_optional=True)
+        return render_dashboard(state_path, state, plan, output)
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - http.server API
+            if self.path.split("?")[0] not in {"/", "/index.html", "/dashboard.html"}:
+                self.send_error(404)
+                return
+            try:
+                _, live, live_plan = _state_context(change, coordination_optional=True)
+                body = _dashboard_html(live, live_plan, workflow_dir(Path.cwd()), refresh_seconds)
+            except (StateError, PlanError, OSError) as exc:
+                body = (
+                    "<!doctype html><meta charset='utf-8'><title>workflow dashboard</title>"
+                    f"<pre>dashboard unavailable: {_one_line(exc)}</pre>"
+                    f"<script>setTimeout(function () {{ location.reload(); }}, {refresh_seconds * 1000});</script>"
+                )
+            data = body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    host, bound_port = server.server_address[:2]
+    print(f"dashboard: http://{host}:{bound_port}/ (reads coordination.json per request; {refresh_seconds}s refresh)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return None
 
 
 def _safe_component(value: object, label: str) -> str:
@@ -5955,7 +6003,8 @@ def _self_check() -> int:
         dashboard_page = dashboard_path.read_text(encoding="utf-8")
         for marker in (
             "Lanes and assigned task status", "Coordination phase", "Tasks and task dependencies", "Lane dependency graph",
-            "Task dependency graph", "1.1", "2.1", "complete from committed ticks", "never task truth",
+            "Task dependency graph", "1.1", "2.1", "complete from committed ticks",
+            "git commits remain authoritative for completion", "coordination.json",
         ):
             assert marker in dashboard_page, marker
         lane_section = dashboard_page.split(
@@ -8218,8 +8267,11 @@ def _parser() -> argparse.ArgumentParser:
     finish.add_argument("--input", action="append", dest="inputs", help="tracked input path affected by check (repeat)")
     _add_change_option(finish)
 
-    dashboard_command = commands.add_parser("dashboard", help="render the offline derived-state dashboard")
+    dashboard_command = commands.add_parser("dashboard", help="render or serve the live coordination dashboard")
     dashboard_command.add_argument("--output", type=Path, metavar="<path>")
+    dashboard_command.add_argument("--serve", action="store_true", help="serve a live page that re-reads coordination.json")
+    dashboard_command.add_argument("--port", type=int, default=8765)
+    dashboard_command.add_argument("--refresh-seconds", type=int, default=2)
     _add_change_option(dashboard_command)
 
     sync_command = commands.add_parser(
@@ -8343,6 +8395,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"finish-record: {args.action} ({path})")
             return 0
         if args.command == "dashboard":
+            if args.serve:
+                dashboard(selected_change, args.output, True, args.port, args.refresh_seconds)
+                return 0
             path = dashboard(selected_change, args.output)
             print(f"dashboard: rendered ({path})")
             return 0

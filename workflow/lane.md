@@ -62,6 +62,7 @@ Use command `--help` for flags; `…` below denotes required flags.
 | `lane-merge <lane>` | validate base/ticks/source/plan/reviews/gates; merge |
 | `lane-close <lane>` | remove merged worktree/ref |
 | `status [--json]` | tasks/lanes/readiness/reviews/open dispatches |
+| `dashboard [--serve]` | live page over `coordination.json`; `--serve` re-reads it on every request and the page reloads every 2 s |
 | `dashboard [--output <path>]` | offline state dashboard |
 
 Combined commands/bindings: `finish.md` § Combined single-lane review; guarded `--ff-only`.
