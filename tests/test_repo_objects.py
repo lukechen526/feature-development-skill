@@ -575,6 +575,44 @@ class RepositoryObjectsTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
         self.assertEqual(f.state_derive("alpha")["plan_sha256"], self.read()["changes"]["alpha"]["plan_sha256"])
 
+    def test_migrate_v2_graph_with_archived_and_active_changes(self):
+        self.finish_lane("alpha")
+        f.lane_merge("work", "alpha")
+        f.lane_close("work", "alpha")
+        f.coordination_sync("beta")
+        archive = self.archive_change("alpha")
+        before_head = self.commit(self.repo, "archive completed alpha before upgrade")
+        self.document["schema_version"] = 2
+        for node in self.document["changes"].values():
+            for lane in node["lanes"].values():
+                lane["screen"] = False
+        self.write(self.plan_path, self.document)
+        before_coordination = self.coord_path.read_bytes()
+        before_artifacts = {path.relative_to(self.repo): path.read_bytes()
+                            for path in (self.repo / "openspec").rglob("*") if path.is_file()}
+        with self.assertRaisesRegex(f.PlanError, "schema_version 2 is retired"):
+            f.validate_plan(self.plan_path)
+
+        f.migrate_repository()
+
+        migrated = json.loads(self.plan_path.read_text())
+        self.assertEqual(migrated["schema_version"], 3)
+        self.assertEqual(set(migrated["changes"]), {"alpha", "beta"})
+        for node in migrated["changes"].values():
+            self.assertNotIn("screen", node["lanes"]["work"])
+            self.assertFalse(node["lanes"]["work"]["ui"])
+        f.validate_plan(self.plan_path)
+        self.assertEqual(self.coord_path.read_bytes(), before_coordination)
+        self.assertEqual({path.relative_to(self.repo): path.read_bytes()
+                          for path in (self.repo / "openspec").rglob("*") if path.is_file()}, before_artifacts)
+        self.assertTrue((archive / "tasks.md").is_file())
+        self.assertFalse((self.repo / "openspec/changes/alpha").exists())
+        self.assertTrue((self.repo / "openspec/changes/beta/tasks.md").is_file())
+        self.assertEqual(self.git("rev-parse", "HEAD"), before_head)
+        first = self.plan_path.read_bytes(), self.coord_path.read_bytes()
+        f.migrate_repository()
+        self.assertEqual((self.plan_path.read_bytes(), self.coord_path.read_bytes()), first)
+
     def test_migrate_retains_ledgers_and_is_idempotent(self):
         expected = {}
         for change, plan in f._change_plans(self.document).items():

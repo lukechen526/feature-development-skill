@@ -264,7 +264,7 @@ def migrate_repository(checkout: Path | None = None) -> Path:
     projected = _change_plans(document)
     for change, plan in projected.items():
         _check_shape(plan, path)
-        _check_task_ids(plan, root / "openspec" / "changes" / change / "tasks.md")
+        _check_task_ids(plan, _openspec_change_directory(root, change) / "tasks.md")
         _check_references(plan)
         _check_acyclic(plan)
     coordination = _repository_coordination(root)
