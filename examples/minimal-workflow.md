@@ -7,6 +7,7 @@ Never use sample text as a review report or human approval.
 
 Read [the skill](../SKILL.md) and [the handoff contract](../workflow/briefs-and-handoffs.md) first.
 Stop after any failed command or unmet gate.
+This walkthrough instantiates the [canonical helper commands](../workflow/helper-commands.md).
 
 ## 1. Prepare the consuming repository
 
@@ -22,7 +23,7 @@ export FEATDEV_SKILL_ROOT="/absolute/path/to/feature-development-skill"
 FEATURE_CHECKOUT="$(pwd -P)"
 CHANGE="hello-message"
 STORE="$FEATURE_CHECKOUT/.agents/workflow/$CHANGE"
-PLAN="openspec/changes/$CHANGE/plan/graph-plan.json"
+PLAN=".agents/workflow/plan-graph.json"
 TASKS="openspec/changes/$CHANGE/tasks.md"
 openspec --version
 openspec list --json
@@ -31,72 +32,93 @@ mkdir -p "$STORE/briefs" "$STORE/reviews" "$STORE/reports" "$STORE/evidence"
 
 Complete [preflight and role setup](../workflow/preflight-and-roles.md) before any launch.
 Write the repo-level capability map and human-approved model selection.
-Set `ORACLE_MODEL`, `ORACLE_LEVEL`, `IMPLEMENTER_MODEL`, `IMPLEMENTER_LEVEL`, `CODE_MODEL`, and `CODE_LEVEL`
-from that selection in the coordinator shell.
+The Coordinator reads the selected role profiles for each actual harness launch.
+Helper dispatch records take the role and task, not separate model or thinking overrides.
 Do not substitute defaults or create a per-change selection file.
 
-## 2. Author and review the plan
+## 2. Review change artifacts, then the repo graph
 
-The coordinator writes these planning artifacts:
+### Review the OpenSpec change
+
+The proposal, design, and delta specs already exist from the consuming repository's OpenSpec process.
+The Coordinator writes the task checklist. No graph is required for this review.
+
+```bash
+printf '%s\n' '- [ ] 1.1 Implement message.greeting() returning hello.' > "$TASKS"
+PLAN_HEAD="$(git rev-parse HEAD)"
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" plan-dispatch   --scope change --role oracle     --report "$STORE/reviews/artifacts-oracle-r1.md"
+```
+
+Write `$STORE/briefs/artifacts-oracle-r1.md` using operation `openspec_review`.
+Name only this change's proposal, design, delta specs, tasks, review HEAD, role source, profile, and capability map.
+Exclude the repo graph. Launch a fresh read-only Oracle through the preflighted harness.
+Read its actual report. Only after a real `PASS`, record:
+
+```bash
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" plan-review   --scope change --role oracle PASS --head "$PLAN_HEAD" --report "$STORE/reviews/artifacts-oracle-r1.md"
+```
+
+For multiple included changes, repeat artifact review for each before proceeding.
+For `MORE WORK`, use the bounded correction procedure in [the plan phase](../workflow/plan.md).
+
+### Author and review the repo graph
+
+This fixture starts without a graph. Do not overwrite an existing `.agents/workflow/plan-graph.json`.
+For an existing graph, add `changes.hello-message` while preserving every other change.
+The graph is local and ignored, just like coordination.
 
 ```bash
 mkdir -p "$(dirname "$PLAN")"
 cat > "$PLAN" <<'JSON'
 {
-  "schema_version": 1,
-  "change": "hello-message",
-  "lanes": {
-    "message": {
-      "risk": "ordinary",
-      "ui": false,
-      "screen": false,
-      "sensitive": false,
-      "depends_on": []
+  "schema_version": 2,
+  "changes": {
+    "hello-message": {
+      "lanes": {
+        "message": {
+          "risk": "ordinary",
+          "ui": false,
+          "screen": false,
+          "sensitive": false,
+          "depends_on": [],
+          "tasks": {
+            "1.1": {
+              "deps": []
+            }
+          }
+        }
+      }
     }
-  },
-  "tasks": {
-    "1.1": {"lane": "message", "deps": []}
   }
 }
 JSON
-printf '%s\n' '- [ ] 1.1 Implement message.greeting() returning hello.' > "$TASKS"
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" plan-validate "$PLAN" --tasks "$TASKS"
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" plan-validate "$PLAN"
 python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" plan-graph "$PLAN" --format md
-PLAN_HEAD="$(git rev-parse HEAD)"
+mkdir -p "$FEATURE_CHECKOUT/.agents/workflow/reviews" "$FEATURE_CHECKOUT/.agents/workflow/briefs"
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" plan-dispatch   --scope graph --role oracle     --report "$FEATURE_CHECKOUT/.agents/workflow/reviews/plan-graph-oracle-r1.md"
 ```
 
-Write the filled Oracle brief to `$STORE/briefs/plan-oracle-r1.md`.
-Name the proposal, design, delta specs, tasks, plan, feature `HEAD`, role source, profile, and capability map.
-Require the first report to echo role ID, profile hash, worktree, `HEAD`, and contract path.
-
-Record intent before launching a fresh read-only Oracle in the feature checkout:
+Write `.agents/workflow/briefs/plan-graph-oracle-r1.md` using operation `plan_graph_review`.
+Supply the whole repo graph, every included change's artifact verdict, and the reviewed source artifacts.
+Launch a separate fresh Oracle. Read the actual report. Only after a real graph `PASS`, record:
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" plan-dispatch \
-  --role oracle --model "$ORACLE_MODEL" --level "$ORACLE_LEVEL" --task plan \
-  --report "$STORE/reviews/plan-oracle-r1.md"
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" plan-review   --scope graph --role oracle PASS --head "$PLAN_HEAD"   --report "$FEATURE_CHECKOUT/.agents/workflow/reviews/plan-graph-oracle-r1.md"
 ```
 
-Launch the Oracle through the preflighted harness.
-Verify its first-report receipt and read its real review report.
-Only after an actual `PASS`, record:
-
-```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" plan-review \
-  --role oracle PASS --head "$PLAN_HEAD" --report "$STORE/reviews/plan-oracle-r1.md"
-```
-
-For `MORE WORK`, record that verdict instead.
-Follow the bounded correction procedure in [the plan phase](../workflow/plan.md).
+The artifact ledger is `$STORE/plan-reviews.json`.
+The graph ledger is `.agents/workflow/plan-graph-review.json`.
+Neither verdict substitutes for the other or grants human approval.
 
 CAUTION: The following commits record approval; they do not obtain it.
-Obtain explicit human approval before running them.
+Obtain explicit human approval of the OpenSpec artifacts and local graph before running them.
+Never stage either repo-level runtime object.
 
 ```bash
+GRAPH_DIGEST="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["plan_sha256"])'   "$FEATURE_CHECKOUT/.agents/workflow/plan-graph-review.json")"
 git add "openspec/changes/$CHANGE"
-git commit -m "docs: add approved greeting plan"
-git commit --allow-empty -m "planning checkpoint approved by human"
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" state-derive "$CHANGE"
+git commit -m "docs: add approved greeting artifacts"
+git commit --allow-empty -m "planning checkpoint approved by human; graph digest $GRAPH_DIGEST"
 ```
 
 ## 3. Dispatch the implementer
@@ -115,7 +137,7 @@ Require the live report at `$STORE/reports/message-report.md`.
 
 ```bash
 python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" dispatch message implementer \
-  --model "$IMPLEMENTER_MODEL" --level "$IMPLEMENTER_LEVEL" --task 1.1 --key "$IMPLEMENTER_KEY"
+    --task 1.1 --key "$IMPLEMENTER_KEY"
 ```
 
 Launch a fresh implementer in `$WORKTREE` through the selected harness.
@@ -128,11 +150,14 @@ The brief must supply resolved variables; do not assume child sessions inherit t
 ```bash
 cd "$WORKTREE"
 python3 -B -c 'import message; assert message.greeting() == "hello"; print("focused check: PASS")'
-git add message.py
-git commit -m "feat: add greeting"
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" task-tick message 1.1
-git add "openspec/changes/$CHANGE/tasks.md"
-git commit -m "docs: mark greeting task complete"
+```
+
+The implementer changes only task `1.1` from `[ ]` to `[x]` in the lane's `$TASKS`.
+All other task IDs, checkbox states, and definitions remain unchanged.
+
+```bash
+git add message.py "openspec/changes/$CHANGE/tasks.md"
+git commit -m "feat: add greeting and complete task"
 git status --short
 ```
 
@@ -150,14 +175,14 @@ LANE_HEAD="$(git -C "$WORKTREE" rev-parse HEAD)"
 
 ## 4. Review and integrate the lane
 
-Write `$STORE/briefs/message-code-r1.md` using the review template.
+Write `$STORE/briefs/message-code-reviewer-r1.md` using the review template.
 Require a combined implementation/test-adequacy review at `LANE_HEAD`.
-Name the exact lane range and `$STORE/reviews/message-code-r1.md`.
+Name the exact lane range and `$STORE/reviews/message-code-reviewer-r1.md`.
 
 ```bash
 CODE_KEY="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" dispatch message code \
-  --model "$CODE_MODEL" --level "$CODE_LEVEL" --task 1.1 --key "$CODE_KEY"
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" dispatch message code-reviewer \
+    --task 1.1 --key "$CODE_KEY"
 ```
 
 Launch a different fresh reviewer in the lane worktree.
@@ -166,10 +191,10 @@ Verify its receipt and read the report.
 After an actual independent `PASS`, record:
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" dispatch-done message code \
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" dispatch-done message code-reviewer \
   --key "$CODE_KEY" --worker-run-id "$CODE_RUN_ID" --result ok
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" lane-review message code PASS \
-  --commit "$LANE_HEAD" --report "$STORE/reviews/message-code-r1.md"
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" lane-review message code-reviewer PASS \
+  --commit "$LANE_HEAD" --report "$STORE/reviews/message-code-reviewer-r1.md"
 python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" sync
 python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" lane-merge message
 python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" lane-close message
@@ -234,7 +259,10 @@ python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" status --json
 
 Ask separately for approval to open the PR.
 Follow the repository's PR policy after that approval.
-The human retains the later PR merge decision.
+Monitor automated PR checks and bot code-review comments using [post-PR follow-up](../workflow/finish.md#post-pr-follow-up).
+Route actionable findings through implementation and independent review, then recheck the updated PR.
+Sync and archive the completed OpenSpec change before human merge using [the finish sequence](../workflow/finish.md#openspec-sync-and-archive).
+Recheck the archival commit on the PR. The human retains the later PR merge decision.
 
 ## Expected records
 
@@ -242,8 +270,10 @@ The human retains the later PR merge decision.
 |---|---|
 | `.agents/workflow/capability-map.md` | Actual harness capabilities |
 | `.agents/workflow/model-selection.json` | Human-approved repo-level role profiles |
-| `.agents/workflow/hello-message/plan-reviews.json` | Completed plan dispatch and current plan review |
-| `.agents/workflow/hello-message/coordination.json` | Completed lane dispatches, current review, recorded merge, and finish bindings |
+| `.agents/workflow/hello-message/plan-reviews.json` | Current Oracle verdict for OpenSpec artifacts only |
+| `.agents/workflow/plan-graph-review.json` | Separate Oracle verdict for the whole repo graph |
+| `.agents/workflow/plan-graph.json` | Local repo-level change/lane/task graph; never committed |
+| `.agents/workflow/coordination.json` | Completed dispatches, reviews, merge, finish, and lane tasks under `changes.hello-message` |
 | `openspec/changes/hello-message/tasks.md` | Task `1.1` committed and checked on the feature branch |
 | `.agents/workflow/hello-message/reviews/` | Real Oracle and code-review reports |
 | `.agents/workflow/hello-message/reports/` | Implementer live report |

@@ -1,6 +1,6 @@
 ---
 name: ui-reviewer
-role_id: ui
+role_id: ui-reviewer
 description: Independent reviewer of supplied rendered UI evidence against approved requirements and repository design guidelines.
 tools: read, grep, find, ls, bash, write
 context: fresh
@@ -17,9 +17,13 @@ Use platform-specific references only when the repository or brief requires them
 Review supplied screenshots, manifests, and metadata against the approved change documents.
 Never edit implementation or build, launch, or capture the application.
 
+Lane briefs identify the OpenSpec change and lane in repo-level `.agents/workflow/plan-graph.json`.
+Finish briefs instead identify the change, integrated HEAD, owned scope, and repository release criteria; no active lane is required.
+Only the Coordinator writes the shared `.agents/workflow/coordination.json`.
+
 ## Inputs
 
-Require UI criteria, committed plan, lane worktree, reviewed HEAD, evidence revision,
+Require UI criteria, approved local plan, lane worktree, reviewed HEAD, evidence revision,
 required-state matrix, report path, and supplied visual artifacts.
 Missing, stale, unreadable, or incorrectly bound evidence means UNVERIFIED and overall MORE WORK.
 Read approved sources directly. Never consume generated verdicts as proof.

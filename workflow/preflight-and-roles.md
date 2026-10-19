@@ -1,5 +1,7 @@
 # Preflight, roles, models, and dispatch
 
+Command syntax: [helper command reference](helper-commands.md).
+
 The human chooses the model and thinking for every role. There is no fixed default table in this skill.
 The selection is asked once per repository, recorded at repo level, and reused by every change until the
 human changes it.
@@ -90,11 +92,11 @@ question tool exists). Ask one question per role, in this order:
 
 | Role ID | Role | Question |
 |---|---|---|
-| `orchestration` | Orchestration | Which model and thinking level should run the coordinator session? |
+| `coordinator` | Coordinator | Which model and thinking level should run the coordinator session? |
 | `implementer` | Implementer | Which model and thinking level should implement tasks and fixes? |
-| `code` | Code reviewer | Which model and thinking level should review code? |
-| `test` | Test reviewer | Which model and thinking level should review test adequacy? |
-| `ui` | Rendered-UI reviewer | Which model and thinking level should review supplied UI evidence? |
+| `code-reviewer` | Code reviewer | Which model and thinking level should review code? |
+| `test-reviewer` | Test reviewer | Which model and thinking level should review test adequacy? |
+| `ui-reviewer` | Rendered-UI reviewer | Which model and thinking level should review supplied UI evidence? |
 | `oracle` | Oracle | Which model and thinking level should review plans, mediate, and author bounded fixes? |
 | `runner` | Runner | Which model and thinking level should run long checks or polling? |
 
@@ -111,23 +113,26 @@ Rules:
 
 ## Canonical roles
 
+The `coordinator` profile selects the current coordinator session, not a dispatchable subagent.
+The following role IDs identify dispatchable subagents.
+
 | Role ID | Role file | Review duty |
 |---|---|---|
 | `implementer` | [subagent-roles/implementer.md](../subagent-roles/implementer.md) | Implementation, tests, fixes |
-| `code` | [subagent-roles/code-reviewer.md](../subagent-roles/code-reviewer.md) | Implementation/task completeness; ordinary lanes also own the combined code/test review |
-| `test` | [subagent-roles/test-reviewer.md](../subagent-roles/test-reviewer.md) | Test adequacy/coverage/quality and mutation testing; high-risk lanes or an explicitly selected separate test duty |
-| `ui` | [subagent-roles/ui-reviewer.md](../subagent-roles/ui-reviewer.md) | Supplied rendered-UI evidence |
+| `code-reviewer` | [subagent-roles/code-reviewer.md](../subagent-roles/code-reviewer.md) | Implementation/task completeness; ordinary lanes also own the combined code/test review |
+| `test-reviewer` | [subagent-roles/test-reviewer.md](../subagent-roles/test-reviewer.md) | Test adequacy/coverage/quality and mutation testing; high-risk lanes |
+| `ui-reviewer` | [subagent-roles/ui-reviewer.md](../subagent-roles/ui-reviewer.md) | Supplied rendered-UI evidence |
 | `oracle` | [subagent-roles/oracle.md](../subagent-roles/oracle.md) | Plan review, mediation, authorized fixes, combined review |
 | `runner` | [subagent-roles/runner.md](../subagent-roles/runner.md) | Long checks and polling; observations only, no verdict |
 
 The same role ID is used in the role file's `role_id`, `model-selection.json`, the positional role in
-`dispatch <lane> <role>` and `lane-review <lane> <role> <verdict>`, and `review-decision` duties.
+`dispatch <lane> <role>` and `lane-review <lane> <role> <verdict>`.
 Do not use aliases or alternate spellings.
-Combined Oracle review is recorded under `role=code`; there is no separate `oracle` combined role.
+Combined Oracle review is recorded under `role=code-reviewer`; there is no separate `oracle` combined role.
 
-Ordinary lanes require the combined `code` review, which covers code and test adequacy. High-risk lanes
-require separate `code` and `test` reviews. An explicitly selected separate test duty also uses
-`test`. The standard gate requires `ui` review only when the plan sets `ui: true`.
+Ordinary lanes require the combined `code-reviewer` review, which covers code and test adequacy. High-risk lanes
+require separate `code-reviewer` and `test-reviewer` reviews. The standard gate requires `ui-reviewer` review only when the plan sets `ui: true`.
+The plan's `ui` flag is unchanged.
 `screen: true` requires current screen evidence, not a separate UI review. Either flag requires a human
 checkpoint, subject to the documented deferral rules.
 
@@ -138,6 +143,11 @@ Write the answers once for the repository:
 ```
 <repo>/.agents/workflow/model-selection.json
 ```
+
+The shared plan is `.agents/workflow/plan-graph.json`; the shared runtime store is `.agents/workflow/coordination.json`.
+Both are local, gitignored objects that group tasks under lanes and lanes under OpenSpec changes.
+Neither is committed. Planning reviews OpenSpec artifacts per change before a separate repo graph review.
+Model profiles remain repo-level and apply across those changes.
 
 This file is created in Step 1, after the human answers. Step 0 does not create it. Every change reuses
 it; do not copy it into `.agents/workflow/<change>/`. A different selection for one change requires an
@@ -174,11 +184,11 @@ When writing it, copy in the preflight's `harness`, `skill_root`, `capability_ma
     }
   },
   "roles": {
-    "orchestration": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" },
+    "coordinator": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" },
     "implementer": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" },
-    "code": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" },
-    "test": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" },
-    "ui": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" },
+    "code-reviewer": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" },
+    "test-reviewer": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" },
+    "ui-reviewer": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" },
     "oracle": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" },
     "runner": { "model": "<provider/model>", "thinking": "<level>", "effective": "<value>" }
   },
@@ -197,7 +207,7 @@ When writing it, copy in the preflight's `harness`, `skill_root`, `capability_ma
 }
 ```
 
-Repeat `profiles` for every role defined in Step 1b: `implementer`, `code`, `test`, `ui`, `oracle`,
+Repeat `profiles` for every role defined in Step 1b: `implementer`, `code-reviewer`, `test-reviewer`, `ui-reviewer`, `oracle`,
 and `runner`.
 
 The Coordinator reads this file before every dispatch. It re-asks only when the repository has no
@@ -247,7 +257,8 @@ role prompt injection. The mechanism determines harness behavior, never provider
 Dispatch-layer failure: stop; never switch mechanism silently. Model failure: recover the locked role
 model in the same lane worktree.
 
-Record the role with `dispatch <lane> <role>` and pass `--model`, `--level`, and `--access`.
+Record the role, task, and access using [dispatch](helper-commands.md#dispatch).
+The helper does not resolve model settings; the Coordinator applies the selected role profile to the actual harness launch.
 Keep the profile id or hash in the brief and repo-level model selection. The selected model and level
 are locked per role lineage inside a lane, including replacements.
 

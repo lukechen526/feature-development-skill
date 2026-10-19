@@ -3,8 +3,10 @@
 An [Agent Skill](https://agentskills.io/specification) for coordinated OpenSpec feature development.
 It separates planning, isolated implementation, independent review, lane integration, and release preparation.
 Human approval remains separate from automated checks.
+After PR opening, the coordinator monitors automated PR checks and bot code-review comments before the human's merge decision.
 
 Start with [SKILL.md](SKILL.md) for agent instructions.
+Use the [helper command reference](workflow/helper-commands.md) for CLI syntax and flags.
 Use the [minimal workflow](examples/minimal-workflow.md) for a small command-by-command example.
 
 ## Requirements
@@ -69,12 +71,21 @@ No helper command opens or merges a PR.
 | [workflow/](workflow/) | Phase instructions and shared handoff contract |
 | [subagent-roles/](subagent-roles/) | Harness-independent role prompts |
 | [examples/](examples/) | Human-readable walkthrough |
-| `.agents/workflow/` in the consuming repository | Local capability map, model choices, coordination, reports, and evidence |
+| `.agents/workflow/plan-graph.json` in the consuming repository | Gitignored repository graph: changes → lanes → tasks |
+| `.agents/workflow/coordination.json` in the consuming repository | Shared runtime records: changes → lanes → tasks |
+| `.agents/workflow/<change>/` in the consuming repository | OpenSpec artifact-review ledger, briefs, reports, and evidence |
+| `.agents/workflow/plan-graph-review.json` in the consuming repository | Separate repository graph-review ledger |
+| `.agents/workflow/` in the consuming repository | Repo-level capability map and model choices |
 
 Treat the installed skill as read-only.
 Run workflow commands from the consuming feature checkout, except worker commands assigned to a lane worktree.
 The helper locally excludes `.agents/workflow/` from Git when it creates records.
-Keep those records in the same checkout for recovery.
+Keep the graph and coordination file together in the same checkout for recovery.
+Neither is committed; back up both outside Git.
+Planning reviews each change's OpenSpec artifacts first, then the whole repository graph.
+One Coordinator writes the shared coordination file across all changes.
+Use `--change <change>` for change-specific commands when the graph contains multiple changes.
+See [recovery](workflow/recovery.md#repository-object-migration) for retained per-change records.
 Do not publish them as part of the skill.
 
 ## Validate this repository
@@ -84,6 +95,7 @@ Run these commands from the skill repository:
 ```bash
 python3 -m py_compile bin/featdev.py
 python3 bin/featdev.py --self-check
+python3 -m unittest discover -s tests
 git diff --check
 ```
 

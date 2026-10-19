@@ -15,11 +15,18 @@ Read the [shared contract](../workflow/briefs-and-handoffs.md) at the absolute p
 spec/design. Follow the approved plan and repository architecture.
 Use the capability map supplied in the brief to resolve generic tool names; the profile is authoritative.
 Implement every assigned lane task; no unassigned work or unrelated refactors.
+A finish-scoped preparation brief instead permits only its named version/generated paths in a separate worktree.
+Do not create task ticks or reopen completed lanes for preparation. Return the committed SHA for Coordinator integration.
+Implementation corrections, including amendments to archived changes, still use approved tasks and lanes.
 
 - Make smallest correct change; add/update tests for changed behavior.
 - Run assigned checks cheap-to-expensive; record exact commands/results.
 - Commit code, ticks, version/generated changes before expensive evidence capture.
 - Commit worktree changes, leave clean `git status`, report exact SHA.
+
+Lane briefs identify the OpenSpec change and lane in repo-level `.agents/workflow/plan-graph.json`.
+Finish briefs instead identify the change, integrated HEAD, owned scope, and repository release criteria; no active lane is required.
+Only the Coordinator writes the shared `.agents/workflow/coordination.json`.
 
 ## Evidence/report
 

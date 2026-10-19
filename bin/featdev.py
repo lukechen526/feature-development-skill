@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small plan validator and graph viewer for feature-development runs."""
+"""Record and validate local planning, dispatch, review, integration, and release decisions."""
 from __future__ import annotations
 
 import argparse
@@ -21,11 +21,11 @@ from typing import Any
 
 
 FIELD_TABLE = """Plan fields:
-  schema_version  integer version (currently 1)
-  change          change directory name
-  review_mode     optional 'standard' (default) or 'combined-single-lane'
-  lanes           lane id -> risk, ui, screen, sensitive (all four required), depends_on
-  tasks           task id -> lane, deps
+  schema_version  2 for repository-level plan-graph.json
+  changes         OpenSpec change id -> review_mode, lanes
+  lanes           per change: lane id -> risk, ui, screen, sensitive, depends_on, tasks
+  tasks           per lane: task id -> deps (task IDs within the same change)
+  review_mode     per change: optional 'standard' (default) or 'combined-single-lane'
 
 Validation checks: shape, task-id bijection, reference resolution, acyclicity."""
 
@@ -65,6 +65,191 @@ def _load_json(path: Path) -> dict[str, Any]:
     return value
 
 
+_REPO_PLAN = ".agents/workflow/plan-graph.json"
+
+
+def _archive_name_matches(name: str, change: str) -> bool:
+    return re.fullmatch(rf"(?:\d{{4}}-\d{{2}}-\d{{2}}-)?{re.escape(change)}", name) is not None
+
+
+def _openspec_change_directory(root: Path, change: str) -> Path:
+    active = root / "openspec" / "changes" / _safe_change(change)
+    if (active / "tasks.md").is_file():
+        return active
+    archive = root / "openspec/changes/archive"
+    matches = [path for path in archive.iterdir()
+               if _archive_name_matches(path.name, change) and (path / "tasks.md").is_file()] if archive.is_dir() else []
+    if len(matches) > 1:
+        raise StateError(f"state: multiple archives match change {change!r}; reconcile the archive identity")
+    return matches[0] if matches else active
+
+
+def _change_plans(document: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Project the repository hierarchy into the existing per-change gate inputs."""
+    if "changes" not in document:
+        change = document.get("change")
+        if not isinstance(change, str) or not change:
+            raise PlanError("shape: plan needs a non-empty changes object")
+        return {change: document}
+    changes = document.get("changes")
+    if document.get("schema_version") != 2 or not isinstance(changes, dict) or not changes:
+        raise PlanError("shape: repository plan requires schema_version 2 and a non-empty changes object")
+    result = {}
+    for change, node in changes.items():
+        _safe_change(change)
+        if not isinstance(node, dict) or not isinstance(node.get("lanes"), dict) or not node["lanes"]:
+            raise PlanError(f"shape: change {change!r} needs one or more lanes")
+        lanes, tasks = {}, {}
+        for lane_id, lane in node["lanes"].items():
+            _safe_component(lane_id, "lane id")
+            if not isinstance(lane, dict) or not isinstance(lane.get("tasks"), dict) or not lane["tasks"]:
+                raise PlanError(f"shape: {change}/{lane_id} needs one or more tasks")
+            lanes[lane_id] = {key: value for key, value in lane.items() if key != "tasks"}
+            for task_id, task in lane["tasks"].items():
+                if not isinstance(task_id, str) or not task_id.strip() or not isinstance(task, dict):
+                    raise PlanError(f"shape: {change}/{lane_id} needs named task objects")
+                if task_id in tasks:
+                    raise PlanError(f"shape: duplicate task {task_id!r} across lanes in change {change!r}")
+                tasks[task_id] = {**task, "lane": lane_id}
+        result[change] = {**node, "change": change, "lanes": lanes, "tasks": tasks}
+    return result
+
+
+def _repository_plan(plans: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    changes = {}
+    for change, plan in plans.items():
+        node = {key: value for key, value in plan.items() if key not in {"change", "schema_version", "tasks", "lanes"}}
+        node["lanes"] = {
+            lane_id: {**lane, "tasks": {
+                task_id: {key: value for key, value in task.items() if key != "lane"}
+                for task_id, task in plan["tasks"].items() if task["lane"] == lane_id
+            }} for lane_id, lane in plan["lanes"].items()
+        }
+        changes[change] = node
+    return {"schema_version": 2, "changes": changes}
+
+
+def _selected_plan(document: dict[str, Any], change: str) -> dict[str, Any]:
+    plans = _change_plans(document)
+    if change not in plans:
+        raise PlanError(f"shape: change {change!r} is not in the repository plan; select a planned change")
+    return plans[change]
+
+
+def _plan_digest(document: dict[str, Any], change: str, text: str) -> str:
+    # Other changes must not invalidate this change's review/grant bindings.
+    source = json.dumps(_selected_plan(document, change), sort_keys=True) if "changes" in document else text
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def _change_plan_at(checkout: Path, commit: str, change: str) -> tuple[dict[str, Any], str, str]:
+    """Read the shared local plan; retain committed legacy inputs until explicit migration."""
+    root = _workflow_checkout(checkout)
+    path = root / _REPO_PLAN
+    if path.is_file():
+        text, relative = path.read_text(encoding="utf-8"), _REPO_PLAN
+    else:
+        relative = f"openspec/changes/{change}/plan/graph-plan.json"
+        text = _committed_file(checkout, commit, relative)
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise PlanError(f"shape: invalid plan at {relative}: {_one_line(exc)}") from exc
+    if not isinstance(document, dict):
+        raise PlanError("shape: plan must be an object")
+    return _selected_plan(document, change), _plan_digest(document, change, text), relative
+
+
+def _lane_plan_digest(plan: dict[str, Any], lane_id: str) -> str:
+    value = {"change": plan["change"], "lane": lane_id, "definition": plan["lanes"][lane_id],
+             "tasks": {task_id: task for task_id, task in plan["tasks"].items() if task["lane"] == lane_id}}
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+
+def _migrate_legacy_bindings(root: Path, document: dict[str, Any], coordination: dict[str, Any]) -> None:
+    """Carry recorded approvals only when their exact legacy commit proves the same contract."""
+    plans = _change_plans(document)
+    for change, node in coordination["changes"].items():
+        if change not in plans:
+            continue
+        plan = plans[change]
+        current_digest = _plan_digest(document, change, "")
+        node["plan_sha256"] = current_digest
+        for lane_id, lane in node.get("lanes", {}).items():
+            if lane_id not in plan["lanes"]:
+                continue
+            expected = _lane_plan_digest(plan, lane_id)
+            gate = node.get("human_gates", {}).get(lane_id, {})
+            records = [*lane.get("reviews", []), gate]
+            for record in records:
+                binding = record.get("binding") if isinstance(record, dict) else None
+                if not isinstance(binding, dict) or not binding.get("commit"):
+                    continue
+                historical = _state_git(root, "show", f"{binding['commit']}:openspec/changes/{change}/plan/graph-plan.json")
+                if historical.returncode:
+                    continue
+                try:
+                    old = json.loads(historical.stdout)
+                    if not isinstance(old, dict):
+                        continue
+                    old_plan = _selected_plan(old, change)
+                    if lane_id not in old_plan["lanes"] or _lane_plan_digest(old_plan, lane_id) != expected:
+                        continue
+                except (ValueError, StateError, KeyError, TypeError):
+                    continue
+                if binding.get("lane_plan_sha256") is None:
+                    binding["lane_plan_sha256"] = expected
+                # A retained stand-in grant changes hash encoding, not authority or scope.
+                authorization = record.get("authorization", {})
+                grant = node.get("authorizations", {}).get(authorization.get("id"), {})
+                legacy_digest = hashlib.sha256(historical.stdout.encode("utf-8")).hexdigest()
+                if (authorization.get("plan_sha256") == legacy_digest
+                        and grant.get("plan_sha256") == legacy_digest
+                        and _repository_plan({change: old_plan}) == _repository_plan({change: plan})):
+                    authorization["plan_sha256"] = current_digest
+                    grant["plan_sha256"] = current_digest
+
+
+def migrate_repository(checkout: Path | None = None) -> Path:
+    """Import legacy per-change artifacts without deleting sources or replacing current nodes."""
+    root = (checkout or Path.cwd()).resolve()
+    _require_coordinator_cwd({}, "migrate-repo")
+    path = root / _REPO_PLAN
+    existing = _load_json(path) if path.exists() else {}
+    plans = _change_plans(existing) if existing else {}
+    for legacy in sorted((root / "openspec" / "changes").glob("*/plan/graph-plan.json")):
+        name = legacy.parent.parent.name
+        if name not in plans:
+            validate_plan(legacy)
+            plans[name] = _load_json(legacy)
+    if not plans:
+        raise PlanError("shape: no plans to migrate; author .agents/workflow/plan-graph.json first")
+    document = {**existing, **_repository_plan(plans)}
+    projected = _change_plans(document)
+    for change, plan in projected.items():
+        _check_shape(plan, path)
+        _check_task_ids(plan, root / "openspec" / "changes" / change / "tasks.md")
+        _check_references(plan)
+        _check_acyclic(plan)
+    coordination = _repository_coordination(root)
+    for legacy in sorted(workflow_dir(root).glob("*/coordination.json")):
+        name = legacy.parent.name
+        if name not in coordination["changes"]:
+            node = _read_state(legacy)
+            if node.get("change") != name or node.get("feature_checkout") != str(root):
+                raise StateError(f"state: legacy coordination {legacy} belongs to another change or checkout")
+            coordination["changes"][name] = _stored_change_coordination(node)
+    _normalize_stored_roles(coordination)
+    _migrate_legacy_bindings(root, document, coordination)
+    _ensure_workflow_ignored(root)
+    # Each write is atomic. A retry completes an interrupted import without dropping records.
+    _atomic_write_json(path, document)
+    if coordination["changes"]:
+        _atomic_write_json(workflow_dir(root) / "coordination.json", coordination)
+    return path
+
+
 def _change_directory(plan_path: Path) -> str:
     directory = plan_path.resolve().parent
     return directory.parent.name if directory.name == "plan" else directory.name
@@ -72,7 +257,7 @@ def _change_directory(plan_path: Path) -> str:
 
 def _check_shape(plan: dict[str, Any], plan_path: Path) -> None:
     expected_change = _change_directory(plan_path)
-    if plan.get("change") != expected_change:
+    if plan_path.name != "plan-graph.json" and plan.get("change") != expected_change:
         raise PlanError(
             f"shape: change must be {expected_change!r} for this plan directory; change the plan's change field"
         )
@@ -255,19 +440,30 @@ def _check_acyclic(plan: dict[str, Any]) -> None:
             visit(node)
 
     check_graph({task_id: task["deps"] for task_id, task in plan["tasks"].items()}, "task")
-    check_graph(
-        {lane_id: lane.get("depends_on", []) for lane_id, lane in plan["lanes"].items()},
-        "lane",
-    )
+    effective = {lane_id: set(lane.get("depends_on", [])) for lane_id, lane in plan["lanes"].items()}
+    for task in plan["tasks"].values():
+        for dependency in task["deps"]:
+            owner = plan["tasks"][dependency]["lane"]
+            if owner != task["lane"]:
+                effective[task["lane"]].add(owner)
+    check_graph({lane_id: sorted(deps) for lane_id, deps in effective.items()}, "effective lane")
 
 
-def validate_plan(plan_path: Path, tasks_path: Path | None = None) -> None:
-    """Run the four plan checks, raising PlanError on the first failure."""
-    plan = _load_json(plan_path)
-    _check_shape(plan, plan_path)
-    _check_task_ids(plan, tasks_path or plan_path.resolve().parent.parent / "tasks.md")
-    _check_references(plan)
-    _check_acyclic(plan)
+def validate_plan(plan_path: Path, tasks_path: Path | None = None, change: str | None = None) -> None:
+    """Validate all repository changes, or one explicitly selected change."""
+    document = _load_json(plan_path)
+    plans = _change_plans(document)
+    if change is not None:
+        plans = {change: _selected_plan(document, change)}
+    if tasks_path is not None and len(plans) != 1:
+        raise PlanError("task-id bijection: --tasks requires --change when the repository plan contains multiple changes")
+    for name, plan in plans.items():
+        _check_shape(plan, plan_path)
+        default = (_openspec_change_directory(plan_path.resolve().parents[2], name) / "tasks.md"
+                   if "changes" in document else plan_path.resolve().parent.parent / "tasks.md")
+        _check_task_ids(plan, tasks_path or default)
+        _check_references(plan)
+        _check_acyclic(plan)
 
 
 def _list(value: object) -> str:
@@ -281,6 +477,10 @@ def _bool(value: object) -> str:
 
 
 def render_markdown(plan: dict[str, Any]) -> str:
+    if "changes" in plan:
+        return "# Repository plan\n\n" + "\n".join(
+            render_markdown(node) for node in _change_plans(plan).values()
+        )
     lines = [f"# Plan: `{plan.get('change', '')}`", "", "## Lanes", ""]
     tasks = plan.get("tasks", {})
     lanes = plan.get("lanes", {})
@@ -308,6 +508,17 @@ def _mermaid_text(value: object) -> str:
 
 
 def render_mermaid(plan: dict[str, Any]) -> str:
+    if "changes" in plan:
+        lines = ["flowchart TD"]
+        for change, node in _change_plans(plan).items():
+            namespace = _mermaid_id("change", change)
+            lines.append(f'  subgraph {namespace}["{_mermaid_text(change)}"]')
+            child = render_mermaid(node).splitlines()[1:]
+            for line in child:
+                line = re.sub(r"\b(lane|task)_([0-9a-f]+)\b", lambda match: namespace + "_" + match[0], line)
+                lines.append("  " + line)
+            lines.append("  end")
+        return "\n".join(lines) + "\n"
     lines = ["flowchart TD"]
     lanes = plan.get("lanes", {})
     tasks = plan.get("tasks", {})
@@ -353,6 +564,26 @@ def workflow_dir(root: Path) -> Path:
     return root / ".agents" / "workflow"
 
 
+def _workflow_checkout(checkout: Path) -> Path:
+    root = checkout.resolve()
+    if (root / _REPO_PLAN).is_file() or (workflow_dir(root) / "coordination.json").is_file():
+        return root
+    # A lane worktree has no tracked plan. Its owner is recorded in the shared lane ledger.
+    for line in _state_git(root, "worktree", "list", "--porcelain").stdout.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        owner = Path(line[9:]).resolve()
+        path = workflow_dir(owner) / "coordination.json"
+        if not path.is_file():
+            continue
+        data = _read_state(path)
+        for change in data.get("changes", {}).values():
+            for lane in change.get("lanes", {}).values():
+                if isinstance(lane, dict) and lane.get("worktree") and Path(lane["worktree"]).resolve() == root:
+                    return owner
+    return root
+
+
 def _ensure_workflow_ignored(root: Path) -> None:
     """Ignore the coordinator store without touching a tracked file.
 
@@ -387,8 +618,8 @@ def _ensure_workflow_ignored(root: Path) -> None:
 
 
 def _coordination_path(change: str, checkout: Path | None = None) -> Path:
-    root = (checkout or Path.cwd()).resolve()
-    return workflow_dir(root) / _safe_change(change) / "coordination.json"
+    _safe_change(change)
+    return workflow_dir((checkout or Path.cwd()).resolve()) / "coordination.json"
 
 
 def _read_state(value: Any) -> dict[str, Any]:
@@ -452,20 +683,20 @@ def _atomic_write_json(path: Path, value: object) -> None:
 
 
 _PLAN_LEDGER = "plan-reviews.json"
+_GRAPH_REVIEW_LEDGER = "plan-graph-review.json"
 
 
-def _plan_reviews_path(change: str, checkout: Path | None = None) -> Path:
+def _plan_reviews_path(change: str | None, checkout: Path | None = None) -> Path:
     root = (checkout or Path.cwd()).resolve()
-    return workflow_dir(root) / _safe_change(change) / _PLAN_LEDGER
+    return (workflow_dir(root) / _safe_change(change) / _PLAN_LEDGER
+            if change is not None else workflow_dir(root) / _GRAPH_REVIEW_LEDGER)
 
 
-def _load_plan_ledger(change: str, checkout: Path | None = None) -> tuple[dict[str, Any], Path]:
+def _load_plan_ledger(change: str | None, checkout: Path | None = None) -> tuple[dict[str, Any], Path]:
     path = _plan_reviews_path(change, checkout)
     if not path.exists():
         return {
             "change": change,
-            "plan_path": None,
-            "plan_sha256": None,
             "dispatches": [],
             "reviews": [],
         }, path
@@ -484,7 +715,7 @@ def _load_plan_ledger(change: str, checkout: Path | None = None) -> tuple[dict[s
     return value, path
 
 
-def _write_plan_ledger(change: str, checkout: Path | None, ledger: dict[str, Any]) -> Path:
+def _write_plan_ledger(change: str | None, checkout: Path | None, ledger: dict[str, Any]) -> Path:
     path = _plan_reviews_path(change, checkout)
     _atomic_write_json(path, ledger)
     return path
@@ -500,30 +731,61 @@ def _plan_head(repository: Path) -> str:
     return result.stdout.strip()
 
 
-def _plan_context(
-    change: str | None, plan_path: object = None
-) -> tuple[Path, str, Path, str, str]:
-    """Resolve the working-tree plan before its approval commit."""
-    root = Path.cwd().resolve()
-    if plan_path is not None:
-        plan = Path(str(plan_path)).expanduser().resolve()
-        derived = _change_directory(plan)
-        if change is not None and _safe_change(change) != derived:
-            raise StateError(
-                f"plan: --change {change!r} does not match the plan directory {derived!r}; change it"
-            )
-        change = derived
-    else:
-        change = _safe_change(change) if change is not None else _infer_change(root)
-        plan = root / "openspec" / "changes" / change / "plan" / "graph-plan.json"
-    if not plan.is_file():
-        raise StateError(f"plan: cannot find the working-tree plan at {plan}; author it first")
-    tasks = root / "openspec" / "changes" / change / "tasks.md"
-    validate_plan(plan, tasks)
+def _change_artifacts(root: Path, change: str) -> tuple[Path, str]:
+    directory = _openspec_change_directory(root, change)
+    if not (directory / "tasks.md").is_file():
+        raise StateError(f"plan: {directory} needs OpenSpec artifacts including tasks.md")
+    files = {}
+    for path in sorted(directory.rglob("*")):
+        if (not path.is_file() or path.relative_to(directory).parts[0] == "plan"
+                or path.suffix.lower() not in {".md", ".yaml", ".yml", ".json"}):
+            continue
+        data = path.read_bytes()
+        if path.name == "tasks.md" and path.parent == directory:
+            data = _normalized_task_definitions(data.decode("utf-8")).encode("utf-8")
+        files[str(path.relative_to(directory))] = hashlib.sha256(data).hexdigest()
+    return directory, hashlib.sha256(json.dumps(files, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _reviewed_change_artifacts(root: Path, document: dict[str, Any]) -> dict[str, str]:
+    inputs = {}
+    for change in _change_plans(document):
+        _, digest = _change_artifacts(root, change)
+        ledger, _ = _load_plan_ledger(change, root)
+        reviews = [item for item in ledger["reviews"] if isinstance(item, dict) and item.get("scope") == "change"]
+        latest = reviews[-1] if reviews else {}
+        if latest.get("verdict") != "PASS" or latest.get("artifacts_sha256") != digest:
+            raise StateError(f"plan: change {change!r} needs a current OpenSpec artifact PASS before repo graph review")
+        inputs[change] = digest
+    return inputs
+
+
+def _plan_context(change: str | None, plan_path: object = None, scope: str = "change") -> tuple[Path, str | None, Path, str, str]:
+    """Review change artifacts first, then the local repository graph and its reviewed inputs."""
+    root = _workflow_checkout(Path.cwd())
     _ensure_workflow_ignored(root)
-    plan_sha256 = hashlib.sha256(plan.read_bytes()).hexdigest()
-    head = _plan_head(root)
-    return root, change, plan, plan_sha256, head
+    if scope == "change":
+        if plan_path is not None:
+            raise StateError("plan: --plan applies only to --scope graph; change reviews use OpenSpec artifacts")
+        if change is None:
+            names = sorted(path.parent.name for path in (root / "openspec/changes").glob("*/tasks.md"))
+            if len(names) != 1:
+                raise StateError("plan: provide --change to select the OpenSpec artifacts")
+            change = names[0]
+        change = _safe_change(change)
+        path, digest = _change_artifacts(root, change)
+    elif scope == "graph":
+        if change is not None:
+            raise StateError("plan: repo graph review covers every included change; omit --change")
+        path = Path(str(plan_path)).expanduser().resolve() if plan_path is not None else root / _REPO_PLAN
+        validate_plan(path)
+        document = _load_json(path)
+        inputs = _reviewed_change_artifacts(root, document)
+        digest = hashlib.sha256(json.dumps({"graph": document, "artifacts": inputs}, sort_keys=True).encode("utf-8")).hexdigest()
+    else:
+        raise StateError("plan: scope must be change or graph")
+    return root, change, path, digest, _plan_head(root)
+
 
 
 def _plan_relative(checkout: Path, plan: Path) -> str:
@@ -535,20 +797,22 @@ def _plan_relative(checkout: Path, plan: Path) -> str:
 
 def plan_dispatch(
     role: str,
-    model: str,
-    level: str,
     task: str = "plan",
     key: str | None = None,
     report: object = None,
     head: str | None = None,
     change: str | None = None,
     plan_path: object = None,
+    scope: str = "change",
+    access: str = "read-only",
 ) -> Path:
-    """Record the Oracle plan-review dispatch intent before launch."""
+    """Record an Oracle intent for change artifacts or the repo-level graph."""
     role = _require_role(role)
     if role != "oracle":
         raise StateError("plan: plan review must use role 'oracle'; change --role")
-    checkout, change, plan, plan_sha256, current_head = _plan_context(change, plan_path)
+    checkout, change, plan, plan_sha256, current_head = _plan_context(change, plan_path, scope)
+    digest_field = "artifacts_sha256" if scope == "change" else "plan_sha256"
+    path_field = "artifacts_path" if scope == "change" else "plan_path"
     reviewed_head = _git_commit(checkout, head) if head is not None else current_head
     if reviewed_head != current_head:
         raise StateError(
@@ -556,19 +820,23 @@ def plan_dispatch(
         )
     report_path = str(Path(str(report)).expanduser().resolve()) if report is not None else None
     ledger, path = _load_plan_ledger(change, checkout)
-    dispatch_key = key or f"{change}/plan/{role}/{uuid.uuid4().hex}"
+    access = _dispatch_access(role, access)
+    scoped = [row for row in ledger["reviews"]
+              if row.get("scope") == scope and row.get("role") == role]
+    if access == "write" and (len(scoped) < 2 or any(row.get("verdict") != "MORE WORK" for row in scoped[-2:])):
+        raise StateError("plan: Oracle authorship requires two MORE WORK reviews and explicit bounded authorization")
+    dispatch_key = key or f"{change or 'repo'}/{scope}/{role}/{uuid.uuid4().hex}"
     plan_relative = _plan_relative(checkout, plan)
     intent = {
+        "scope": scope,
         "role": role,
-        "model": model,
-        "level": level,
         "task": task,
         "key": dispatch_key,
-        "access": "read-only",
+        "access": access,
         "started_at": _utc_timestamp(),
         "head": reviewed_head,
-        "plan_path": plan_relative,
-        "plan_sha256": plan_sha256,
+        path_field: plan_relative,
+        digest_field: plan_sha256,
     }
     if report_path is not None:
         intent["report"] = report_path
@@ -576,21 +844,31 @@ def plan_dispatch(
     for record in dispatches:
         if not isinstance(record, dict) or record.get("key") != dispatch_key:
             continue
-        if any(record.get(field) != intent[field] for field in ("role", "model", "level", "task", "head", "plan_sha256")):
+        fields = ("scope", "role", "task", "head") if access == "write" else ("scope", "role", "task", "head", digest_field)
+        if (record.get("access", "read-only") != access or record.get("report") != intent.get("report")
+                or any(record.get(field) != intent[field] for field in fields)):
             raise StateError(
                 f"plan: dispatch key {dispatch_key!r} has a different intent; change --key"
             )
         return path
+    if access == "read-only":
+        for author in dispatches:
+            if (author.get("access") == "write" and author.get("scope") == scope
+                    and author.get("result") is None):
+                completed_report = _required_document(author.get("report"), "Oracle correction report")
+                author.update({"result": "corrected", "report_sha256": _path_sha256(Path(completed_report)),
+                               "corrected_sha256": plan_sha256})
     open_for_role = [
         record for record in dispatches
         if isinstance(record, dict) and record.get("role") == role
-        and record.get("task") == task and record.get("result") is None
+        and record.get("scope") == scope and record.get("task") == task and record.get("result") is None
+        and record.get("access", "read-only") == access
     ]
     if open_for_role and key is None:
         raise StateError(
             f"plan: role {role!r} already has an open plan dispatch; complete it or change --key"
         )
-    ledger.update({"change": change, "plan_path": plan_relative, "plan_sha256": plan_sha256})
+    ledger.update({"change": change, path_field: plan_relative, digest_field: plan_sha256})
     dispatches.append(intent)
     return _write_plan_ledger(change, checkout, ledger)
 
@@ -603,21 +881,25 @@ def plan_review(
     mediation: object = None,
     change: str | None = None,
     plan_path: object = None,
+    scope: str = "change",
 ) -> Path:
-    """Record the Oracle plan-review verdict against the working-tree plan."""
+    """Record a verdict bound to the selected planning scope and its exact inputs."""
     role = _require_role(role)
     if role != "oracle":
         raise StateError("plan: plan review must use role 'oracle'; change --role")
     if verdict not in {"PASS", "MORE WORK"}:
         raise StateError("plan: verdict must be PASS or MORE WORK; change it")
-    checkout, change, plan, plan_sha256, current_head = _plan_context(change, plan_path)
+    checkout, change, plan, plan_sha256, current_head = _plan_context(change, plan_path, scope)
+    digest_field = "artifacts_sha256" if scope == "change" else "plan_sha256"
+    path_field = "artifacts_path" if scope == "change" else "plan_path"
     reviewed_head = _git_commit(checkout, head)
     if reviewed_head != current_head:
         raise StateError(
             f"plan: review must bind the current feature HEAD {current_head}; change --head"
         )
     report_path = _review_report(report)
-    reviews_root = (workflow_dir(checkout) / change / "reviews").resolve()
+    reviews_root = ((workflow_dir(checkout) / change / "reviews") if change is not None
+                    else workflow_dir(checkout) / "reviews").resolve()
     if reviews_root not in Path(report_path).parents:
         raise StateError(
             f"plan: plan-review report must live under {reviews_root}; move the report there"
@@ -631,16 +913,16 @@ def plan_review(
     open_records = [
         record for record in dispatches
         if isinstance(record, dict) and record.get("role") == role
-        and record.get("task") == "plan" and record.get("result") is None
+        and record.get("scope") == scope and record.get("access", "read-only") == "read-only" and record.get("task") == "plan" and record.get("result") is None
     ]
     if not open_records:
         raise StateError(
             "plan: no open plan dispatch matches this review; record the intent with plan-dispatch first"
         )
     dispatch = open_records[-1]
-    if dispatch.get("plan_sha256") != plan_sha256:
+    if dispatch.get(digest_field) != plan_sha256:
         raise StateError(
-            "plan: the working-tree plan changed since the plan dispatch; "
+            "plan: the review inputs changed since the plan dispatch; "
             "dispatch a fresh plan review for the current plan"
         )
     if dispatch.get("head") != reviewed_head:
@@ -648,21 +930,25 @@ def plan_review(
             f"plan: plan dispatch is bound to {dispatch.get('head') or 'no head'}, "
             f"review HEAD is {reviewed_head}; dispatch a fresh plan review"
         )
-    round_number = len([
-        item for item in ledger["reviews"]
-        if isinstance(item, dict) and item.get("role") == role
-    ]) + 1
+    round_number = 1
+    for previous in reversed(ledger["reviews"]):
+        if not isinstance(previous, dict) or previous.get("role") != role or previous.get("scope") != scope:
+            continue
+        if previous.get("verdict") == "PASS":
+            break
+        round_number += 1
     if round_number > 2 and mediation_path is None:
         raise StateError(
             "plan: plan review round is past the two-review limit; provide --mediation "
             "with the Oracle mediation report before reviewing again"
         )
     record = {
+        "scope": scope,
         "role": role,
         "verdict": verdict,
         "head": reviewed_head,
-        "plan_path": _plan_relative(checkout, plan),
-        "plan_sha256": plan_sha256,
+        path_field: _plan_relative(checkout, plan),
+        digest_field: plan_sha256,
         "report": report_path,
         "round": round_number,
         "dispatch_key": dispatch.get("key"),
@@ -679,8 +965,8 @@ def plan_review(
     })
     ledger.update({
         "change": change,
-        "plan_path": _plan_relative(checkout, plan),
-        "plan_sha256": plan_sha256,
+        path_field: _plan_relative(checkout, plan),
+        digest_field: plan_sha256,
     })
     return _write_plan_ledger(change, checkout, ledger)
 
@@ -720,6 +1006,20 @@ def _committed_file(checkout: Path, commit: str, relative: str) -> str:
             f"{(': ' + detail) if detail else ''}; commit the artifact first"
         )
     return result.stdout
+
+
+def _committed_tasks(checkout: Path, commit: str, change: str) -> tuple[str, str]:
+    active = f"openspec/changes/{_safe_change(change)}/tasks.md"
+    result = _state_git(checkout, "show", f"{commit}:{active}")
+    if result.returncode == 0:
+        return result.stdout, active
+    paths = _state_git(checkout, "ls-tree", "-r", "--name-only", commit, "--", "openspec/changes/archive").stdout.splitlines()
+    matches = [path for path in paths if Path(path).name == "tasks.md"
+               and _archive_name_matches(Path(path).parent.name, change)]
+    if len(matches) > 1:
+        raise StateError(f"state: multiple committed archives match change {change!r}; reconcile the archive identity")
+    relative = matches[0] if matches else active
+    return _committed_file(checkout, commit, relative), relative
 
 
 def _committed_plan_revision(checkout: Path, commit: str, relative: str) -> str:
@@ -841,36 +1141,28 @@ def state_derive(change: str, source_ref: str | None = None, checkout: Path | No
     repository = (checkout or Path.cwd()).resolve()
     _ensure_workflow_ignored(repository)
     resolved_ref, source_sha = _resolve_state_ref(repository, source_ref)
-    plan_relative = f"openspec/changes/{change}/plan/graph-plan.json"
-    tasks_relative = f"openspec/changes/{change}/tasks.md"
-    try:
-        plan_text = _committed_file(repository, source_sha, plan_relative)
-        tasks_text = _committed_file(repository, source_sha, tasks_relative)
-        plan_bytes = plan_text.encode("utf-8")
-        plan = json.loads(plan_text)
-    except UnicodeDecodeError as exc:
-        raise PlanError(
-            f"shape: committed artifacts at {source_sha} are not UTF-8: {_one_line(exc)}; fix the files"
-        ) from exc
-    except json.JSONDecodeError as exc:
-        raise PlanError(
-            f"shape: cannot load committed plan at {source_sha}: {_one_line(exc)}; fix the plan file"
-        ) from exc
-    if not isinstance(plan, dict):
-        raise PlanError("shape: committed plan must be a JSON object; change it to an object")
-    _validate_committed_plan(plan, change, tasks_text, repository)
+    plan, plan_sha256, plan_relative = _change_plan_at(repository, source_sha, change)
+    tasks_text, tasks_relative = _committed_tasks(repository, source_sha, change)
+    _validate_change_plan(plan, change, tasks_text, repository)
     checked_order = _checked_task_ids_from_text(tasks_text)
     checked_tasks = set(checked_order)
     lanes, ready_lanes = _derived_lane_views(plan, checked_tasks)
+    owner = _workflow_checkout(repository)
+    for lane_id, lane in lanes.items():
+        lane["runtime_plan"] = plan_relative == _REPO_PLAN
+        lane["lane_plan_sha256"] = _lane_plan_digest(plan, lane_id)
     state = {
         "schema_version": 3,
         "change": change,
         "source_ref": resolved_ref,
         "source_sha": source_sha,
-        "branch": _state_git(repository, "symbolic-ref", "--short", "-q", "HEAD").stdout.strip() or "HEAD",
-        "feature_checkout": str(repository),
-        "plan_sha256": hashlib.sha256(plan_bytes).hexdigest(),
-        "plan_revision": _committed_plan_revision(repository, source_sha, plan_relative),
+        "branch": _state_git(owner, "symbolic-ref", "--short", "-q", "HEAD").stdout.strip() or "HEAD",
+        "feature_checkout": str(owner),
+        "runtime_plan": plan_relative == _REPO_PLAN,
+        "plan_sha256": plan_sha256,
+        "plan_revision": (plan_sha256 if plan_relative == _REPO_PLAN
+                          else _committed_plan_revision(repository, source_sha, plan_relative)),
+        "tasks_path": tasks_relative,
         "checked_tasks": [task_id for task_id in plan["tasks"] if task_id in checked_tasks],
         "tasks": _derived_task_views(plan, checked_tasks),
         "lanes": lanes,
@@ -881,19 +1173,29 @@ def state_derive(change: str, source_ref: str | None = None, checkout: Path | No
 
 _COORDINATION_FIELDS = (
     "phase", "worktree", "ref", "base", "dispatches", "reviews", "merge", "cleanup", "mediations",
-    "decisions", "status", "status_reason", "task_states", "review_status", "escalation",
+    "status", "status_reason", "task_states", "review_status", "escalation",
 )
 
 # Task states the coordinator store tracks per lane. "done" here is a lane-local claim; only a
 # committed and merged tick makes it authoritative on the feature branch.
 _TASK_STATES = ("pending", "in_progress", "done", "blocked")
 
-# Review-duty decision vocabulary.
-_DECISION_DUTIES = ("code", "test", "ui")
-_DECISION_MODES = ("full", "focused", "skip")
+# Canonical subagent roles for dispatch and review; the coordinator runs in the current session.
+_CANONICAL_ROLES = ("implementer", "code-reviewer", "test-reviewer", "ui-reviewer", "oracle", "runner")
+_LEGACY_REVIEW_ROLES = {"code": "code-reviewer", "test": "test-reviewer", "ui": "ui-reviewer"}
 
-# One role vocabulary for dispatch, review, and the coordinator's model selection.
-_CANONICAL_ROLES = ("implementer", "code", "test", "ui", "oracle", "runner")
+
+def _normalize_stored_roles(value: object) -> None:
+    """Upgrade stored role labels without changing duty keys, bindings, or dispatch identities."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"role", "reviewer"} and isinstance(item, str):
+                value[key] = _LEGACY_REVIEW_ROLES.get(item, item)
+            else:
+                _normalize_stored_roles(item)
+    elif isinstance(value, list):
+        for item in value:
+            _normalize_stored_roles(item)
 
 
 def _require_role(role: object) -> str:
@@ -922,7 +1224,6 @@ def _coordination_lane(lane: dict[str, Any] | None = None) -> dict[str, Any]:
         "merge": None,
         "cleanup": None,
         "mediations": [],
-        "decisions": None,
         "status": None,
         "status_reason": None,
         "task_states": {},
@@ -957,8 +1258,8 @@ def _lane_ref_progress(
         head = _ref_sha(repository, ref)
         if not head:
             return set(), None
-        text = _committed_file(repository, head, f"openspec/changes/{change}/tasks.md")
-        _check_task_ids_text(plan, text, f"openspec/changes/{change}/tasks.md at lane ref")
+        text, relative = _committed_tasks(repository, head, change)
+        _check_task_ids_text(plan, text, f"{relative} at lane ref")
         return set(_checked_task_ids_from_text(text)), head
     except (OSError, PlanError, StateError, ValueError):
         return set(), None
@@ -1102,8 +1403,6 @@ def _backfill_subagents(coordination: dict[str, Any]) -> None:
                 "lane": lane_id,
                 "role": row.get("role"),
                 "task": row.get("task"),
-                "model": row.get("model"),
-                "level": row.get("level"),
                 "access": row.get("access"),
                 "worktree": lane.get("worktree"),
                 "status": "running" if result in (None, "open") else ("done" if result == "ok" else "failed"),
@@ -1116,7 +1415,7 @@ def _backfill_subagents(coordination: dict[str, Any]) -> None:
 
 
 def _register_subagent(
-    coordination: dict[str, Any], lane_id: str, role: str, model: str, level: str,
+    coordination: dict[str, Any], lane_id: str | None, role: str,
     task: str | None, key: str | None, access: str | None, worktree: str | None,
 ) -> None:
     rows = coordination.get("subagents")
@@ -1126,14 +1425,14 @@ def _register_subagent(
         return
     rows.append({
         "run_id": None, "key": key, "lane": lane_id, "role": role, "task": task,
-        "model": model, "level": level, "access": access, "worktree": worktree,
+        "access": access, "worktree": worktree,
         "status": "running", "started_at": _now_iso(), "updated_at": _now_iso(),
     })
     coordination["subagents"] = rows
 
 
 def _close_subagent(
-    coordination: dict[str, Any], lane_id: str, role: str, run_id: str | None, result: str | None,
+    coordination: dict[str, Any], lane_id: str | None, role: str, run_id: str | None, result: str | None,
     key: str | None = None,
 ) -> None:
     rows = coordination.get("subagents")
@@ -1193,284 +1492,6 @@ def _review_mode(plan: dict[str, Any]) -> str:
     return value if isinstance(value, str) else "standard"
 
 
-def _validate_decision_record(
-    lane: dict[str, Any], decision: object, oracle_authored: bool = False
-) -> None:
-    """Validate decision-record shape and the mechanical risk invariants."""
-    if not isinstance(decision, dict):
-        raise StateError("lane: review decision record is malformed; record it with review-decision")
-    duties = decision.get("duties")
-    if not isinstance(duties, dict) or set(duties) != set(_DECISION_DUTIES):
-        raise StateError(
-            "lane: review decision must record all three duties (code, test, ui); record it with review-decision"
-        )
-    for duty, entry in duties.items():
-        if not isinstance(entry, dict) or entry.get("mode") not in _DECISION_MODES:
-            raise StateError(f"lane: {duty} duty mode must be full, focused, or skip")
-        if not isinstance(entry.get("risk_factors"), list) or any(
-            not isinstance(item, str) for item in entry.get("risk_factors", [])
-        ):
-            raise StateError(f"lane: {duty} duty risk_factors must be a list of strings")
-        if not isinstance(entry.get("acceptance_coverage"), str) or not entry["acceptance_coverage"].strip():
-            raise StateError(f"lane: {duty} duty must name its acceptance coverage")
-        if not isinstance(entry.get("checks"), list) or any(not isinstance(item, str) for item in entry.get("checks", [])):
-            raise StateError(f"lane: {duty} duty checks must be a list of strings")
-        rationale_value = entry.get("rationale") if isinstance(entry, dict) else None
-        if entry["mode"] == "skip" and (not isinstance(rationale_value, str) or not rationale_value.strip()):
-            raise StateError(f"lane: skipping the {duty} duty requires a recorded rationale")
-    if not (lane.get("ui") or lane.get("screen")) and duties["ui"]["mode"] != "skip":
-        raise StateError(
-            "lane: a lane without the ui/screen plan flags has no UI review duty; record --ui skip"
-        )
-    if lane.get("risk") == "high":
-        skipped = [duty for duty in ("code", "test") if duties[duty]["mode"] == "skip"]
-        if skipped:
-            raise StateError(
-                "lane: high-risk changes require independent review; "
-                f"refusing to skip the {', '.join(skipped)} review dut{'y' if len(skipped) == 1 else 'ies'}"
-            )
-    if oracle_authored:
-        # Task 5.4 / workflow correction rule: Oracle-authored write work receives an
-        # independent review that did not author it, regardless of the selected duties.
-        # The applicable independent duties are the ones the lane requires anyway.
-        applicable = ["code", "test"] if lane.get("risk") == "high" else ["code"]
-        skipped = [duty for duty in applicable if duties[duty]["mode"] == "skip"]
-        if skipped:
-            raise StateError(
-                "lane: Oracle-authored write work requires an independent review; refusing to skip "
-                f"the {', '.join(skipped)} review dut{'y' if len(skipped) == 1 else 'ies'} for authored changes; "
-                "record a decision that keeps them and obtain a current independent reviewer PASS"
-            )
-    digest = decision.get("recorded_sha256")
-    expected = hashlib.sha256(
-        json.dumps(decision.get("duties"), sort_keys=True).encode("utf-8")
-    ).hexdigest()
-    if digest != expected:
-        raise StateError(
-            "lane: review decision record changed after it was recorded; have the Coordinator record a fresh decision"
-        )
-
-
-def _decision_skipped_roles(roles: list[str], decisions: object) -> list[str]:
-    """Return roles whose recorded decision selects 'skip' (never enforced under legacy policy)."""
-    if not isinstance(decisions, dict):
-        return []
-    duties = decisions.get("duties")
-    if not isinstance(duties, dict):
-        return []
-    return [
-        role for role in roles
-        if isinstance(duties.get(role), dict) and duties[role].get("mode") == "skip"
-    ]
-
-
-def _decisions_from_merge(merge: object) -> dict[str, Any] | None:
-    """Rebuild the decisions view honored at merge time from the persisted merge record."""
-    if not isinstance(merge, dict):
-        return None
-    duties = merge.get("review_duties")
-    if not isinstance(duties, dict):
-        return None
-    return {
-        "duties": {
-            duty: {"mode": mode}
-            for duty, mode in duties.items()
-            if isinstance(mode, str)
-        }
-    }
-
-
-def review_decision(
-    lane_id: str,
-    duties: dict[str, str],
-    risk_factors: list[str] | None,
-    acceptance_coverage: object,
-    checks: list[str] | None,
-    rationale: object,
-    opt_in: bool,
-    change: str | None = None,
-) -> Path:
-    """Record the Coordinator's per-lane review-duty decision for code/test/UI.
-
-    Without --opt-in the record is shadow-only: it is persisted and displayed, but the
-    standard review gates stay authoritative. With --opt-in the coordination
-    review policy becomes 'risk-based' and lane-merge honors the selected duties.
-    """
-    path, state, plan = _state_context(change)
-    lane = _state_lane(state, lane_id)
-    _reject_finished_lane(lane_id, lane)
-    if _review_mode(plan) == "combined-single-lane":
-        raise StateError(
-            "lane: combined review keeps the exact Oracle binding; decision records are not honored in combined mode"
-        )
-    coordination, runtime = _coordination_lane_for(state, plan, lane_id)
-    if not isinstance(rationale, str) or not rationale.strip():
-        raise StateError("lane: a review decision requires --rationale naming the recorded reasoning")
-    if not isinstance(acceptance_coverage, str) or not acceptance_coverage.strip():
-        raise StateError("lane: a review decision requires --acceptance-coverage naming the covered criteria")
-    duty_modes: dict[str, str] = {}
-    for duty in _DECISION_DUTIES:
-        mode = duties.get(duty)
-        if not isinstance(mode, str) or mode not in _DECISION_MODES:
-            raise StateError(f"lane: {duty} duty mode must be full, focused, or skip; record it with review-decision")
-        duty_modes[duty] = mode
-    decision: dict[str, Any] = {
-        "duties": {
-            duty: {
-                "mode": mode,
-                "risk_factors": [str(item) for item in (risk_factors or [])],
-                "acceptance_coverage": acceptance_coverage.strip(),
-                "checks": [str(item) for item in (checks or [])],
-                "rationale": rationale.strip(),
-            }
-            for duty, mode in duty_modes.items()
-        },
-        "recorded_at": _utc_timestamp(),
-    }
-    decision["recorded_sha256"] = hashlib.sha256(
-        json.dumps(decision["duties"], sort_keys=True).encode("utf-8")
-    ).hexdigest()
-    _validate_decision_record(lane, decision, oracle_authored=_lane_oracle_write_authored(runtime))
-    if opt_in:
-        coordination["review_policy"] = "risk-based"
-    runtime["decisions"] = decision
-    _write_coordination(state, coordination, plan)
-    return path
-
-
-def review_reuse(
-    lane_id: str,
-    role: str,
-    ancestor: object,
-    intervening_diff: object,
-    assessment: object,
-    evidence_inputs_changed: bool,
-    change: str | None = None,
-) -> Path:
-    """Record assessed reuse of an ordinary agent PASS recorded at an ancestor commit.
-
-    Review reuse: an ancestor verdict can satisfy a later HEAD only when the Coordinator
-    records the intervening diff, whether evidence inputs changed, and an assessment.
-    Affected/uncertain inputs require fresh re-review instead. Human authorization and
-    combined-Oracle approvals stay exact-bound: reuse never applies to them.
-    """
-    role = _require_role(role)
-    path, state, plan = _state_context(change)
-    lane = _state_lane(state, lane_id)
-    _reject_finished_lane(lane_id, lane)
-    coordination, runtime = _coordination_lane_for(state, plan, lane_id)
-    if _review_mode(plan) == "combined-single-lane":
-        raise StateError(
-            "lane: combined review approvals stay exact-bound; ancestor reuse is not honored in combined mode"
-        )
-    if coordination.get("review_policy") != "risk-based":
-        # Review policy: assessed reuse is a risk-policy relaxation. It requires the active
-        # risk-based policy selected by the Coordinator.
-        raise StateError(
-            "lane: ancestor reuse requires the risk-based review policy; record the Coordinator "
-            "decision with review-decision --opt-in first"
-        )
-    operation_lane = dict(lane)
-    operation_lane.update(runtime)
-    if role not in _effective_review_roles(operation_lane, runtime.get("decisions")):
-        raise StateError(f"lane: reviewer role {role!r} is not required for lane {lane_id!r}; use the plan flags")
-    if _lane_oracle_write_authored(runtime):
-        raise StateError(
-            "lane: Oracle-authored write work requires a direct independent current-HEAD review; "
-            "ancestor reuse cannot cover authored corrections"
-        )
-    if not isinstance(assessment, str) or not assessment.strip():
-        raise StateError("lane: ancestor reuse requires --assessment naming what the intervening change does not touch")
-    if evidence_inputs_changed:
-        raise StateError(
-            "lane: evidence inputs changed since the ancestor review; affected or uncertain changes "
-            "require a fresh re-review, not ancestor reuse"
-        )
-    worktree, recorded_ref = _lane_runtime_for_operation(state, lane_id, operation_lane)
-    runtime["worktree"] = str(worktree)
-    runtime["ref"] = recorded_ref
-    if _run_git(worktree, "status", "--porcelain").stdout.strip():
-        raise StateError(f"lane: lane {lane_id!r} worktree is dirty; commit before recording ancestor reuse")
-    actual_head = _git_output(worktree, "rev-parse", "HEAD")
-    ancestor_commit = _git_commit(worktree, ancestor)
-    if ancestor_commit == actual_head:
-        raise StateError(
-            "lane: ancestor reuse must cite a strict ancestor; record a fresh lane-review for the current HEAD"
-        )
-    if not _is_ancestor(worktree, ancestor_commit, actual_head):
-        raise StateError(
-            f"lane: reuse source {ancestor_commit} is not an ancestor of lane HEAD {actual_head}; "
-            "a non-ancestor verdict is invalid and cannot be reused"
-        )
-    # The binding is the real repository diff, not caller-supplied text: the helper computes
-    # the canonical ancestor..HEAD diff itself and refuses anything else (stale, unrelated,
-    # fabricated, or empty) so the recorded PASS can never rest on unverified input.
-    real_diff = _run_git(worktree, "diff", f"{ancestor_commit}..{actual_head}", "--").stdout
-    if not real_diff.strip():
-        raise StateError(
-            "lane: the actual git diff between the ancestor and lane HEAD is empty; ancestor reuse "
-            "cannot bind an empty intervening diff; record a fresh lane-review instead"
-        )
-    real_diff_sha256 = hashlib.sha256(real_diff.encode("utf-8")).hexdigest()
-    diff_path = _required_document(intervening_diff, "intervening diff record")
-    if _path_sha256(Path(diff_path)) != real_diff_sha256:
-        raise StateError(
-            f"lane: the supplied intervening diff does not match the actual git diff "
-            f"{ancestor_commit}..{actual_head}; an unrelated, stale, or fabricated diff cannot "
-            "satisfy ancestor reuse"
-        )
-    source = next(
-        (
-            item for item in runtime.get("reviews") or []
-            if isinstance(item, dict)
-            and item.get("role") == role
-            and item.get("verdict") == "PASS"
-            and item.get("reused") is not True
-            and item.get("combined") is not True
-            and _review_commit(item) == ancestor_commit
-        ),
-        None,
-    )
-    if not isinstance(source, dict):
-        raise StateError(
-            f"lane: no completed ordinary {role!r} PASS is recorded at {ancestor_commit}; "
-            "ancestor reuse can only carry a directly recorded PASS"
-        )
-    evidence_path = source.get("binding", {}).get("evidence_path")
-    source_digest = source.get("binding", {}).get("evidence_sha256")
-    if evidence_path is not None:
-        evidence_path = _required_document(evidence_path, "ancestor review evidence")
-        if not source_digest or _path_sha256(Path(evidence_path)) != source_digest:
-            raise StateError("lane: ancestor review evidence changed since direct review; re-review the lane")
-    diff_path = _required_document(intervening_diff, "intervening diff record")
-    binding = {
-        "commit": actual_head,
-        "evidence_revision": source.get("binding", {}).get("evidence_revision") or "reused",
-        "evidence_path": evidence_path,
-        "evidence_sha256": source_digest if evidence_path is not None else None,
-        "ancestor_commit": ancestor_commit,
-        "intervening_diff": diff_path,
-        "intervening_diff_sha256": real_diff_sha256,
-        "evidence_inputs_changed": False,
-    }
-    record = {
-        "role": role,
-        "verdict": "PASS",
-        "reused": True,
-        "reused_from": ancestor_commit,
-        "assessment": assessment.strip(),
-        "binding": binding,
-        "report": source.get("report"),
-    }
-    reviews = runtime.setdefault("reviews", [])
-    if not isinstance(reviews, list):
-        raise StateError("state: reviews are malformed; repair coordination data")
-    _validate_reuse_record(role, record, actual_head, worktree, True, operation_lane)
-    reviews.append(record)
-    _write_coordination(state, coordination, plan)
-    return path
-
-
 def _new_coordination(state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -1478,21 +1499,56 @@ def _new_coordination(state: dict[str, Any], plan: dict[str, Any]) -> dict[str, 
         "feature_checkout": state["feature_checkout"],
         "branch": state.get("branch") or "HEAD",
         "review_mode": _review_mode(plan),
+        "plan_sha256": state["plan_sha256"],
         "subagents": [],
         "lanes": {
-            lane_id: _coordination_lane()
-            for lane_id in plan.get("lanes", {})
+            lane_id: _coordination_lane({"task_states": {
+                task_id: {"status": "pending"} for task_id, task in plan["tasks"].items()
+                if task["lane"] == lane_id
+            }}) for lane_id in plan.get("lanes", {})
         },
         "dispatches": [],
         "reviews": [],
         "worktrees": [],
         "authorizations": {},
         "human_gates": {},
-        # The standard gates stay authoritative by default.
-        # 'risk-based' is an explicit Coordinator opt-in recorded here.
-        "review_policy": "legacy",
         "finish": {},
     }
+
+
+def _repository_coordination(checkout: Path) -> dict[str, Any]:
+    path = workflow_dir(checkout) / "coordination.json"
+    if path.exists():
+        value = _read_state(path)
+        if value.get("schema_version") != 2 or not isinstance(value.get("changes"), dict):
+            raise StateError(f"state: {path} needs schema_version 2 and a changes object")
+        if value.get("feature_checkout") != str(checkout):
+            raise StateError("state: repository coordination belongs to another checkout; reconcile it")
+        return value
+    # Import retained ledgers only when no repository ledger exists; never overwrite newer records.
+    changes = {}
+    for legacy in sorted(workflow_dir(checkout).glob("*/coordination.json")):
+        node = _read_state(legacy)
+        if node.get("change") != legacy.parent.name or node.get("feature_checkout") != str(checkout):
+            raise StateError(f"state: legacy coordination {legacy} belongs to another change or checkout")
+        changes[legacy.parent.name] = _stored_change_coordination(node)
+    return {"schema_version": 2, "feature_checkout": str(checkout), "changes": changes}
+
+
+def _stored_change_coordination(coordination: dict[str, Any]) -> dict[str, Any]:
+    value = json.loads(json.dumps({key: item for key, item in coordination.items() if not key.startswith("_")}))
+    for key in ("schema_version", "change", "feature_checkout"):
+        value.pop(key, None)
+    lanes = value.get("lanes")
+    if not isinstance(lanes, dict):
+        raise StateError("state: coordination lanes must be an object; repair the ledger before migration")
+    for lane in lanes.values():
+        if not isinstance(lane, dict):
+            raise StateError("state: coordination lane must be an object; repair the ledger before migration")
+        lane["tasks"] = lane.pop("task_states", lane.get("tasks", {}))
+        if not isinstance(lane["tasks"], dict):
+            raise StateError("state: coordination lane tasks must be an object; repair the ledger before migration")
+    return value
 
 
 def _load_coordination(state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
@@ -1501,17 +1557,16 @@ def _load_coordination(state: dict[str, Any], plan: dict[str, Any]) -> dict[str,
     if not isinstance(change, str) or not isinstance(checkout, str):
         raise StateError("state: coordination context is missing; re-derive the state")
     path = _coordination_path(change, Path(checkout))
-    if not path.exists():
+    repository = _repository_coordination(Path(checkout))
+    value = repository["changes"].get(change)
+    if value is None:
         result = _new_coordination(state, plan)
         result["_available"] = False
-        result["_error"] = "coordination data is missing"
+        result["_error"] = "coordination data is missing for this change"
         return result
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise StateError(f"state: cannot load coordination data {path}: {_one_line(exc)}; repair or remove it") from exc
     if not isinstance(value, dict):
         raise StateError("state: coordination data must be an object; repair or remove it")
+    value = {**value, "change": change, "feature_checkout": checkout}
     if value.get("run_id"):
         raise StateError("state: coordination data contains a run identifier; remove the legacy record")
     if value.get("change") != change or value.get("feature_checkout") != checkout:
@@ -1522,14 +1577,16 @@ def _load_coordination(state: dict[str, Any], plan: dict[str, Any]) -> dict[str,
     if not isinstance(lanes, dict):
         raise StateError("state: coordination lanes are missing; repair or remove the coordination data")
     result = _new_coordination(state, plan)
-    for key in ("dispatches", "reviews", "worktrees", "authorizations", "human_gates", "review_policy", "finish", "subagents"):
+    for key in ("dispatches", "reviews", "worktrees", "authorizations", "human_gates", "finish", "finish_dispatches", "subagents"):
         if key in value:
             result[key] = value[key]
     for lane_id in plan.get("lanes", {}):
         if lane_id in lanes:
             if not isinstance(lanes[lane_id], dict):
                 raise StateError(f"state: coordination lane {lane_id!r} is malformed; repair it")
-            result["lanes"][lane_id] = _coordination_lane(lanes[lane_id])
+            lane = dict(lanes[lane_id])
+            lane["task_states"] = lane.pop("tasks", lane.get("task_states", {}))
+            result["lanes"][lane_id] = _coordination_lane(lane)
     # A committed plan revision may switch modes. Old combined records never satisfy the
     # standard path, and old standard records never satisfy combined mode; discard only the
     # incompatible combined lane records while preserving other coordination for recovery.
@@ -1544,6 +1601,7 @@ def _load_coordination(state: dict[str, Any], plan: dict[str, Any]) -> dict[str,
                         item for item in reviews
                         if isinstance(item, dict) and item.get("combined") is not True
                     ]
+    _normalize_stored_roles(result)
     result["_available"] = True
     return result
 
@@ -1561,7 +1619,6 @@ def _overlay_coordination(
             runtime = coordination_lanes.get(lane_id)
             if isinstance(runtime, dict):
                 lane.update({key: json.loads(json.dumps(runtime.get(key))) for key in _COORDINATION_FIELDS})
-    view["review_policy"] = coordination.get("review_policy", "legacy")
     gates = coordination.get("human_gates")
     view["human_gates"] = gates if isinstance(gates, dict) else {}
     # The summary validates a gate through the merge validator, which needs the live grants too.
@@ -1571,6 +1628,7 @@ def _overlay_coordination(
     view["coordination_path"] = str(
         _coordination_path(str(state["change"]), Path(str(state["feature_checkout"])))
     )
+    view["finish_dispatches"] = coordination.get("finish_dispatches", [])
     view["subagents"] = coordination.get("subagents") if isinstance(coordination.get("subagents"), list) else []
     view["coordination_available"] = coordination.get("_available", True) is not False
     if not view["coordination_available"]:
@@ -1586,8 +1644,10 @@ def _write_coordination(
     if not isinstance(change, str) or not isinstance(checkout, str):
         raise StateError("state: coordination context is missing; re-derive the state")
     path = _coordination_path(change, Path(checkout))
-    persisted = {key: value for key, value in coordination.items() if not key.startswith("_")}
-    _atomic_write_json(path, persisted)
+    repository = _repository_coordination(Path(checkout))
+    repository["changes"][change] = _stored_change_coordination(coordination)
+    _atomic_write_json(path, repository)
+    persisted = coordination
     _render_dashboard_best_effort(change, Path(checkout), persisted, plan)
     return path
 
@@ -1604,10 +1664,7 @@ def _render_dashboard_best_effort(
     """
     try:
         derived = state_derive(change, None, checkout)
-        current_plan = plan or json.loads(
-            _committed_file(checkout, str(derived["source_sha"]),
-                            f"openspec/changes/{change}/plan/graph-plan.json")
-        )
+        current_plan = plan or _change_plan_at(checkout, str(derived["source_sha"]), change)[0]
         render_dashboard(
             workflow_dir(checkout) / change / "dashboard.html",
             _overlay_coordination(derived, coordination, current_plan), current_plan,
@@ -1616,10 +1673,12 @@ def _render_dashboard_best_effort(
         pass
 
 
-def _validate_committed_plan(
+def _validate_change_plan(
     plan: dict[str, Any], change: str, tasks_text: str, checkout: Path
 ) -> None:
-    plan_path = checkout / "openspec" / "changes" / change / "plan" / "graph-plan.json"
+    plan_path = checkout / _REPO_PLAN
+    if plan.get("change") != change:
+        raise PlanError("shape: selected plan belongs to another change")
     _check_shape(plan, plan_path)
     _check_task_ids_text(plan, tasks_text, f"openspec/changes/{change}/tasks.md")
     _check_references(plan)
@@ -1637,6 +1696,9 @@ def _guard_derived_state_target(path: Path) -> None:
 
 
 def _active_changes(checkout: Path) -> list[str]:
+    repository_plan = _workflow_checkout(checkout) / _REPO_PLAN
+    if repository_plan.is_file():
+        return sorted(_change_plans(_load_json(repository_plan)))
     changes_root = checkout / "openspec" / "changes"
     if not changes_root.is_dir():
         return []
@@ -1652,7 +1714,7 @@ def _infer_change(checkout: Path) -> str:
     if len(changes) == 1:
         return changes[0]
     if not changes:
-        raise StateError("state: no active OpenSpec change found; provide <change> to state-derive")
+        raise StateError("state: no active OpenSpec change found; author the repo-level local graph and select --change")
     raise StateError(
         f"state: multiple active changes ({', '.join(changes)}); provide --change to select one"
     )
@@ -1677,18 +1739,17 @@ def _state_context(
     state_change = state.get("change")
     if not isinstance(state_change, str) or not state_change:
         raise StateError("state: change is missing; re-derive the state")
-    plan_relative = f"openspec/changes/{state_change}/plan/graph-plan.json"
     source_sha = state.get("source_sha")
     if not isinstance(source_sha, str) or not source_sha:
         raise StateError("state: source SHA is missing; re-derive the state")
     try:
-        plan = json.loads(_committed_file(repository, source_sha, plan_relative))
-        tasks_text = _committed_file(repository, source_sha, f"openspec/changes/{state_change}/tasks.md")
+        plan, _, _ = _change_plan_at(repository, source_sha, state_change)
+        tasks_text, _ = _committed_tasks(repository, source_sha, state_change)
     except json.JSONDecodeError as exc:
         raise PlanError(f"shape: cannot load committed plan at {source_sha}: {_one_line(exc)}; fix the plan") from exc
     if not isinstance(plan, dict):
         raise PlanError("shape: committed plan must be a JSON object; change it to an object")
-    _validate_committed_plan(plan, state_change, tasks_text, repository)
+    _validate_change_plan(plan, state_change, tasks_text, repository)
     try:
         coordination = _load_coordination(state, plan)
     except StateError as exc:
@@ -1715,111 +1776,6 @@ def _git_commit(checkout: Path, revision: str) -> str:
     if result.returncode or not commit:
         raise StateError(f"state: commit {revision!r} does not exist; provide an existing commit")
     return commit
-
-
-def _write_lane_tasks(path: Path, text: str) -> None:
-    temporary: str | None = None
-    try:
-        descriptor, temporary = tempfile.mkstemp(
-            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-        )
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        temporary = None
-    except OSError as exc:
-        raise StateError(f"lane: cannot tick {path}: {_one_line(exc)}; check the lane worktree") from exc
-    finally:
-        if temporary:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
-
-
-def task_tick(lane_id: str, task_id: str, change: str | None = None) -> Path:
-    """Check one plan-assigned top-level task in the lane worktree."""
-    _, state, plan = _state_context(change)
-    lane = _state_lane(state, lane_id)
-    _reject_finished_lane(lane_id, lane)
-    if lane.get("complete"):
-        raise StateError(f"lane: lane {lane_id!r} is already complete from committed ticks")
-    if not isinstance(task_id, str) or not task_id or "\n" in task_id or "\r" in task_id:
-        raise StateError("lane: task id must be a non-empty top-level task identifier; change <task>")
-    task = plan.get("tasks", {}).get(task_id)
-    if not isinstance(task, dict):
-        raise StateError(
-            f"lane: task {task_id!r} is not a top-level task in the committed plan; "
-            "use a plan task identifier (nested checkboxes are annotations)"
-        )
-    if task.get("lane") != lane_id:
-        raise StateError(
-            f"lane: task {task_id!r} belongs to lane {task.get('lane')!r}, not {lane_id!r}; "
-            "tick it from its planned lane"
-        )
-    repository = Path(state["feature_checkout"]).expanduser().resolve()
-    worktree_value = lane.get("worktree")
-    recorded_ref = lane.get("ref")
-    worktree: Path | None = None
-    expected_path = _lane_worktree_path(state, lane_id).resolve()
-    expected_ref = _lane_ref(state, lane_id)
-    if isinstance(worktree_value, str) and worktree_value and isinstance(recorded_ref, str) and recorded_ref:
-        worktree = Path(worktree_value).expanduser().resolve()
-        if worktree != expected_path or recorded_ref != expected_ref:
-            raise StateError(f"lane: lane {lane_id!r} worktree or ref is not deterministic; reconcile it first")
-        if _worktree_branch(repository, worktree) != recorded_ref:
-            raise StateError(f"lane: worktree is not checked out on ref {recorded_ref}; reconcile it first")
-    else:
-        # A lost coordination file is recoverable from the deterministic worktree/ref. A
-        # worker invoked from its own lane checkout may also tick directly without a run record.
-        if _worktree_branch(repository, expected_path) == expected_ref:
-            worktree, recorded_ref = expected_path, expected_ref
-        else:
-            current_branch = _run_git(repository, "symbolic-ref", "--short", "-q", "HEAD").stdout.strip()
-            if current_branch.endswith(f"-{lane_id}") and current_branch.startswith("featdev/"):
-                worktree, recorded_ref = repository, current_branch
-            else:
-                raise StateError(f"lane: lane {lane_id!r} has no open worktree; open it before ticking")
-    assert worktree is not None and recorded_ref is not None
-    change_name = state.get("change")
-    if not isinstance(change_name, str) or not change_name:
-        raise StateError("lane: change is missing; re-derive the state")
-    tasks_path = worktree / "openspec" / "changes" / change_name / "tasks.md"
-    dirty = _run_git(worktree, "status", "--porcelain", "--untracked-files=all")
-    if dirty.returncode:
-        raise StateError(f"lane: cannot inspect lane worktree: {_one_line(dirty.stderr or dirty.stdout)}; repair it")
-    relative_tasks = str(tasks_path.relative_to(worktree))
-    dirty_paths = [line[3:] for line in dirty.stdout.splitlines() if len(line) >= 4]
-    if any(path != relative_tasks for path in dirty_paths):
-        raise StateError("lane: worktree is dirty; commit code and discard unrelated changes before ticking")
-    try:
-        text = tasks_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise StateError(f"lane: cannot load {tasks_path}: {_one_line(exc)}; provide the committed tasks.md") from exc
-    _check_task_ids_text(plan, text, f"openspec/changes/{change_name}/tasks.md in lane worktree")
-    lines = text.splitlines(keepends=True)
-    matches: list[tuple[int, re.Match[str]]] = []
-    entry = re.compile(r"^-\s*\[([ xX])\]\s+(\S+)(?=\s|$)")
-    for index, line in enumerate(lines):
-        match = entry.match(line)
-        if match and match.group(2) == task_id:
-            matches.append((index, match))
-    if not matches:
-        raise StateError(
-            f"lane: task {task_id!r} is not a top-level entry in {tasks_path}; "
-            "nested checkboxes are annotations, not tasks"
-        )
-    if len(matches) != 1:
-        raise StateError(f"lane: task {task_id!r} appears more than once at the top level; repair tasks.md")
-    index, match = matches[0]
-    if match.group(1).lower() == "x":
-        raise StateError(f"lane: task {task_id!r} is already ticked; do not rewrite its completion record")
-    line = lines[index]
-    lines[index] = line[:match.start(1)] + "x" + line[match.end(1):]
-    _write_lane_tasks(tasks_path, "".join(lines))
-    return tasks_path
 
 
 def _state_lane(state: dict[str, Any], lane_id: str) -> dict[str, Any]:
@@ -1858,10 +1814,8 @@ def _dispatch_access(role: str, access: str | None = None) -> str:
 
 def _dispatch_intent(
     state: dict[str, Any],
-    lane_id: str,
+    lane_id: str | None,
     role: str,
-    model: str,
-    level: str,
     task: str,
     key: str | None = None,
     lane_head: str | None = None,
@@ -1870,12 +1824,13 @@ def _dispatch_intent(
     evidence: object = None,
 ) -> str:
     role = _require_role(role)
-    lane = _state_lane(state, lane_id)
-    _reject_finished_lane(lane_id, lane)
+    lane = _state_lane(state, lane_id) if lane_id is not None else state
+    if lane_id is not None:
+        _reject_finished_lane(lane_id, lane)
     if lane.get("complete"):
         raise StateError(f"lane: lane {lane_id!r} is already complete from committed ticks")
     change = state.get("change") or "change"
-    dispatch_key = key or f"{change}/{lane_id}/{role}/{task}/{uuid.uuid4().hex}"
+    dispatch_key = key or f"{change}/{lane_id or 'finish'}/{role}/{task}/{uuid.uuid4().hex}"
     if not dispatch_key:
         raise StateError("state: dispatch key must not be empty; change --key")
     if not isinstance(lane_head, str) or not lane_head:
@@ -1889,8 +1844,6 @@ def _dispatch_intent(
     evidence_path = _review_binding_path(evidence)
     intent = {
         "role": role,
-        "model": model,
-        "level": level,
         "task": task,
         "key": dispatch_key,
         "access": resolved_access,
@@ -1911,14 +1864,14 @@ def _dispatch_intent(
             continue
         if any(
             record.get(field) != intent[field]
-            for field in ("role", "model", "level", "task", "key")
+            for field in ("role", "task", "key")
         ) or (
             record.get("access") is not None and record.get("access") != resolved_access
         ) or any(
             record.get(field) != intent.get(field)
             for field in ("acceptance_path", "acceptance_sha256", "evidence_path", "evidence_sha256")
         ) or (
-            (acceptance_path is not None or evidence_path is not None)
+            (lane_id is None or acceptance_path is not None or evidence_path is not None)
             and record.get("lane_head") != lane_head
         ):
             raise StateError(
@@ -1955,19 +1908,60 @@ def _coordination_lane_for(
 
 
 def dispatch_run(
-    lane_id: str,
+    lane_id: str | None,
     role: str,
-    model: str,
-    level: str,
     task: str,
     key: str | None = None,
     change: str | None = None,
     access: str | None = None,
     acceptance: object = None,
     evidence: object = None,
+    worktree: Path | None = None,
 ) -> Path:
     role = _require_role(role)
     path, state, plan = _state_context(change)
+    if lane_id is None:
+        _require_coordinator_cwd(state, "finish dispatch")
+        coordination = _load_coordination(state, plan)
+        repository = Path(state["feature_checkout"])
+        head = _git_output(repository, "rev-parse", _feature_branch(state))
+        _finish_integrated(state, coordination, repository, head)
+        target = (worktree or repository).resolve()
+        common = (repository / _git_output(repository, "rev-parse", "--git-common-dir")).resolve()
+        target_common = (target / _git_output(target, "rev-parse", "--git-common-dir")).resolve()
+        if common != target_common:
+            raise StateError("finish: worker worktree belongs to another repository")
+        access = _dispatch_access(role, access)
+        if access == "write" and target == repository.resolve():
+            raise StateError("finish: authoring requires a separate --worktree; the Coordinator owns the feature checkout")
+        dispatches = coordination.setdefault("finish_dispatches", [])
+        if not isinstance(dispatches, list):
+            raise StateError("finish: dispatch records are malformed; repair the ledger")
+        previous = next((row for row in dispatches if row.get("key") == key), None) if key else None
+        if previous is not None and previous.get("worktree") != str(target):
+            raise StateError("finish: dispatch key has another worktree; use a new key")
+        if previous is None:
+            target_head = _git_output(target, "rev-parse", "HEAD")
+            if (access == "write" and target_head != head) or not _is_ancestor(repository, head, target_head):
+                raise StateError("finish: authors start at integrated HEAD; review candidates must descend from it")
+            if _run_git(target, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+                raise StateError("finish: worker worktree is dirty; reconcile it before dispatch")
+            if any(row.get("result") is None and row.get("worktree") == str(target)
+                   and (access == "write" or row.get("access") == "write") for row in dispatches):
+                raise StateError("finish: worktree already has an active worker; establish ownership before dispatch")
+        if previous is not None and previous.get("feature_head") != head:
+            raise StateError("finish: dispatch key has a different intent at this feature HEAD; use a new key")
+        snapshot = (previous["lane_head"] if previous is not None and access == "write"
+                    else _git_output(target, "rev-parse", "HEAD"))
+        holder = {"change": state["change"], "dispatches": dispatches}
+        dispatch_key = _dispatch_intent(holder, None, role, task, key, snapshot, access, acceptance, evidence)
+        row = next(row for row in dispatches if row["key"] == dispatch_key)
+        row.update({"scope": "finish", "worktree": str(target), "feature_head": head})
+        _register_subagent(coordination, None, role, task, dispatch_key, access, str(target))
+        _write_coordination(state, coordination, plan)
+        return path
+    if worktree is not None:
+        raise StateError("dispatch: --worktree is only supported with --scope finish")
     coordination, runtime = _coordination_lane_for(state, plan, lane_id)
     merged_view = dict(state["lanes"][lane_id])
     merged_view.update(runtime)
@@ -1977,11 +1971,11 @@ def dispatch_run(
     lane_head = _git_output(worktree, "rev-parse", "HEAD")
     dispatch_key = _dispatch_intent(
         {**state, "lanes": {lane_id: {**merged_view, "worktree": str(worktree), "ref": recorded_ref}}},
-        lane_id, role, model, level, task, key, lane_head, access, acceptance, evidence,
+        lane_id, role,  task, key, lane_head, access, acceptance, evidence,
     )
     # _dispatch_intent updates the merged copy, so copy only the transient dispatch list back.
     runtime["dispatches"] = merged_view["dispatches"]
-    _register_subagent(coordination, lane_id, role, model, level, task, dispatch_key,
+    _register_subagent(coordination, lane_id, role,  task, dispatch_key,
                        _dispatch_access(role, access), str(worktree))
     _write_coordination(state, coordination, plan)
     return path
@@ -1989,7 +1983,7 @@ def dispatch_run(
 
 def _complete_dispatch(
     state: dict[str, Any],
-    lane_id: str,
+    lane_id: str | None,
     role: str,
     worker_run_id: str | None = None,
     tokens: int | None = None,
@@ -1997,8 +1991,9 @@ def _complete_dispatch(
     result: str | None = None,
     key: str | None = None,
 ) -> None:
-    lane = _state_lane(state, lane_id)
-    _reject_finished_lane(lane_id, lane)
+    lane = _state_lane(state, lane_id) if lane_id is not None else state
+    if lane_id is not None:
+        _reject_finished_lane(lane_id, lane)
     dispatches = lane.setdefault("dispatches", [])
     if not isinstance(dispatches, list):
         raise StateError(f"state: dispatches for lane {lane_id!r} are malformed; repair coordination data")
@@ -2041,7 +2036,7 @@ def _complete_dispatch(
 
 
 def dispatch_done(
-    lane_id: str,
+    lane_id: str | None,
     role: str,
     worker_run_id: str | None = None,
     tokens: int | None = None,
@@ -2052,6 +2047,14 @@ def dispatch_done(
 ) -> Path:
     role = _require_role(role)
     path, state, plan = _state_context(change)
+    if lane_id is None:
+        _require_coordinator_cwd(state, "finish dispatch-done")
+        coordination = _load_coordination(state, plan)
+        holder = {"dispatches": coordination.setdefault("finish_dispatches", [])}
+        _complete_dispatch(holder, None, role, worker_run_id, tokens, cost, result, key)
+        _close_subagent(coordination, None, role, worker_run_id, result, key)
+        _write_coordination(state, coordination, plan)
+        return path
     coordination, runtime = _coordination_lane_for(state, plan, lane_id)
     merged_view = dict(state["lanes"][lane_id])
     merged_view.update(runtime)
@@ -2125,7 +2128,10 @@ def _open_dispatches(state: dict[str, Any]) -> list[dict[str, Any]]:
     lanes = state.get("lanes")
     if not isinstance(lanes, dict):
         raise StateError("state: dispatch view is unavailable; coordination lanes are malformed")
-    for lane_id, lane in lanes.items():
+    groups = list(lanes.items())
+    if state.get("finish_dispatches"):
+        groups.append((None, {"dispatches": state["finish_dispatches"]}))
+    for lane_id, lane in groups:
         if not isinstance(lane, dict):
             raise StateError(f"state: dispatch view is unavailable; lane {lane_id!r} is malformed")
         dispatches = lane.get("dispatches")
@@ -2138,22 +2144,31 @@ def _open_dispatches(state: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
             if record.get("worker_run_id"):
                 raise StateError(f"state: dispatch view is unavailable; lane {lane_id!r} has an incomplete intent")
-            required = ("role", "model", "task", "key", "started_at", "lane_head")
+            required = ("role", "task", "key", "started_at", "lane_head")
             if any(not isinstance(record.get(field), str) or not record[field].strip() for field in required):
                 raise StateError(f"state: dispatch view is unavailable; lane {lane_id!r} has an incomplete intent")
             if lane.get("phase") in {"merged", "closed"}:
                 current_head = None
                 status = "stale"
             else:
-                current_head = _lane_current_head(lane)
+                if lane_id is None:
+                    try:
+                        current_head = _git_output(Path(record["worktree"]), "rev-parse", "HEAD")
+                    except (StateError, KeyError):
+                        current_head = None
+                else:
+                    current_head = _lane_current_head(lane)
                 if current_head is None:
                     status = "unavailable"
                 else:
-                    status = "current" if current_head == record["lane_head"] else "stale"
+                    current = current_head == record["lane_head"]
+                    if lane_id is None:
+                        current = current and state.get("source_sha") == record.get("feature_head")
+                    status = "current" if current else "stale"
             intents.append({
                 "lane": lane_id,
+                "scope": "finish" if lane_id is None else "lane",
                 "role": record["role"],
-                "model": record["model"],
                 "access": record.get("access"),
                 "task": record["task"],
                 "key": record["key"],
@@ -2167,8 +2182,8 @@ def _open_dispatches(state: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _dispatch_summary(item: dict[str, Any]) -> str:
     return (
-        f"{item.get('lane', '?')}/{item.get('role', '?')} "
-        f"worker={item.get('model', '?')} task={item.get('task', '?')} "
+        f"{item.get('lane') or 'finish'}/{item.get('role', '?')} "
+        f"task={item.get('task', '?')} "
         f"access={item.get('access') or 'unknown'} "
         f"key={item.get('key', '?')} since={item.get('started_at', '?')} "
         f"status={item.get('status', 'unknown')} "
@@ -2223,8 +2238,8 @@ def _inflight_task_status(
         head = _ref_sha(repository, ref)
         if not head:
             return "unavailable (lane ref is missing)"
-        tasks_text = _committed_file(repository, head, f"openspec/changes/{change}/tasks.md")
-        _check_task_ids_text(plan, tasks_text, f"openspec/changes/{change}/tasks.md at lane ref")
+        tasks_text, relative = _committed_tasks(repository, head, change)
+        _check_task_ids_text(plan, tasks_text, f"{relative} at lane ref")
         checked = set(_checked_task_ids_from_text(tasks_text))
         lane_id = lane.get("id")
         task_ids = [
@@ -2261,7 +2276,7 @@ def _status_view(state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
             }
             lane["human_gate"] = _human_gate_summary(
                 lane_id, lane, view.get("human_gates"), coordination_available, view.get("authorizations"),
-                view.get("review_policy") == "risk-based",
+                view.get("review_mode") != "combined-single-lane",
             )
     if view.get("coordination_available", True):
         try:
@@ -2310,16 +2325,12 @@ def _status_text(view: dict[str, Any]) -> str:
         dependencies = ", ".join(str(item) for item in lane.get("depends_on", [])) or "none"
         reviews = lane.get("reviews", [])
         _, verdicts = _review_summary(reviews)
-        decision = lane.get("decisions")
         phase = lane.get("phase", "created")
         gate = lane.get("human_gate")
-        duties = _decision_duty_text(decision)
-        duty_note = f"; review decisions {duties}" if decision else ""
         lines.append(
             f"lane {lane_id}: {phase}; tasks {len(checked)}/{len(task_ids)} [{task_status}]; "
             f"lane dependencies {dependencies}; readiness {reasons.get(lane_id, 'blocked: unavailable')}; "
             f"reviews {verdicts}"
-            + duty_note
             + (f"; human gate {gate}" if gate else "")
         )
         raw_states = lane.get("task_states") if isinstance(lane.get("task_states"), dict) else {}
@@ -2415,17 +2426,6 @@ def _dispatch_totals(dispatches: object) -> tuple[int | None, float | None]:
     return (tokens if tokens_known else None), (spend if spend_known else None)
 
 
-def _decision_duty_text(decision: object) -> str:
-    """One-line duty summary; a skip duty always displays as 'skipped', never 'PASS'."""
-    if not isinstance(decision, dict) or not isinstance(decision.get("duties"), dict):
-        return "none"
-    duties = decision["duties"]
-    return ", ".join(
-        f"{duty}={'skipped' if isinstance(duties.get(duty), dict) and duties[duty].get('mode') == 'skip' else duties.get(duty, {}).get('mode', 'unrecorded')}"
-        for duty in _DECISION_DUTIES
-    )
-
-
 def _review_summary(reviews: object) -> tuple[str, str]:
     if not isinstance(reviews, list):
         return "none", "none"
@@ -2435,9 +2435,9 @@ def _review_summary(reviews: object) -> tuple[str, str]:
         if not isinstance(review, dict):
             continue
         role = html.escape(str(review.get("role") or "?"))
-        # A reused ancestor verdict and a selected skip are never labeled PASS.
+        # Historical carried-forward verdicts never satisfy current review gates.
         if review.get("reused") is True:
-            verdict = "reused"
+            verdict = "INVALID"
         else:
             verdict = html.escape(str(review.get("verdict") or "unknown"))
         number = _review_round(review)
@@ -2490,7 +2490,6 @@ def _dashboard_html(
         inflight = _inflight_task_status(view, lane_state, plan)
         inflight_text = inflight or "—"
         review_round, verdicts = _review_summary(lane_state.get("reviews"))
-        decision_text = _decision_duty_text(lane_state.get("decisions"))
         merge = lane_state.get("merge")
         if lane_state.get("complete"):
             merge_status = "complete from committed ticks"
@@ -2508,7 +2507,6 @@ def _dashboard_html(
             f"<td>{_html_text(readiness.get(lane_id, 'blocked: unavailable'))}</td>"
             f"<td>{_html_text(lane_state.get('human_gate'), 'not required')}</td>"
             f"<td>{review_round}<br><small>{verdicts}</small></td>"
-            f"<td>{_html_text(decision_text)}</td>"
             f"<td>{_html_text(merge_status)}</td>"
             "</tr>"
         )
@@ -2535,9 +2533,9 @@ def _dashboard_html(
             f"<td>{_html_text('complete' if checked else 'pending')}</td><td>{dependency_text}</td></tr>"
         )
     if not lane_rows:
-        lane_rows.append('<tr><td colspan="10">No lanes in the committed plan</td></tr>')
+        lane_rows.append('<tr><td colspan="9">No lanes in the local plan</td></tr>')
     if not task_rows:
-        task_rows.append('<tr><td colspan="4">No tasks in the committed plan</td></tr>')
+        task_rows.append('<tr><td colspan="4">No tasks in the local plan</td></tr>')
     if not lane_dependency_rows:
         lane_dependency_rows.append('<tr><td colspan="3">No lane dependencies</td></tr>')
     if not task_dependency_rows:
@@ -2586,7 +2584,7 @@ small {{ opacity: .8; }}
 <div class="card"><strong>Ready lanes</strong><br>{_html_text(ready)}</div>
 </div>
 <section><h2>Lanes and assigned task status</h2>
-<table><thead><tr><th>Lane</th><th>Coordination phase</th><th>Tasks from committed ticks</th><th>In-flight task ticks (not on feature branch)</th><th>Lane dependencies</th><th>Readiness</th><th>Human gate</th><th>Reviews</th><th>Selected review duties</th><th>Merge</th></tr></thead>
+<table><thead><tr><th>Lane</th><th>Coordination phase</th><th>Tasks from committed ticks</th><th>In-flight task ticks (not on feature branch)</th><th>Lane dependencies</th><th>Readiness</th><th>Human gate</th><th>Reviews</th><th>Merge</th></tr></thead>
 <tbody>{''.join(lane_rows)}</tbody></table></section>
 <section><h2>Tasks and task dependencies</h2>
 <table><thead><tr><th>Task</th><th>Lane</th><th>Status from committed tick</th><th>Task dependencies</th></tr></thead>
@@ -2601,7 +2599,7 @@ small {{ opacity: .8; }}
 {dispatch_html}
 <table><thead><tr><th>Lane</th><th>Tokens</th><th>Spend</th></tr></thead>
 <tbody>{''.join(cost_rows)}</tbody></table></section>
-<footer><small>Live view of {html.escape(str(run_dir / 'coordination.json'), quote=True)}; git commits remain authoritative for completion.</small></footer>
+<footer><small>Live view of {html.escape(str(state.get('coordination_path') or run_dir / 'coordination.json'), quote=True)}; git commits remain authoritative for completion.</small></footer>
 {refresh_script}
 </body>
 </html>
@@ -2821,7 +2819,7 @@ def _lane_ready_for_open(state: dict[str, Any], plan: dict[str, Any], lane_id: s
 
 
 def _lane_checked_tasks(worktree: Path, change: str, plan: dict[str, Any] | None = None) -> set[str]:
-    tasks_path = worktree / "openspec" / "changes" / change / "tasks.md"
+    tasks_path = _openspec_change_directory(worktree, change) / "tasks.md"
     try:
         text = tasks_path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -2832,47 +2830,10 @@ def _lane_checked_tasks(worktree: Path, change: str, plan: dict[str, Any] | None
 
 
 def _required_review_roles(lane: dict[str, Any]) -> list[str]:
-    roles = ["code", "test"] if lane.get("risk") == "high" else ["code"]
+    roles = ["code-reviewer", "test-reviewer"] if lane.get("risk") == "high" else ["code-reviewer"]
     if lane.get("ui"):
-        roles.append("ui")
+        roles.append("ui-reviewer")
     return roles
-
-
-def _effective_review_roles(lane: dict[str, Any], decisions: object) -> list[str]:
-    """Required roles under a decision record: a selected full/focused test duty binds
-    ordinary lanes too, not only high-risk ones. Without a valid decision the standard
-    role set is returned unchanged."""
-    roles = _required_review_roles(lane)
-    duties = decisions.get("duties") if isinstance(decisions, dict) else None
-    test = duties.get("test") if isinstance(duties, dict) else None
-    if (
-        lane.get("risk") != "high"
-        and isinstance(test, dict)
-        and test.get("mode") in ("full", "focused")
-        and "test" not in roles
-    ):
-        roles.insert(roles.index("code") + 1, "test")
-    ui = duties.get("ui") if isinstance(duties, dict) else None
-    if isinstance(ui, dict) and ui.get("mode") in ("full", "focused") and "ui" not in roles:
-        roles.append("ui")
-    return roles
-
-
-def _lane_oracle_write_authored(runtime: dict[str, Any]) -> bool:
-    """True when a writing Oracle dispatch authored this lane's work (task 5.4).
-
-    Oracle-authored commits always need a direct independent review that did not author
-    them. Decisions cannot skip required duties, and ancestor reuse cannot satisfy them.
-    """
-    dispatches = runtime.get("dispatches")
-    if not isinstance(dispatches, list):
-        return False
-    return any(
-        isinstance(item, dict)
-        and item.get("role") == "oracle"
-        and item.get("access") == "write"
-        for item in dispatches
-    )
 
 
 def _review_report(path_value: object) -> str:
@@ -2947,16 +2908,8 @@ def _record_authorization_approval(
     repository = Path(state["feature_checkout"]).resolve()
     feature_head = _git_output(repository, "rev-parse", _feature_branch(state))
     base = _lane_merge_base(repository, ref, feature_head)
-    plan_relative = f"openspec/changes/{state['change']}/plan/graph-plan.json"
-    # A grant is bound to the approved plan revision, and the approved plan is the one committed at the
-    # feature-branch HEAD - not merely the revision the lane happened to open from. Both must match: a
-    # revised plan invalidates outstanding grants, and a renewal is a new grant with its own identity.
-    base_plan_sha256 = hashlib.sha256(
-        _committed_file(repository, base, plan_relative).encode("utf-8")
-    ).hexdigest()
-    plan_sha256 = hashlib.sha256(
-        _committed_file(repository, feature_head, plan_relative).encode("utf-8")
-    ).hexdigest()
+    base_plan_sha256 = _change_plan_at(repository, base, state["change"])[1]
+    plan_sha256 = _change_plan_at(repository, feature_head, state["change"])[1]
     grant = _load_grant(authorization) if isinstance(authorization, (str, Path)) else authorization
     if not isinstance(grant, dict):
         raise StateError(
@@ -3158,8 +3111,6 @@ def human_defer(lane_id: str, commit: str, evidence_revision: str, rationale: st
     if risk_assessment != "low" or not isinstance(rationale, str) or not rationale.strip():
         raise StateError("lane: deferral requires low-risk assessment and rationale for bounded, reversible impact and each excluded sensitive effect")
     coordination, runtime = _coordination_lane_for(state, plan, lane_id)
-    if coordination.get("review_policy") != "risk-based":
-        raise StateError("lane: deferral requires the opt-in risk-based policy")
     gates = coordination.setdefault("human_gates", {})
     prior = gates.get(lane_id)
     if prior is not None and (not isinstance(prior, dict) or prior.get("state") != "waiting"):
@@ -3180,6 +3131,7 @@ def human_defer(lane_id: str, commit: str, evidence_revision: str, rationale: st
     gates[lane_id] = {
         "lane": lane_id, "state": "deferred-to-integrated", "approved_by": None,
         "binding": {"commit": head, "evidence_revision": evidence_revision,
+                    "lane_plan_sha256": lane.get("lane_plan_sha256"),
                     "evidence_path": evidence_path,
                     "evidence_sha256": _path_sha256(Path(evidence_path)) if evidence_path else None},
         "rationale": rationale.strip(), "risk_assessment": risk_assessment,
@@ -3247,8 +3199,10 @@ def human_gate(
         "approved_by": "human" if state_value == "approved" else None,
         "binding": {
             "commit": reviewed_head,
+            "lane_plan_sha256": lane.get("lane_plan_sha256"),
             "evidence_revision": evidence_revision.strip(),
             "evidence_path": evidence_path,
+            "evidence_sha256": _path_sha256(Path(evidence_path)) if evidence_path else None,
         },
     }
     if state_value == "approved" and approved_by == "oracle":
@@ -3318,6 +3272,10 @@ def _validate_human_gate(
         raise StateError(f"lane: human gate for {lane_id!r} is missing; obtain interactive approval")
     if gate.get("lane") != lane_id:
         raise StateError(f"lane: human gate for {lane_id!r} is bound to another lane; obtain fresh approval")
+    binding = gate.get("binding")
+    if lane.get("runtime_plan") and (not isinstance(binding, dict)
+                                    or binding.get("lane_plan_sha256") != lane.get("lane_plan_sha256")):
+        raise StateError(f"lane: human gate for {lane_id!r} has a stale plan binding; obtain fresh approval")
     if gate.get("state") == "deferred-to-integrated" and allow_deferred:
         binding = gate.get("binding")
         if (lane.get("sensitive") or lane.get("risk") == "high" or not (lane.get("ui") or lane.get("screen"))
@@ -3357,6 +3315,8 @@ def _validate_human_gate(
     evidence_path = binding.get("evidence_path")
     if evidence_path is not None:
         _review_binding_path(evidence_path)
+        if _path_sha256(Path(evidence_path)) != binding.get("evidence_sha256"):
+            raise StateError(f"lane: human gate for {lane_id!r} has changed evidence; obtain fresh approval")
     if lane.get("screen") and not evidence_path:
         raise StateError(f"lane: human gate for {lane_id!r} has no current evidence; obtain fresh approval")
     approved_by = gate.get("approved_by")
@@ -3673,7 +3633,7 @@ def lane_review(
     coordination, runtime = _coordination_lane_for(state, plan, lane_id)
     operation_lane = dict(lane)
     operation_lane.update(runtime)
-    if role not in _effective_review_roles(operation_lane, runtime.get("decisions")):
+    if role not in _required_review_roles(operation_lane):
         raise StateError(f"lane: reviewer role {role!r} is not required for lane {lane_id!r}; use the plan flags")
     operation_lane = dict(lane)
     operation_lane.update(runtime)
@@ -3738,6 +3698,7 @@ def lane_review(
         "gate_eligible": current_review,
         "binding": {
             "commit": reviewed_head,
+            "lane_plan_sha256": lane.get("lane_plan_sha256"),
             "evidence_revision": revision,
             "evidence_path": evidence_path,
             "evidence_sha256": _path_sha256(Path(evidence_path)) if evidence_path else None,
@@ -3752,10 +3713,13 @@ def lane_review(
             continue
         if (
             previous.get("role") == role
+            and previous.get("reused") is not True
             and previous.get("verdict") == verdict
             and _review_commit(previous) == reviewed_head
             and previous_binding.get("evidence_revision") == revision
+            and previous_binding.get("lane_plan_sha256") == lane.get("lane_plan_sha256")
             and previous_binding.get("evidence_path") == evidence_path
+            and previous_binding.get("evidence_sha256") == record["binding"]["evidence_sha256"]
             and previous.get("report") == report_path
         ):
             previous.update({"status": record["status"], "gate_eligible": current_review, "reviewed_commit": reviewed_head})
@@ -3936,8 +3900,8 @@ def _combined_lane_review(
     plan: dict[str, Any],
 ) -> Path:
     """Record one exact-HEAD Oracle pass covering lane code/test and implementation coherence."""
-    if role != "code":
-        raise StateError("lane: combined review must use role 'code'; the Oracle supplies the combined duty")
+    if role != "code-reviewer":
+        raise StateError("lane: combined review must use role 'code-reviewer'; the Oracle supplies the combined duty")
     if verdict not in {"PASS", "MORE WORK"}:
         raise StateError("lane: verdict must be PASS or MORE WORK; change it")
     _combined_lane_from_plan(plan, lane_id)
@@ -4033,7 +3997,7 @@ def _combined_lane_review(
         (_review_round(item) or 0 for item in same_head),
         default=max(prior_rounds, default=0) + 1,
     )
-    if round_number > 2 and not _mediation_covers(runtime, "code"):
+    if round_number > 2 and not _mediation_covers(runtime, "code-reviewer"):
         raise StateError(
             f"lane: combined review round {round_number} is past the two-round limit; consult the Oracle "
             "for mediation before reviewing again"
@@ -4041,7 +4005,7 @@ def _combined_lane_review(
     record = {
         "round": round_number,
         "lane": lane_id,
-        "role": "code",
+        "role": "code-reviewer",
         "combined": True,
         "duties": ["code", "test", "final"],
         "oracle_provenance": oracle_provenance,
@@ -4153,12 +4117,12 @@ def _validate_combined_review(
         raise StateError(
             f"lane: combined review is {review.get('verdict')!r}, not PASS; fix the lane"
         )
-    if review.get("role") != "code" or review.get("duties") != ["code", "test", "final"]:
+    if review.get("role") != "code-reviewer" or review.get("duties") != ["code", "test", "final"]:
         raise StateError(
             "lane: combined review does not record code/test/final duties; record a fresh combined review"
         )
     round_number = _review_round(review)
-    if round_number and round_number > 2 and not _mediation_covers(runtime, "code"):
+    if round_number and round_number > 2 and not _mediation_covers(runtime, "code-reviewer"):
         raise StateError(
             f"lane: combined review reached round {round_number} without Oracle mediation; consult the Oracle"
         )
@@ -4257,109 +4221,18 @@ def lane_mediate(
     return path
 
 
-def _validate_reuse_record(
-    role: str, review: dict[str, Any], head: str, repository: Path | None, allow_reuse: bool,
-    lane: dict[str, Any],
-) -> None:
-    """Verify an ancestor-reuse record's bindings before the reused PASS can satisfy a gate.
-
-    The record must carry a real intervening diff: the stored file must still hash to the
-    recorded digest, and the digest itself must equal the actual ``git diff <ancestor>..<head>``
-    recomputed from the repository. Evidence presence/path must match the direct source
-    PASS; screen lanes always require a path and digest. The standard (legacy) policy never
-    honors reuse. """
-    if not allow_reuse:
-        raise StateError(
-            f"lane: review {role!r} is an ancestor-reuse record, but the standard review policy is "
-            "active; ancestor reuse requires the risk-based policy; review the lane at current HEAD"
-        )
-    if repository is None:
-        raise StateError(
-            f"lane: reuse record for {role!r} cannot be verified without a repository; re-review the lane"
-        )
-    binding = review.get("binding")
-    if not isinstance(binding, dict):
-        raise StateError(f"lane: reuse record for {role!r} has no binding; re-record it with review-reuse")
-    evidence_path = binding.get("evidence_path")
-    if lane.get("screen") and (not evidence_path or not binding.get("evidence_sha256")):
-        raise StateError(
-            f"lane: reused review evidence for {role!r} requires path and digest for a screen lane; "
-            "re-review with evidence"
-        )
-    source = next(
-        (
-            item for item in lane.get("reviews") or []
-            if isinstance(item, dict)
-            and item.get("role") == role
-            and item.get("verdict") == "PASS"
-            and item.get("reused") is not True
-            and item.get("combined") is not True
-            and _review_commit(item) == binding.get("ancestor_commit")
-        ),
-        None,
-    )
-    source_binding = source.get("binding") if source else None
-    if (not isinstance(source_binding, dict) or evidence_path != source_binding.get("evidence_path")
-            or (evidence_path is not None and (not source_binding.get("evidence_sha256")
-                or binding.get("evidence_sha256") != source_binding.get("evidence_sha256")))):
-        raise StateError(
-            f"lane: reused review evidence for {role!r} differs from its direct ancestor PASS; "
-            "re-review the lane"
-        )
-    if evidence_path is not None:
-        evidence_path = _required_document(evidence_path, "reused review evidence")
-        if binding.get("evidence_sha256") != _path_sha256(Path(evidence_path)):
-            raise StateError(
-                f"lane: evidence for {role!r} changed after the reuse record; "
-                "re-review the lane at current HEAD"
-            )
-    elif binding.get("evidence_sha256") is not None:
-        raise StateError(f"lane: reused review evidence for {role!r} is missing; re-review the lane")
-    ancestor = binding.get("ancestor_commit")
-    if not isinstance(ancestor, str) or not ancestor:
-        raise StateError(
-            f"lane: reuse record for {role!r} does not name its ancestor commit; re-record the reuse"
-        )
-    diff_path = binding.get("intervening_diff")
-    if not isinstance(diff_path, str) or not Path(diff_path).is_file() or Path(diff_path).stat().st_size == 0:
-        raise StateError(
-            f"lane: the intervening diff for {role!r} is missing or empty; re-review the lane at current HEAD"
-        )
-    stored = binding.get("intervening_diff_sha256")
-    diff_text = Path(diff_path).read_text(encoding="utf-8")
-    if not isinstance(stored, str) or hashlib.sha256(diff_text.encode("utf-8")).hexdigest() != stored:
-        raise StateError(
-            f"lane: the intervening diff for {role!r} changed after the reuse record was written; "
-            "re-review the lane at current HEAD"
-        )
-    real_diff = _run_git(repository, "diff", f"{ancestor}..{head}", "--").stdout
-    if not real_diff.strip() or hashlib.sha256(real_diff.encode("utf-8")).hexdigest() != stored:
-        raise StateError(
-            f"lane: the recorded intervening diff for {role!r} no longer matches the actual git diff "
-            f"{ancestor}..{head}; re-review the lane at current HEAD"
-        )
-
-
 def _validate_lane_reviews(
     lane_id: str,
     lane: dict[str, Any],
     head: str,
     required_roles: list[str] | None = None,
-    decisions: dict[str, Any] | None = None,
-    repository: Path | None = None,
-    allow_reuse: bool = False,
 ) -> None:
     roles = (
         list(required_roles) if required_roles is not None
-        else _effective_review_roles(lane, decisions)
+        else _required_review_roles(lane)
     )
-    skipped_roles = _decision_skipped_roles(roles, decisions)
     latest = _latest_reviews(lane, head)
     for role in roles:
-        if role in skipped_roles:
-            # A recorded Coordinator decision selects 'skip' for this duty; it is never
-            # labeled PASS and the merge record preserves the selected duty.
-            continue
         rounds = [
             number for item in lane.get("reviews") or []
             if isinstance(item, dict) and item.get("role") == role
@@ -4399,15 +4272,12 @@ def _validate_lane_reviews(
         if not isinstance(binding, dict) or binding.get("commit") != head:
             bound = binding.get("commit") if isinstance(binding, dict) else None
             raise StateError(f"lane: review {role!r} is bound to {bound or 'no commit'}, lane HEAD is {head}; re-review")
+        if lane.get("runtime_plan") and binding.get("lane_plan_sha256") != lane.get("lane_plan_sha256"):
+            raise StateError(f"lane: review {role!r} has a stale plan binding; re-review the current lane plan")
         if not binding.get("evidence_revision"):
             raise StateError(f"lane: review {role!r} has no evidence revision; re-record the review")
         if review.get("reused") is True:
-            if _lane_oracle_write_authored(lane):
-                raise StateError(
-                    "lane: Oracle-authored write work requires a direct independent current-HEAD review; "
-                    "ancestor reuse cannot cover authored corrections"
-                )
-            _validate_reuse_record(role, review, head, repository, allow_reuse, lane)
+            raise StateError(f"lane: review {role!r} is not a direct current-HEAD review; obtain a fresh verdict")
         report = review.get("report")
         if not isinstance(report, str) or not Path(report).is_file() or Path(report).stat().st_size == 0:
             raise StateError(f"lane: review {role!r} report is missing or empty; re-review the lane")
@@ -4415,6 +4285,8 @@ def _validate_lane_reviews(
             evidence = binding.get("evidence_path")
             if not isinstance(evidence, str) or not Path(evidence).is_file() or Path(evidence).stat().st_size == 0:
                 raise StateError(f"lane: review {role!r} changed-screen evidence is missing; re-review with --evidence")
+            if _path_sha256(Path(evidence)) != binding.get("evidence_sha256"):
+                raise StateError(f"lane: review {role!r} evidence changed; obtain a fresh current-HEAD review")
 
 
 def _validate_resolved_lane_base(repository: Path, base: str, head: str, feature_head: str) -> None:
@@ -4454,22 +4326,28 @@ def _candidate_tick_state(
     head: str,
     approved_head: str,
 ) -> tuple[set[str], set[str], bool]:
-    tasks_relative = f"openspec/changes/{change}/tasks.md"
-    plan_relative = f"openspec/changes/{change}/plan/graph-plan.json"
-    # Approved definitions come from feature HEAD; historical base still owns tick accounting.
-    base_plan = _committed_file(repository, base, plan_relative)
-    if not (
-        base_plan == _committed_file(repository, head, plan_relative)
-        == _committed_file(repository, approved_head, plan_relative)
-    ):
-        raise StateError(
-            f"lane: candidate plan {plan_relative} differs from the approved plan at lane base {base} "
-            f"or approved HEAD {approved_head}; "
-            "revert the plan change and have the Coordinator revise it on the feature branch"
-        )
-    base_tasks = _committed_file(repository, base, tasks_relative)
-    candidate_tasks = _committed_file(repository, head, tasks_relative)
-    approved_tasks = _committed_file(repository, approved_head, tasks_relative)
+    base_tasks, base_relative = _committed_tasks(repository, base, change)
+    candidate_tasks, tasks_relative = _committed_tasks(repository, head, change)
+    approved_tasks, approved_relative = _committed_tasks(repository, approved_head, change)
+    if tasks_relative != approved_relative:
+        raise StateError("lane: candidate moved the approved task file; restore its approved location")
+    changed_tasks = _git_output(repository, "diff", "--name-only", base, head,
+                                "--", ":(glob)openspec/changes/**/tasks.md").splitlines()
+    foreign_tasks = [path for path in changed_tasks if path != tasks_relative]
+    if foreign_tasks:
+        raise StateError("lane: candidate modified task files for other changes: " + ", ".join(foreign_tasks))
+    _, _, relative = _change_plan_at(repository, approved_head, change)
+    if relative != _REPO_PLAN:
+        base_plan, _, base_relative = _change_plan_at(repository, base, change)
+        candidate_plan, _, candidate_relative = _change_plan_at(repository, head, change)
+        approved_plan, _, _ = _change_plan_at(repository, approved_head, change)
+        base_document = json.loads(_committed_file(repository, base, base_relative))
+        candidate_document = json.loads(_committed_file(repository, head, candidate_relative))
+        if base_document != candidate_document or base_plan != approved_plan or candidate_plan != approved_plan:
+            raise StateError(
+                "lane: candidate plan differs from the approved plan at lane base or approved HEAD; "
+                "revert the plan change and have the Coordinator revise it on the feature branch"
+            )
     if _normalized_task_definitions(candidate_tasks) != _normalized_task_definitions(approved_tasks):
         raise StateError(
             f"lane: candidate task definitions in {tasks_relative} differ from the approved definitions at "
@@ -4506,7 +4384,7 @@ def _candidate_tick_state(
     # Ticks of assigned tasks already checked at the lane base are inherited earlier
     # completion (e.g. a same-lane prerequisite ticked on the feature branch before the
     # lane opened). The documented rule excludes inherited earlier-lane ticks from the
-    # added set instead of demanding a duplicate in-lane tick that task-tick would refuse.
+    # added set instead of demanding a duplicate in-lane completion claim.
     inherited = candidate_checked & base_checked & assignment
     expected_added = assignment - inherited
     problems: list[str] = []
@@ -4614,11 +4492,11 @@ def _validate_completed_combined_lane_merge(
     )
     if review.get("binding", {}).get("commit") != merge_commit:
         raise StateError("lane: combined merge record and review binding disagree; recover with a fresh review")
-    ui_roles = [role for role in _required_review_roles(operation_lane) if role != "code"]
+    ui_roles = [role for role in _required_review_roles(operation_lane) if role != "code-reviewer"]
     _validate_lane_reviews(
         lane_id, operation_lane, reviewed_head, ui_roles,
-        decisions=_decisions_from_merge(runtime.get("merge")),
-        repository=repository, allow_reuse=False,
+
+
     )
     _validate_human_gate(
         lane_id, operation_lane, reviewed_head, coordination, state.get("plan_sha256"),
@@ -4681,9 +4559,9 @@ def _validate_completed_lane_merge(
             )
     _validate_lane_reviews(
         lane_id, operation_lane, reviewed_head,
-        decisions=_decisions_from_merge(runtime.get("merge")),
-        repository=repository,
-        allow_reuse=coordination.get("review_policy") == "risk-based",
+
+
+
     )
     if recorded:
         # The tool validated this gate when it performed the merge, and its one-use grant is already
@@ -4692,16 +4570,8 @@ def _validate_completed_lane_merge(
     # A hand-resolved recovery has no recorded validation, so the human gate must still hold here,
     # and its one-use grant is consumed by this validation so the recovery cannot be replayed.
     _validate_human_gate(lane_id, operation_lane, reviewed_head, coordination, approved_plan_sha256,
-                         allow_deferred=coordination.get("review_policy") == "risk-based")
-    gates = coordination.get("human_gates") or {}
-    gate = gates.get(lane_id) if isinstance(gates, dict) else None
-    authorization = gate.get("authorization") if isinstance(gate, dict) else None
-    grant_id = authorization.get("id") if isinstance(authorization, dict) else None
-    grants = coordination.get("authorizations")
-    grant = grants.get(grant_id) if isinstance(grants, dict) and isinstance(grant_id, str) else None
-    if isinstance(grant, dict) and grant.get("status") == "active":
-        grant["status"] = "consumed"
-        grant["consumed_by"] = lane_id
+                         allow_deferred=True)
+    _consume_human_grant(coordination, lane_id)
     # Record the validated completion so replaying this recovery is idempotent rather than a second,
     # unreviewed acceptance of the lane.
     runtime["merge"] = {
@@ -4709,6 +4579,19 @@ def _validate_completed_lane_merge(
         "merge_commit": merge_commit if isinstance(merge_commit, str) and merge_commit else reviewed_head,
         "base": reviewed_head,
     }
+
+
+def _consume_human_grant(coordination: dict[str, Any], lane_id: str) -> None:
+    gates = coordination.get("human_gates")
+    consumed_gate = gates.get(lane_id) if isinstance(gates, dict) else None
+    if isinstance(consumed_gate, dict) and consumed_gate.get("approved_by") == "oracle":
+        authorization = consumed_gate.get("authorization")
+        grant_id = authorization.get("id") if isinstance(authorization, dict) else None
+        grants = coordination.get("authorizations")
+        grant = grants.get(grant_id) if isinstance(grants, dict) else None
+        if isinstance(grant, dict):
+            grant["status"] = "consumed"
+            grant["consumed_by"] = lane_id
 
 
 def lane_merge(
@@ -4723,7 +4606,7 @@ def lane_merge(
     combined_mode = _review_mode(plan) == "combined-single-lane"
     if human_override:
         # A recorded human decision trumps the review gates. The workflow restricts the
-        # override to waivable review duties: it can never waive clean-tree, task-tick
+        # override to waivable review duties: it can never waive clean-tree, task completion
         # ownership/completeness, lane-base/ancestry validation, current required
         # evidence, or human authorization integrity, so those checks still run below.
         # The reason is mandatory and is persisted in the coordination record beside
@@ -4770,14 +4653,14 @@ def lane_merge(
         if override_missing := (override_assigned - override_checked):
             raise StateError(
                 f"lane: lane {lane_id!r} has unfinished tasks ({', '.join(sorted(override_missing))}); "
-                "a human override cannot waive task-tick completeness; tick every assigned task first"
+                "a human override cannot waive task completion; tick every assigned task first"
             )
         _candidate_tick_state(repository, override_change, plan, lane_id, base, head, feature_head)
         override_lane = dict(lane)
         override_lane.update(runtime)
         _validate_human_gate(
             lane_id, override_lane, head, coordination, state.get("plan_sha256"),
-            allow_deferred=coordination.get("review_policy") == "risk-based",
+            allow_deferred=True,
         )
         if _is_ancestor(repository, head, feature_head):
             merge_commit = feature_head
@@ -4795,7 +4678,7 @@ def lane_merge(
                 _run_git(repository, "merge", "--abort")
                 raise StateError(
                     f"lane: merge failed: {_one_line(result.stderr or result.stdout)}; "
-                    "resolve conflicts manually, then rerun lane-merge --human-override"
+                    "resolve conflicts in the lane worktree, commit, and obtain fresh review or a renewed explicit override"
                 )
             merge_commit = _git_output(repository, "rev-parse", "HEAD")
         runtime["merge"] = {
@@ -4811,6 +4694,7 @@ def lane_merge(
             },
         }
         runtime["phase"] = "merged"
+        _consume_human_grant(coordination, lane_id)
         _write_coordination(state, coordination, plan)
         state_derive(state.get("change"), None, repository)
         return path
@@ -4864,33 +4748,23 @@ def lane_merge(
     feature_head = _git_output(repository, "rev-parse", branch)
     base = _lane_merge_base(repository, ref, feature_head)
     _validate_resolved_lane_base(repository, base, head, feature_head)
-    # Review policy: decision-driven review selection only under the explicit risk-based
-    # policy; a missing decision record (or standard policy) falls back to the standard gate.
-    honored_decision = None
-    policy_relaxed = coordination.get("review_policy") == "risk-based"
-    if policy_relaxed and runtime.get("decisions") is not None:
-        honored_decision = runtime.get("decisions")
-        _validate_decision_record(
-            operation_lane, honored_decision,
-            oracle_authored=_lane_oracle_write_authored(runtime),
-        )
     if combined_mode:
         _validate_combined_review(
             state, plan, lane_id, operation_lane, runtime, coordination,
             head, feature_head, base,
         )
-        ui_roles = [role for role in _required_review_roles(operation_lane) if role != "code"]
+        ui_roles = [role for role in _required_review_roles(operation_lane) if role != "code-reviewer"]
         _validate_lane_reviews(
-            lane_id, operation_lane, head, ui_roles, decisions=honored_decision,
-            repository=repository, allow_reuse=False,
+            lane_id, operation_lane, head, ui_roles,
+
         )
     else:
         _validate_lane_reviews(
-            lane_id, operation_lane, head, decisions=honored_decision,
-            repository=repository, allow_reuse=policy_relaxed,
+            lane_id, operation_lane, head,
+
         )
     _validate_human_gate(lane_id, operation_lane, head, coordination, state.get("plan_sha256"),
-                         allow_deferred=policy_relaxed)
+                         allow_deferred=not combined_mode)
     candidate_lane_checked, _, _ = _candidate_tick_state(
         repository, change_name, plan, lane_id, base, head, feature_head
     )
@@ -4920,9 +4794,9 @@ def lane_merge(
         if result.returncode:
             _run_git(repository, "merge", "--abort")
             raise StateError(
-                f"lane: merge failed: {_one_line(result.stderr or result.stdout)}; manually merge reviewed lane HEAD "
-                f"{head} into the feature branch, resolve conflicts, commit, then rerun lane-merge to validate "
-                "and record the preserved reviewed SHA"
+                f"lane: merge failed: {_one_line(result.stderr or result.stdout)}; merge the feature branch "
+                "into the lane worktree, resolve conflicts there, commit, obtain fresh current-HEAD reviews "
+                "and human gates, then rerun lane-merge"
             )
         merge_commit = _git_output(repository, "rev-parse", "HEAD")
         if not _is_ancestor(repository, head, merge_commit):
@@ -4934,27 +4808,10 @@ def lane_merge(
         "branch": branch,
         "review_mode": "combined-single-lane" if combined_mode else "standard",
     }
-    if honored_decision is not None:
-        # Persist the selected duties beside the merge so recovery and status stay visible.
-        # An ordinary lane that selects a full/focused test duty records it too (the duty
-        # was enforced, not ignored).
-        runtime["merge"]["review_duties"] = {
-            role: honored_decision["duties"][role]["mode"]
-            for role in _effective_review_roles(operation_lane, honored_decision)
-        }
     runtime["phase"] = "merged"
     # An authorization is consumed at most once per checkpoint. Record the consumption before the
     # projection refresh so a second lane cannot reuse the same grant.
-    gates = coordination.get("human_gates")
-    consumed_gate = gates.get(lane_id) if isinstance(gates, dict) else None
-    if isinstance(consumed_gate, dict) and consumed_gate.get("approved_by") == "oracle":
-        authorization = consumed_gate.get("authorization")
-        grant_id = authorization.get("id") if isinstance(authorization, dict) else None
-        grants = coordination.get("authorizations")
-        grant = grants.get(grant_id) if isinstance(grants, dict) else None
-        if isinstance(grant, dict):
-            grant["status"] = "consumed"
-            grant["consumed_by"] = lane_id
+    _consume_human_grant(coordination, lane_id)
     # Persist the merge record, the merged phase, and the consumed grant before any step that can
     # fail: an interrupted refresh must never leave a one-use grant active on disk. The projection
     # refresh does not mutate coordination, so no second write is needed after it.
@@ -5064,7 +4921,8 @@ def finish_record(action: str, classification: str | None = None, version: str |
                 selected: list(existing.get(selected, []))
                 for selected in sorted(set(declared_checks))
             }
-        record.update({"classification": classification.strip(), "expected_version": version,
+        record.update({"plan_sha256": state["plan_sha256"],
+                       "classification": classification.strip(), "expected_version": version,
                        "classified_at": head,
                        "preparation": {"head": head, "artifact": preparation_path,
                                        "sha256": _path_sha256(Path(preparation_path)),
@@ -5079,6 +4937,8 @@ def finish_record(action: str, classification: str | None = None, version: str |
         preparation_hash = _finish_preparation(record, repository, head)
         evidence = record.setdefault("evidence", {})
         if action in {"capture", "inspect", "pr-check"}:
+            if state.get("runtime_plan") and record.get("plan_sha256") != state.get("plan_sha256"):
+                raise StateError("finish: selected plan changed; restage and renew release validation")
             _finish_integrated(state, coordination, repository, head)
         if action == "capture":
             check = _one_check(check)
@@ -5144,21 +5004,6 @@ def finish_record(action: str, classification: str | None = None, version: str |
                 if item["head"] != head and (not _is_ancestor(repository, item["head"], head) or
                     _git_output(repository, "diff", "--name-only", item["head"], head, "--", *item["inputs"])):
                     raise StateError(f"finish: affected final evidence: {selected}")
-        elif action == "check":
-            check = _one_check(check)
-            if check not in evidence:
-                raise StateError("finish: selected check has no final evidence")
-            item = evidence[check]
-            if item.get("preparation_sha256") != preparation_hash:
-                raise StateError("finish: release preparation changed after evidence; recapture")
-            if _path_sha256(Path(item["artifact"])) != item["sha256"]:
-                raise StateError("finish: final evidence artifact changed; recapture")
-            if item["head"] != head:
-                if not _is_ancestor(repository, item["head"], head):
-                    raise StateError("finish: final evidence is not from an ancestor; recapture")
-                changed = _git_output(repository, "diff", "--name-only", item["head"], head, "--", *item["inputs"])
-                if changed:
-                    raise StateError("finish: affected evidence/review inputs changed; recapture selected check")
         else:
             raise StateError("finish: unknown action")
     _write_coordination(state, coordination, plan)
@@ -5184,7 +5029,12 @@ def _check_docs(root: Path) -> None:
     skill_files.extend(sorted((root / "workflow").glob("*.md")))
     role_files = sorted((root / "subagent-roles").glob("*.md"))
     skill_files.extend(role_files)
-    _check_local_links(skill_files + list(root.glob("README.md")) + sorted((root / "examples").glob("*.md")))
+    all_docs = skill_files + list(root.glob("README.md")) + sorted((root / "examples").glob("*.md"))
+    _check_local_links(all_docs)
+    for path in all_docs:
+        for retired in ("openspec/plan-graph.json", ".agents/workflow/plan-reviews.json"):
+            if retired in path.read_text(encoding="utf-8"):
+                raise AssertionError(f"doc lint: {path} uses retired path {retired}")
     helper = root / "bin" / "featdev.py"
     banned = [
         r"\bpi\b", r"\bcodex\b", r"\borca\b", r"\bherdr\b", r"\bcaveman\b",
@@ -5217,12 +5067,16 @@ def _check_docs(root: Path) -> None:
         ".agents/workflow/model-selection.json",
         ".agents/workflow/capability-map.md",
         "plan-reviews.json",
+        ".agents/workflow/plan-graph.json",
+        ".agents/workflow/coordination.json",
+        ".agents/workflow/plan-graph-review.json",
     ):
         if required not in docs_text:
             raise AssertionError(f"doc lint: docs must mention {required!r}")
+    command_text = (root / "workflow" / "helper-commands.md").read_text(encoding="utf-8")
     for required in ("plan-dispatch", "plan-review", "human-defer", "sync", "task-status"):
-        if required not in (root / "workflow" / "lane.md").read_text(encoding="utf-8"):
-            raise AssertionError(f"doc lint: lane.md must mention {required!r}")
+        if required not in command_text:
+            raise AssertionError(f"doc lint: helper-commands.md must mention {required!r}")
     if "Role: Runner" not in (root / "workflow" / "briefs-and-handoffs.md").read_text(encoding="utf-8"):
         raise AssertionError("doc lint: briefs must include the Runner template")
     for role_file in role_files:
@@ -5232,9 +5086,9 @@ def _check_docs(root: Path) -> None:
                 raise AssertionError(f"doc lint: {role_file} is missing {required!r}")
     expected_roles = {
         "implementer.md": "implementer",
-        "code-reviewer.md": "code",
-        "test-reviewer.md": "test",
-        "ui-reviewer.md": "ui",
+        "code-reviewer.md": "code-reviewer",
+        "test-reviewer.md": "test-reviewer",
+        "ui-reviewer.md": "ui-reviewer",
         "oracle.md": "oracle",
         "runner.md": "runner",
     }
@@ -5242,7 +5096,7 @@ def _check_docs(root: Path) -> None:
         path = root / "subagent-roles" / filename
         if not path.is_file():
             raise AssertionError(f"doc lint: missing role file {filename}")
-        if f"role_id: {role_id}" not in path.read_text(encoding="utf-8"):
+        if f"role_id: {role_id}" not in path.read_text(encoding="utf-8").splitlines():
             raise AssertionError(f"doc lint: {filename} must declare role_id: {role_id}")
     if (root / "subagent-roles" / "reviewer.md").exists():
         raise AssertionError("doc lint: the combined reviewer role file must be removed")
@@ -5250,13 +5104,15 @@ def _check_docs(root: Path) -> None:
         raise AssertionError("doc lint: test-reviewer must own mutation testing")
     if "combined code/test" not in (root / "subagent-roles" / "code-reviewer.md").read_text(encoding="utf-8"):
         raise AssertionError("doc lint: code-reviewer must document the ordinary combined duty")
-    lane_text = (root / "workflow" / "lane.md").read_text(encoding="utf-8")
-    table_commands = set(re.findall(r"^\|\s*`([a-z][a-z-]+)", lane_text, flags=re.MULTILINE))
+    table_commands = set(re.findall(r"^\|\s*`([a-z][a-z-]+)", command_text, flags=re.MULTILINE))
     parser = _parser()
     subparsers = next(
         action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
     )
     parser_commands = set(subparsers.choices)
+    missing_from_reference = parser_commands - table_commands
+    if missing_from_reference:
+        raise AssertionError(f"doc lint: commands absent from helper reference: {sorted(missing_from_reference)}")
     missing_from_parser = table_commands - parser_commands
     if missing_from_parser:
         raise AssertionError(f"doc lint: table commands absent from CLI: {sorted(missing_from_parser)}")
@@ -5333,6 +5189,32 @@ def _self_check() -> int:
             commit(repository, "planning checkpoint approved by human")
             return repository
 
+        def read_fixture(value: Any) -> dict[str, Any]:
+            data = _read_state(value)
+            if "changes" not in data:
+                return data
+            assert len(data["changes"]) == 1, "legacy fixtures select one change"
+            change, node = next(iter(data["changes"].items()))
+            node = {**json.loads(json.dumps(node)), "change": change, "feature_checkout": data["feature_checkout"]}
+            for lane in node.get("lanes", {}).values():
+                lane["task_states"] = lane.pop("tasks", {})
+            return node
+
+        def tick_fixture(lane_id: str, task_id: str, change: str) -> None:
+            ledger = read_fixture(_coordination_path(change))
+            worktree = Path(ledger["lanes"][lane_id]["worktree"])
+            path = worktree / "openspec" / "changes" / change / "tasks.md"
+            text = path.read_text(encoding="utf-8")
+            marker = f"- [ ] {task_id} "
+            assert text.count(marker) == 1
+            path.write_text(text.replace(marker, f"- [x] {task_id} ", 1), encoding="utf-8")
+
+        def write_fixture(path: Path, value: object) -> None:
+            if path.name == "coordination.json" and isinstance(value, dict) and "change" in value:
+                value = {"schema_version": 2, "feature_checkout": value["feature_checkout"],
+                         "changes": {value["change"]: _stored_change_coordination(value)}}
+            _atomic_write_json(path, value)
+
         def invoke(*arguments: str) -> tuple[int, str, str]:
             stdout, stderr = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -5348,20 +5230,40 @@ def _self_check() -> int:
             assert contains in stderr, (arguments, stderr)
 
         # Role IDs are one canonical vocabulary; aliases are rejected rather than normalized.
-        assert _require_role("code") == "code"
+        assert all(_require_role(role) == role for role in _CANONICAL_ROLES)
         assert _require_role("runner") == "runner"
-        for rejected in ("worker", "code_reviewer", "ui-reviewer", "reviewer"):
+        for rejected in ("code", "test", "ui", "worker", "code_reviewer", "reviewer"):
             try:
                 _require_role(rejected)
             except StateError:
                 pass
             else:
                 raise AssertionError(f"non-canonical role {rejected!r} was accepted")
+        # Stored roles upgrade without altering dispatch identities, reports, or duty hashes.
+        stored = {
+            "subagents": [{"role": duty, "key": duty, "run_id": duty}
+                          for duty in _LEGACY_REVIEW_ROLES],
+            "lanes": {"ui": {"reviews": [{"role": "code", "report": "code"}],
+                             "review_status": {"reviewer": "test"},
+                             "mediations": [{"role": "ui"}],
+                             "decisions": {"duties": {"code": "full"}, "recorded_sha256": "code"},
+                             "merge": {"review_duties": {"code": "full"}}}},
+        }
+        expected = json.loads(json.dumps(stored))
+        for row in expected["subagents"]:
+            row["role"] = _LEGACY_REVIEW_ROLES[row["role"]]
+        expected["lanes"]["ui"]["reviews"][0]["role"] = "code-reviewer"
+        expected["lanes"]["ui"]["review_status"]["reviewer"] = "test-reviewer"
+        expected["lanes"]["ui"]["mediations"][0]["role"] = "ui-reviewer"
+        _normalize_stored_roles(stored)
+        assert stored == expected
+        _normalize_stored_roles(stored)
+        assert stored == expected
         assert _dispatch_access("implementer") == "write"
         assert _dispatch_access("oracle", "write") == "write"
         assert _dispatch_access("runner") == "read-only"
         try:
-            _dispatch_access("code", "write")
+            _dispatch_access("code-reviewer", "write")
         except StateError:
             pass
         else:
@@ -5399,7 +5301,7 @@ def _self_check() -> int:
         os.chdir(finish_repo)
         state_derive("finishcase")
         expect_refusal("--change", "finishcase", "dispatch", "one", "worker",
-                       "--model", "local/model", "--level", "normal", "--task", "1.1",
+                         "--task", "1.1",
                        contains="not canonical")
         preparation = workflow_dir(finish_repo) / "finishcase" / "evidence" / "preparation.md"
         preparation.parent.mkdir(parents=True, exist_ok=True)
@@ -5415,21 +5317,21 @@ def _self_check() -> int:
         lane_open("one", "finishcase")
         expect_refusal("--change", "finishcase", "lane-review", "one", "runner", "PASS",
                        "--commit", "HEAD", "--report", "report.md", contains="not required")
-        legacy_ledger = _read_state(_coordination_path("finishcase"))
+        legacy_ledger = read_fixture(_coordination_path("finishcase"))
         legacy_ledger["model_selection"] = {"legacy": True}
-        _atomic_write_json(_coordination_path("finishcase"), legacy_ledger)
-        dispatch_run("one", "runner", "local/model", "normal", "1.1",
+        write_fixture(_coordination_path("finishcase"), legacy_ledger)
+        dispatch_run("one", "runner",  "1.1",
                      key="runner/test", change="finishcase")
-        runner_ledger = _read_state(_coordination_path("finishcase"))
+        runner_ledger = read_fixture(_coordination_path("finishcase"))
         assert runner_ledger["lanes"]["one"]["dispatches"][-1]["access"] == "read-only"
         dispatch_done("one", "runner", "runner/session", change="finishcase", key="runner/test")
         worktree = _lane_worktree_path(state_derive("finishcase"), "one")
         dispatch_keys = []
         for index, task in enumerate(("1.1", "1.2", "1.1")):
             result, output, error = invoke("--change", "finishcase", "dispatch", "one", "implementer",
-                                           "--model", "local/model", "--level", "normal", "--task", task)
+                                             "--task", task)
             assert result == 0, error
-            ledger = _read_state(_coordination_path("finishcase"))
+            ledger = read_fixture(_coordination_path("finishcase"))
             dispatch_key = ledger["lanes"]["one"]["dispatches"][-1]["key"]
             assert f"key={dispatch_key}" in output
             assert dispatch_key not in dispatch_keys
@@ -5439,14 +5341,14 @@ def _self_check() -> int:
             assert result == 0, error
         # Retrying one explicit identity never creates a second subagent record.
         for _ in range(2):
-            dispatch_run("one", "implementer", "local/model", "normal", "1.1",
+            dispatch_run("one", "implementer",  "1.1",
                          key="retry/one", change="finishcase")
-        ledger = _read_state(_coordination_path("finishcase"))
+        ledger = read_fixture(_coordination_path("finishcase"))
         assert len(ledger["lanes"]["one"]["dispatches"]) == 5
         assert len(ledger["subagents"]) == 5
         dispatch_done("one", "implementer", "retry-worker", change="finishcase", key="retry/one")
         coordination_sync("finishcase")
-        ledger = _read_state(_coordination_path("finishcase"))
+        ledger = read_fixture(_coordination_path("finishcase"))
         assert len(ledger["subagents"]) == 5
         assert all(row["status"] == "done" for row in ledger["subagents"])
         # A dispatch ID remains the identity even when the two records have different timestamps.
@@ -5454,12 +5356,20 @@ def _self_check() -> int:
         _backfill_subagents(ledger)
         assert len(ledger["subagents"]) == 5
         for task in ("1.1", "1.2"):
-            task_tick("one", task, "finishcase")
+            tick_fixture("one", task, "finishcase")
             head = commit(worktree, f"complete {task}")
         review = preparation.with_name("lane-review.md")
         review.write_text("PASS\n")
-        lane_review("one", "code", "PASS", head, review, change="finishcase")
+        lane_review("one", "code-reviewer", "PASS", head, review, change="finishcase")
+        # An existing short-ID PASS still satisfies the renamed gate, without a new review.
+        legacy_path = _coordination_path("finishcase")
+        legacy = read_fixture(legacy_path)
+        legacy["lanes"]["one"]["reviews"][-1]["role"] = "code"
+        write_fixture(legacy_path, legacy)
+        assert json.loads(status("finishcase", True))["lanes"]["one"]["reviews"][-1]["role"] == "code-reviewer"
+        assert read_fixture(legacy_path)["lanes"]["one"]["reviews"][-1]["role"] == "code"
         lane_merge("one", "finishcase")
+        assert read_fixture(legacy_path)["lanes"]["one"]["reviews"][-1]["role"] == "code-reviewer"
         lane_close("one", "finishcase")
         closed = coordination_sync("finishcase")["lanes"]["one"]
         assert closed["status"] == "done", closed
@@ -5478,7 +5388,7 @@ def _self_check() -> int:
                       "--artifact", str(artifact), "--input", "input-a")[0] == 0
         (finish_repo / "release.txt").write_text("updated release metadata\n")
         commit(finish_repo, "late release change")
-        expect_refusal("--change", "finishcase", "finish-record", "check", "--check", "a",
+        expect_refusal("--change", "finishcase", "finish-record", "pr-check",
                        contains="release preparation inputs changed")
         expect_refusal("--change", "finishcase", "finish-record", "capture", "--check", "a",
                        "--artifact", str(artifact), "--input", "input-a", contains="release preparation inputs changed")
@@ -5494,7 +5404,6 @@ def _self_check() -> int:
         artifact.write_text("recaptured")
         assert invoke("--change", "finishcase", "finish-record", "capture", "--check", "a",
                       "--artifact", str(artifact), "--input", "input-a")[0] == 0
-        assert invoke("--change", "finishcase", "finish-record", "check", "--check", "a")[0] == 0
         assert invoke("--change", "finishcase", "finish-record", "pr-check")[0] == 0
         assert invoke("--change", "finishcase", "finish-record", "restage",
                       "--artifact", str(preparation),
@@ -5509,11 +5418,14 @@ def _self_check() -> int:
         assert invoke("--change", "finishcase", "finish-record", "pr-check")[0] == 0
         (finish_repo / "input-b").write_text("changed")
         commit(finish_repo, "unrelated input")
-        assert invoke("--change", "finishcase", "finish-record", "check", "--check", "a")[0] == 0
+        expect_refusal("--change", "finishcase", "finish-record", "pr-check", contains="affected final evidence: b")
+        assert invoke("--change", "finishcase", "finish-record", "capture", "--check", "b",
+                      "--artifact", str(artifact), "--input", "input-b")[0] == 0
+        assert invoke("--change", "finishcase", "finish-record", "pr-check")[0] == 0
         (finish_repo / "input-a").write_text("changed")
         commit(finish_repo, "relevant input")
-        expect_refusal("--change", "finishcase", "finish-record", "check", "--check", "a",
-                       contains="affected evidence")
+        expect_refusal("--change", "finishcase", "finish-record", "pr-check",
+                       contains="affected final evidence: a")
         preparation.write_text("changed after approval")
         expect_refusal("--change", "finishcase", "finish-record", "pr-check", contains="preparation artifact changed")
         os.chdir(root)
@@ -5530,14 +5442,19 @@ def _self_check() -> int:
         os.chdir(ui_repo)
         state_derive("defercase")
         lane_open("ui", "defercase")
-        ui_worktree = _lane_worktree_path(_read_state(state_derive("defercase", checkout=ui_repo)), "ui")
-        task_tick("ui", "1.1", "defercase")
+        ui_worktree = _lane_worktree_path(read_fixture(state_derive("defercase", checkout=ui_repo)), "ui")
+        tick_fixture("ui", "1.1", "defercase")
         ui_head = commit(ui_worktree, "UI lane and tick")
-        review_decision("ui", {"code": "skip", "test": "skip", "ui": "skip"}, [],
-                        "1.1 checked", ["static:check"], "bounded reversible cosmetic UI", True, "defercase")
+        screen_evidence = workflow_dir(ui_repo) / "defercase" / "screen-receipt.json"
+        screen_evidence.parent.mkdir(parents=True, exist_ok=True)
+        screen_evidence.write_text("current screen evidence")
+        for role in ("code-reviewer", "ui-reviewer"):
+            report = screen_evidence.with_name(role + ".md")
+            report.write_text("Isolated current-HEAD review fixture: PASS\n")
+            lane_review("ui", role, "PASS", ui_head, report, "r1", screen_evidence, change="defercase")
         expect_refusal("--change", "defercase", "lane-merge", "ui", contains="human gate")
         # A grant sitting unused cannot be consumed by deferral.
-        ui_state = _read_state(state_derive("defercase", checkout=ui_repo))
+        ui_state = read_fixture(state_derive("defercase", checkout=ui_repo))
         ui_coord = _load_coordination(ui_state, ui_plan)
         ui_coord["authorizations"]["unused"] = {"status": "active"}
         _write_coordination(ui_state, ui_coord, ui_plan)
@@ -5553,7 +5470,8 @@ def _self_check() -> int:
             ui_coord["human_gates"]["ui"] = {
                 "lane": "ui", "state": prior_state,
                 "binding": {"commit": ui_head, "evidence_revision": "r1",
-                            "evidence_path": str(screen_evidence)},
+                            "evidence_path": str(screen_evidence),
+                            "evidence_sha256": _path_sha256(screen_evidence)},
             }
             _write_coordination(ui_state, ui_coord, ui_plan)
             expect_refusal("--change", "defercase", "human-defer", "ui", "--commit", ui_head,
@@ -5604,12 +5522,7 @@ def _self_check() -> int:
         # High-risk internal tooling needs code/test agents, not a new human lane gate.
         internal = {"risk": "high", "ui": False, "screen": False, "sensitive": False}
         _validate_human_gate("internal", internal, ui_head, ui_coord)
-        try:
-            _validate_decision_record(internal, ui_coord["lanes"]["ui"]["decisions"])
-        except StateError as exc:
-            assert "independent review" in str(exc)
-        else:
-            raise AssertionError("high-risk internal tooling skipped code/test review")
+        assert _required_review_roles(internal) == ["code-reviewer", "test-reviewer"]
         stale_gate = json.loads(json.dumps(ui_coord))
         stale_gate["human_gates"]["ui"]["binding"]["commit"] = "0" * 40
         try:
@@ -5620,7 +5533,7 @@ def _self_check() -> int:
         else:
             raise AssertionError("stale deferral accepted")
         lane_merge("ui", "defercase")
-        assert _load_coordination(_read_state(state_derive("defercase", checkout=ui_repo)), ui_plan)["authorizations"]["unused"]["status"] == "active"
+        assert _load_coordination(read_fixture(state_derive("defercase", checkout=ui_repo)), ui_plan)["authorizations"]["unused"]["status"] == "active"
         preparation = screen_evidence.with_name("preparation.md")
         preparation.write_text("Human classification: preview. Release preparation validated.\n")
         assert invoke("--change", "defercase", "finish-record", "classify", "--classification", "preview",
@@ -5636,20 +5549,20 @@ def _self_check() -> int:
             assert invoke("--change", "defercase", "finish-record", "inspect", "--check", checkpoint,
                           "--artifact", str(report))[0] == 0
         assert invoke("--change", "defercase", "finish-record", "pr-check")[0] == 0
-        declared = _read_state(_coordination_path("defercase", ui_repo))
+        declared = read_fixture(_coordination_path("defercase", ui_repo))
         no_checkpoints = json.loads(json.dumps(declared))
         no_checkpoints["finish"]["required_inspections"] = []
-        _atomic_write_json(_coordination_path("defercase", ui_repo), no_checkpoints)
+        write_fixture(_coordination_path("defercase", ui_repo), no_checkpoints)
         expect_refusal("--change", "defercase", "finish-record", "pr-check", contains="declared human inspection")
-        _atomic_write_json(_coordination_path("defercase", ui_repo), declared)
+        write_fixture(_coordination_path("defercase", ui_repo), declared)
         # Repository-declared inspections also apply without a lane deferral.
-        normal_gate = _read_state(_coordination_path("defercase", ui_repo))
+        normal_gate = read_fixture(_coordination_path("defercase", ui_repo))
         saved_gate = json.loads(json.dumps(normal_gate))
         normal_gate["human_gates"]["ui"]["state"] = "accepted"
         normal_gate["finish"]["inspection"] = {}
-        _atomic_write_json(_coordination_path("defercase", ui_repo), normal_gate)
+        write_fixture(_coordination_path("defercase", ui_repo), normal_gate)
         expect_refusal("--change", "defercase", "finish-record", "pr-check", contains="inspection missing")
-        _atomic_write_json(_coordination_path("defercase", ui_repo), saved_gate)
+        write_fixture(_coordination_path("defercase", ui_repo), saved_gate)
         separate_reject = ui_repo / ".agents" / "workflow" / "defercase" / "later-mobile.md"
         separate_reject.write_text('inspector: human\ncheckpoint: mobile\nverdict: reject\nprevious verdict: accept\n')
         expect_refusal("--change", "defercase", "finish-record", "inspect", "--check", "mobile",
@@ -5665,7 +5578,7 @@ def _self_check() -> int:
         expect_refusal("--change", "defercase", "finish-record", "inspect", "--check", "mobile",
                        "--artifact", str(report), contains="personally record accept")
         # Even if a stored hash is refreshed externally, re-parse authoritative verdict.
-        inspection_state = _read_state(state_derive("defercase", checkout=ui_repo))
+        inspection_state = read_fixture(state_derive("defercase", checkout=ui_repo))
         inspection_coord = _load_coordination(inspection_state, ui_plan)
         inspection_coord["finish"]["inspection"]["mobile"]["sha256"] = _path_sha256(report)
         _write_coordination(inspection_state, inspection_coord, ui_plan)
@@ -5815,7 +5728,7 @@ def _self_check() -> int:
         assert derived_state["lanes"]["child"]["readiness"].startswith("blocked:")
         assert derived_state["tasks"]["1.1"]["status"] == "pending"
         legacy = derived_repository / ".agents" / "tmp" / "featdev-old-run" / "state.json"
-        _atomic_write_json(legacy, {"run_id": "old-run", "change": "derived", "checked_tasks": ["1.1"]})
+        write_fixture(legacy, {"run_id": "old-run", "change": "derived", "checked_tasks": ["1.1"]})
         legacy_bytes = legacy.read_bytes()
         state_derive("derived", checkout=derived_repository)
         assert not (derived_repository / ".agents" / "workflow" / "derived" / "state.json").exists()
@@ -5897,7 +5810,7 @@ def _self_check() -> int:
         assert "ready: 2.1 has satisfied prerequisites; blocked: 2.2 needs 1.1" in mixed_page
         mixed_result, _, mixed_error = invoke("lane-open", "work", "--change", "mixed")
         assert mixed_result == 0, mixed_error
-        mixed_coordination = _read_state(_coordination_path("mixed", mixed_repository))
+        mixed_coordination = read_fixture(_coordination_path("mixed", mixed_repository))
         mixed_worktree = Path(mixed_coordination["lanes"]["work"]["worktree"])
         mixed_ref = mixed_coordination["lanes"]["work"]["ref"]
         subprocess.run(
@@ -5924,13 +5837,13 @@ def _self_check() -> int:
         human_result, _, human_error = invoke("lane-open", "visible", "--change", "visible")
         assert human_result == 0, human_error
         human_coordination_path = _coordination_path("visible", human_repository)
-        human_coordination = _read_state(human_coordination_path)
+        human_coordination = read_fixture(human_coordination_path)
         human_worktree = Path(human_coordination["lanes"]["visible"]["worktree"])
         subprocess.run(
             ["git", "-C", str(human_worktree), "commit", "--allow-empty", "-q", "-m", "visible code"],
             check=True,
         )
-        task_tick("visible", "1.1", "visible")
+        tick_fixture("visible", "1.1", "visible")
         subprocess.run(
             ["git", "-C", str(human_worktree), "add", "openspec/changes/visible/tasks.md"], check=True
         )
@@ -5940,50 +5853,50 @@ def _self_check() -> int:
         human_head = git(human_worktree, "rev-parse", "HEAD")
         human_code_report = root / "human-code-review.md"
         human_code_report.write_text("code review\n", encoding="utf-8")
-        lane_review("visible", "code", "PASS", human_head, human_code_report, "human-r1", change="visible")
+        lane_review("visible", "code-reviewer", "PASS", human_head, human_code_report, "human-r1", change="visible")
         human_ui_report = root / "human-ui-review.md"
         human_ui_report.write_text("ui review\n", encoding="utf-8")
-        lane_review("visible", "ui", "PASS", human_head, human_ui_report, "human-r1", change="visible")
+        lane_review("visible", "ui-reviewer", "PASS", human_head, human_ui_report, "human-r1", change="visible")
         expect_refusal("lane-merge", "visible", "--change", "visible", contains="human gate")
         human_result, _, human_error = invoke(
             "human-gate", "visible", "--state", "approved", "--commit", human_head,
             "--evidence-revision", "human-r1", "--change", "visible",
         )
         assert human_result == 0, human_error
-        human_coordination = _read_state(human_coordination_path)
+        human_coordination = read_fixture(human_coordination_path)
         human_coordination["human_gates"]["visible"]["state"] = "revoked"
-        _atomic_write_json(human_coordination_path, human_coordination)
+        write_fixture(human_coordination_path, human_coordination)
         expect_refusal("lane-merge", "visible", "--change", "visible", contains="human gate")
         human_gate("visible", "approved", human_head, "human-r1", change="visible")
-        human_coordination = _read_state(human_coordination_path)
+        human_coordination = read_fixture(human_coordination_path)
         human_coordination["human_gates"]["visible"]["revoked"] = True
-        _atomic_write_json(human_coordination_path, human_coordination)
+        write_fixture(human_coordination_path, human_coordination)
         expect_refusal("lane-merge", "visible", "--change", "visible", contains="human gate")
         human_gate("visible", "approved", human_head, "human-r1", change="visible")
-        human_coordination = _read_state(human_coordination_path)
+        human_coordination = read_fixture(human_coordination_path)
         human_coordination["human_gates"]["visible"]["stale"] = True
-        _atomic_write_json(human_coordination_path, human_coordination)
+        write_fixture(human_coordination_path, human_coordination)
         expect_refusal("lane-merge", "visible", "--change", "visible", contains="human gate")
         human_gate("visible", "approved", human_head, "human-r1", change="visible")
-        human_coordination = _read_state(human_coordination_path)
+        human_coordination = read_fixture(human_coordination_path)
         human_coordination["human_gates"]["visible"]["binding"]["commit"] = "0" * 40
-        _atomic_write_json(human_coordination_path, human_coordination)
+        write_fixture(human_coordination_path, human_coordination)
         expect_refusal("lane-merge", "visible", "--change", "visible", contains="human gate")
         human_gate("visible", "approved", human_head, "human-r1", change="visible")
-        human_coordination = _read_state(human_coordination_path)
+        human_coordination = read_fixture(human_coordination_path)
         del human_coordination["human_gates"]["visible"]["binding"]
-        _atomic_write_json(human_coordination_path, human_coordination)
+        write_fixture(human_coordination_path, human_coordination)
         expect_refusal("lane-merge", "visible", "--change", "visible", contains="human gate")
         human_gate("visible", "approved", human_head, "human-r1", change="visible")
-        human_coordination = _read_state(human_coordination_path)
+        human_coordination = read_fixture(human_coordination_path)
         human_coordination["human_gates"]["visible"]["authorization_id"] = "grant"
-        _atomic_write_json(human_coordination_path, human_coordination)
+        write_fixture(human_coordination_path, human_coordination)
         expect_refusal("lane-merge", "visible", "--change", "visible", contains="cannot be satisfied by authorization")
         human_coordination["human_gates"] = []
-        _atomic_write_json(human_coordination_path, human_coordination)
+        write_fixture(human_coordination_path, human_coordination)
         expect_refusal("lane-merge", "visible", "--change", "visible", contains="human gate")
         human_coordination["human_gates"] = {}
-        _atomic_write_json(human_coordination_path, human_coordination)
+        write_fixture(human_coordination_path, human_coordination)
         human_gate("visible", "approved", human_head, "human-r1", change="visible")
         lane_merge("visible", "visible")
         lane_close("visible", "visible")
@@ -6020,7 +5933,7 @@ def _self_check() -> int:
         os.chdir(sensitive_repository)
         sensitive_open, _, sensitive_open_error = invoke("lane-open", "safety", "--change", "sensitive")
         assert sensitive_open == 0, sensitive_open_error
-        sensitive_coordination = _read_state(_coordination_path("sensitive", sensitive_repository))
+        sensitive_coordination = read_fixture(_coordination_path("sensitive", sensitive_repository))
         sensitive_worktree = Path(sensitive_coordination["lanes"]["safety"]["worktree"])
         subprocess.run(
             ["git", "-C", str(sensitive_worktree), "commit", "--allow-empty", "-q", "-m", "safety wording"],
@@ -6035,14 +5948,14 @@ def _self_check() -> int:
         sensitive_report = root / "sensitive-code-review.md"
         sensitive_report.write_text("code review\n", encoding="utf-8")
         lane_review(
-            "safety", "code", "PASS", sensitive_head, sensitive_report, "sensitive-r1", change="sensitive"
+            "safety", "code-reviewer", "PASS", sensitive_head, sensitive_report, "sensitive-r1", change="sensitive"
         )
         # A screen lane is the only lane that can reach the screen-lane refusal branch, because it
         # is the only one that needs an evidence file to hold an approval at all. It starts from a
         # valid evidence file; the matrix below removes the binding's evidence path to refuse it.
         screening_open, _, screening_open_error = invoke("lane-open", "screening", "--change", "sensitive")
         assert screening_open == 0, screening_open_error
-        screening_coordination = _read_state(_coordination_path("sensitive", sensitive_repository))
+        screening_coordination = read_fixture(_coordination_path("sensitive", sensitive_repository))
         screening_worktree = Path(screening_coordination["lanes"]["screening"]["worktree"])
         subprocess.run(
             ["git", "-C", str(screening_worktree), "commit", "--allow-empty", "-q",
@@ -6060,20 +5973,20 @@ def _self_check() -> int:
         screening_report = root / "screening-code-review.md"
         screening_report.write_text("code review\n", encoding="utf-8")
         lane_review(
-            "screening", "code", "PASS", screening_head, screening_report, "sensitive-r1",
+            "screening", "code-reviewer", "PASS", screening_head, screening_report, "sensitive-r1",
             screening_evidence, change="sensitive",
         )
         # Every refusal branch must render the same answer as the merge validator. The expected
         # text comes from enforcement, never the summary that renders it, so a false approval
         # cannot pass simply because this fixture happens not to sample its invalid gate state.
-        sensitive_state = _read_state(state_derive("sensitive", checkout=sensitive_repository))
+        sensitive_state = read_fixture(state_derive("sensitive", checkout=sensitive_repository))
         sensitive_lanes = {
             "safety": {"flag": "sensitive", "head": sensitive_head, "evidence": None},
             "screening": {"flag": "screen", "head": screening_head, "evidence": screening_evidence},
         }
 
         def reset_sensitive_gate(lane_id: str) -> None:
-            coordination = _read_state(_coordination_path("sensitive", sensitive_repository))
+            coordination = read_fixture(_coordination_path("sensitive", sensitive_repository))
             if not isinstance(coordination.get("human_gates"), dict):
                 coordination["human_gates"] = {}
                 _write_coordination(sensitive_state, coordination, sensitive_plan)
@@ -6104,7 +6017,7 @@ def _self_check() -> int:
             flag = sensitive_lanes[lane_id]["flag"]
             false_approval = f"required ({flag}): approved"
             reset_sensitive_gate(lane_id)
-            sensitive_coordination = _read_state(_coordination_path("sensitive", sensitive_repository))
+            sensitive_coordination = read_fixture(_coordination_path("sensitive", sensitive_repository))
             invalidate(sensitive_coordination)
             _write_coordination(sensitive_state, sensitive_coordination, sensitive_plan)
             try:
@@ -6140,7 +6053,7 @@ def _self_check() -> int:
         # The fresh approval after every refused state permits the successful merge path.
         reset_sensitive_gate("safety")
         lane_merge("safety", "sensitive")
-        sensitive_state = _read_state(state_derive("sensitive", checkout=sensitive_repository))
+        sensitive_state = read_fixture(state_derive("sensitive", checkout=sensitive_repository))
         assert sensitive_state["lanes"]["safety"]["complete"], sensitive_state["lanes"]["safety"]
         os.chdir(root)
 
@@ -6186,7 +6099,7 @@ def _self_check() -> int:
         assert help_result == 0
         def _lists_command(help_text: str, name: str) -> bool:
             return any(line.split()[0].lstrip(" ") == name for line in help_out.splitlines() if line.strip())
-        for obsolete in ("run-init", "task-done", "approval", "decision"):
+        for obsolete in ("run-init", "task-done", "approval", "decision", "state-derive", "task-tick", "review-decision", "review-reuse"):
             assert not _lists_command(help_out, obsolete), obsolete
             obsolete_result, _, _ = invoke(obsolete)
             assert obsolete_result == 2, obsolete
@@ -6218,7 +6131,7 @@ def _self_check() -> int:
         assert result == 0, status_error
         assert "change: flow" in status_output and "ready lanes: a" in status_output
         flow_state_path = state_derive("flow", checkout=flow_repository)
-        flow_state = _read_state(flow_state_path)
+        flow_state = read_fixture(flow_state_path)
         assert "run_id" not in flow_state
         result, _, stderr = invoke("lane-open", "a", "--change", "flow")
         assert result == 0, stderr
@@ -6227,7 +6140,7 @@ def _self_check() -> int:
         assert "lane a: writing;" in opening_status, opening_status
         assert "lane a: reviewing;" not in opening_status, opening_status
         coordination_path = _coordination_path("flow", flow_repository)
-        coordination = _read_state(coordination_path)
+        coordination = read_fixture(coordination_path)
         assert "run_id" not in coordination
         a_worktree = Path(coordination["lanes"]["a"]["worktree"])
         a_ref = coordination["lanes"]["a"]["ref"]
@@ -6235,7 +6148,7 @@ def _self_check() -> int:
         # separate readiness gate, not just a display assertion.
         expect_refusal("lane-open", "b", "--change", "flow", contains="not ready")
         subprocess.run(["git", "-C", str(a_worktree), "commit", "--allow-empty", "-q", "-m", "a code"], check=True)
-        task_tick("a", "1.1", "flow")
+        tick_fixture("a", "1.1", "flow")
         subprocess.run(["git", "-C", str(a_worktree), "add", "openspec/changes/flow/tasks.md"], check=True)
         subprocess.run(["git", "-C", str(a_worktree), "commit", "-q", "-m", "a tick"], check=True)
         a_head = git(a_worktree, "rev-parse", "HEAD")
@@ -6244,8 +6157,8 @@ def _self_check() -> int:
         assert "lane a: reviewing;" in phase_status, phase_status
         report = root / "review.md"
         report.write_text("PASS\n", encoding="utf-8")
-        lane_review("a", "code", "PASS", a_head, report, "flow-r1", change="flow")
-        coordination = _read_state(coordination_path)
+        lane_review("a", "code-reviewer", "PASS", a_head, report, "flow-r1", change="flow")
+        coordination = read_fixture(coordination_path)
         assert coordination["lanes"]["a"]["reviews"][0]["reviewed_commit"] == a_head
         lane_merge("a", "flow")
         lane_close("a", "flow")
@@ -6261,17 +6174,23 @@ def _self_check() -> int:
         # from committed ticks; dispatch and review records are only temporary coordination.
         result, _, stderr = invoke("lane-open", "b", "--change", "flow")
         assert result == 0, stderr
-        coordination = _read_state(coordination_path)
+        coordination = read_fixture(coordination_path)
         b_worktree = Path(coordination["lanes"]["b"]["worktree"])
         b_ref = coordination["lanes"]["b"]["ref"]
-        dispatch_run("b", "code", "local/model", "normal", "2.1", change="flow")
-        assert _read_state(coordination_path)["lanes"]["b"]["dispatches"][0]["access"] == "read-only"
+        dispatch_run("b", "code-reviewer",  "2.1", change="flow")
+        assert read_fixture(coordination_path)["lanes"]["b"]["dispatches"][0]["access"] == "read-only"
+        # Resume an open dispatch written by the previous role vocabulary.
+        legacy_dispatch = read_fixture(coordination_path)
+        legacy_dispatch["lanes"]["b"]["dispatches"][0]["role"] = "code"
+        legacy_dispatch["subagents"][-1]["role"] = "code"
+        legacy_key = legacy_dispatch["lanes"]["b"]["dispatches"][0]["key"]
+        write_fixture(coordination_path, legacy_dispatch)
         subprocess.run(["git", "-C", str(b_worktree), "commit", "--allow-empty", "-q", "-m", "b code"], check=True)
         dispatch_result, dispatch_status, dispatch_error = invoke("status", "--change", "flow")
         assert dispatch_result == 0, dispatch_error
         assert "open dispatch intents:" in dispatch_status
-        assert "b/code" in dispatch_status and "worker=local/model" in dispatch_status
-        assert "task=2.1" in dispatch_status and "key=flow/b/code" in dispatch_status
+        assert "b/code-reviewer " in dispatch_status and "access=read-only" in dispatch_status
+        assert "task=2.1" in dispatch_status and "key=flow/b/code-reviewer/" in dispatch_status
         assert "since=" in dispatch_status and "status=stale" in dispatch_status
         dispatch_dashboard_path = root / "flow-dispatch-dashboard.html"
         dispatch_result, _, dispatch_error = invoke(
@@ -6280,26 +6199,34 @@ def _self_check() -> int:
         assert dispatch_result == 0, dispatch_error
         dispatch_page = dispatch_dashboard_path.read_text(encoding="utf-8")
         assert "Dispatch view unavailable" not in dispatch_page
-        assert "b/code" in dispatch_page and "worker=local/model" in dispatch_page
+        assert "b/code-reviewer " in dispatch_page and "access=read-only" in dispatch_page
         assert "task=2.1" in dispatch_page and "status=stale" in dispatch_page
-        dispatch_done("b", "code", "worker-1", 12, "0.5", "ok", "flow")
+        dispatch_done("b", "code-reviewer", "worker-1", 12, "0.5", "ok", "flow")
+        resumed = read_fixture(coordination_path)
+        assert resumed["lanes"]["b"]["dispatches"][0]["key"] == legacy_key
+        assert resumed["lanes"]["b"]["dispatches"][0]["worker_run_id"] == "worker-1"
+        assert resumed["subagents"][-1]["role"] == "code-reviewer"
+        assert resumed["subagents"][-1]["status"] == "done"
         b_tasks_path = b_worktree / "openspec" / "changes" / "flow" / "tasks.md"
         b_tasks_original = b_tasks_path.read_text(encoding="utf-8")
-        b_tasks_path.write_text(
-            b_tasks_original.replace("- [ ] 2.1 lane b", "- [ ] 2.1-forged lane b"), encoding="utf-8"
-        )
-        expect_refusal("task-tick", "b", "2.1", "--change", "flow", contains="task-id bijection")
-        b_tasks_path.write_text(b_tasks_original + "- [ ] 2.1 duplicate\n", encoding="utf-8")
-        expect_refusal("task-tick", "b", "2.1", "--change", "flow", contains="task-id duplicates")
+        for invalid, message in (
+            (b_tasks_original.replace("- [ ] 2.1 lane b", "- [ ] 2.1-forged lane b"), "task-id bijection"),
+            (b_tasks_original + "- [ ] 2.1 duplicate\n", "task-id duplicates"),
+        ):
+            b_tasks_path.write_text(invalid, encoding="utf-8")
+            try:
+                _lane_checked_tasks(b_worktree, "flow", flow_plan)
+            except PlanError as exc:
+                assert message in str(exc), str(exc)
+            else:
+                raise AssertionError("manual task edits must retain valid task identities")
         b_tasks_path.write_text(b_tasks_original, encoding="utf-8")
-        expect_refusal("task-tick", "b", "1.1", "--change", "flow", contains="belongs to lane")
-        assert b_tasks_path.read_text(encoding="utf-8") == b_tasks_original
-        task_tick("b", "2.1", "flow")
+        tick_fixture("b", "2.1", "flow")
         subprocess.run(["git", "-C", str(b_worktree), "add", "openspec/changes/flow/tasks.md"], check=True)
         subprocess.run(["git", "-C", str(b_worktree), "commit", "-q", "-m", "b tick"], check=True)
         b_head = git(b_worktree, "rev-parse", "HEAD")
         # Lane-ref ticks are display-only: they cannot complete b or unlock c before merge.
-        inflight_state = _read_state(state_derive("flow", checkout=flow_repository))
+        inflight_state = read_fixture(state_derive("flow", checkout=flow_repository))
         assert inflight_state["tasks"]["2.1"]["status"] == "pending", inflight_state
         assert not inflight_state["lanes"]["b"]["complete"], inflight_state
         expect_refusal("lane-open", "c", "--change", "flow", contains="not ready")
@@ -6325,12 +6252,12 @@ def _self_check() -> int:
         assert "0/1" in inflight_lane_row and "2.1: pending" in inflight_lane_row
         assert "in-flight only (lane ref; not on feature branch): 1/1" in inflight_lane_row
         assert "2.1: complete" in inflight_lane_row
-        lane_review("b", "code", "PASS", b_head, report, "flow-r1", change="flow")
+        lane_review("b", "code-reviewer", "PASS", b_head, report, "flow-r1", change="flow")
         report.unlink()
         expect_refusal("lane-merge", "b", "--change", "flow", contains="report is missing")
         replacement_report = root / "replacement-review.md"
         replacement_report.write_text("replacement review\n", encoding="utf-8")
-        lane_review("b", "code", "PASS", b_head, replacement_report, "flow-r2", change="flow")
+        lane_review("b", "code-reviewer", "PASS", b_head, replacement_report, "flow-r2", change="flow")
         before_invalid_merge = git(flow_repository, "rev-parse", "HEAD")
         b_tasks_path.write_text(
             b_tasks_path.read_text(encoding="utf-8").replace("- [x] 1.1 lane a", "- [ ] 1.1 lane a"),
@@ -6339,7 +6266,7 @@ def _self_check() -> int:
         subprocess.run(["git", "-C", str(b_worktree), "add", "openspec/changes/flow/tasks.md"], check=True)
         subprocess.run(["git", "-C", str(b_worktree), "commit", "-q", "-m", "invalid removed tick"], check=True)
         invalid_head = git(b_worktree, "rev-parse", "HEAD")
-        lane_review("b", "code", "PASS", invalid_head, replacement_report, "flow-invalid", change="flow")
+        lane_review("b", "code-reviewer", "PASS", invalid_head, replacement_report, "flow-invalid", change="flow")
         expect_refusal("lane-merge", "b", "--change", "flow", contains="removed checked tasks")
         assert git(flow_repository, "rev-parse", "HEAD") == before_invalid_merge
         subprocess.run(["git", "-C", str(b_worktree), "reset", "--hard", b_head], check=True)
@@ -6379,12 +6306,12 @@ def _self_check() -> int:
         assert f"source: {current_flow_head}\n" in stale_status, stale_status
         # There is no persisted derived state to go stale: the store is coordination.json only.
         assert not (workflow_dir(flow_repository) / "flow" / "state.json").exists()
-        expect_refusal("lane-merge", "b", "--change", "flow", contains="required review 'code'")
-        lane_review("b", "code", "PASS", b_head, replacement_report, "flow-r1", change="flow")
+        expect_refusal("lane-merge", "b", "--change", "flow", contains="required review 'code-reviewer'")
+        lane_review("b", "code-reviewer", "PASS", b_head, replacement_report, "flow-r1", change="flow")
         # An unfinished dispatch on a terminal lane is stale before any worktree-head
         # lookup. The lookup trap catches a refactor that gets the label right while
         # still consulting a stale or reused terminal worktree.
-        dispatch_run("b", "test", "local/model", "normal", "2.1", change="flow")
+        dispatch_run("b", "test-reviewer",  "2.1", change="flow")
         lane_merge("b", "flow")
         def terminal_dispatches_without_head_lookup():
             real_lane_current_head = globals()["_lane_current_head"]
@@ -6403,13 +6330,13 @@ def _self_check() -> int:
 
         merged_dispatches = terminal_dispatches_without_head_lookup()
         assert any(
-            item["lane"] == "b" and item["role"] == "test"
+            item["lane"] == "b" and item["role"] == "test-reviewer"
             and item["status"] == "stale" and item["current_head"] is None
             for item in merged_dispatches
         ), merged_dispatches
         merged_result, merged_status, merged_error = invoke("status", "--change", "flow")
         assert merged_result == 0, merged_error
-        assert "b/test" in merged_status and "status=stale" in merged_status, merged_status
+        assert "b/test-reviewer " in merged_status and "status=stale" in merged_status, merged_status
         assert "current-head=unavailable" in merged_status, merged_status
         merged_dispatch_dashboard = root / "flow-merged-dispatch-dashboard.html"
         merged_result, _, merged_error = invoke(
@@ -6417,7 +6344,7 @@ def _self_check() -> int:
         )
         assert merged_result == 0, merged_error
         merged_dispatch_page = merged_dispatch_dashboard.read_text(encoding="utf-8")
-        assert "b/test" in merged_dispatch_page and "status=stale" in merged_dispatch_page
+        assert "b/test-reviewer " in merged_dispatch_page and "status=stale" in merged_dispatch_page
         assert "current-head=unavailable" in merged_dispatch_page
         # A recorded lane worktree stays authoritative at close: shifting the
         # root environment between open and close must neither redirect cleanup
@@ -6433,17 +6360,17 @@ def _self_check() -> int:
         os.environ.pop("FEATDEV_LANE_WORKTREE_ROOT", None)
         assert not b_recorded_path.exists(), b_recorded_path
         assert not _ref_sha(flow_repository, b_recorded_ref), b_recorded_ref
-        closed_coordination = _read_state(_coordination_path("flow", flow_repository))
+        closed_coordination = read_fixture(_coordination_path("flow", flow_repository))
         assert closed_coordination["lanes"]["b"]["phase"] == "closed"
         closed_dispatches = terminal_dispatches_without_head_lookup()
         assert any(
-            item["lane"] == "b" and item["role"] == "test"
+            item["lane"] == "b" and item["role"] == "test-reviewer"
             and item["status"] == "stale" and item["current_head"] is None
             for item in closed_dispatches
         ), closed_dispatches
         closed_result, closed_status, closed_error = invoke("status", "--change", "flow")
         assert closed_result == 0, closed_error
-        assert "b/test" in closed_status and "status=stale" in closed_status, closed_status
+        assert "b/test-reviewer " in closed_status and "status=stale" in closed_status, closed_status
         assert "current-head=unavailable" in closed_status, closed_status
         closed_dispatch_dashboard = root / "flow-closed-dispatch-dashboard.html"
         closed_result, _, closed_error = invoke(
@@ -6451,10 +6378,10 @@ def _self_check() -> int:
         )
         assert closed_result == 0, closed_error
         closed_dispatch_page = closed_dispatch_dashboard.read_text(encoding="utf-8")
-        assert "b/test" in closed_dispatch_page and "status=stale" in closed_dispatch_page
+        assert "b/test-reviewer " in closed_dispatch_page and "status=stale" in closed_dispatch_page
         assert "current-head=unavailable" in closed_dispatch_page
         assert git(flow_repository, "rev-parse", "HEAD")
-        final_state = _read_state(state_derive("flow", checkout=flow_repository))
+        final_state = read_fixture(state_derive("flow", checkout=flow_repository))
         assert set(final_state["checked_tasks"]) == {"1.1", "2.1"}
         assert "coordination_path" not in final_state
         assert all("reviews" not in lane and "dispatches" not in lane for lane in final_state["lanes"].values())
@@ -6530,22 +6457,22 @@ def _self_check() -> int:
         lane_open("a", "parallel")
         lane_open("b", "parallel")
         parallel_coord_path = _coordination_path("parallel", parallel_repository)
-        parallel_coord = _read_state(parallel_coord_path)
+        parallel_coord = read_fixture(parallel_coord_path)
         parallel_a = Path(parallel_coord["lanes"]["a"]["worktree"])
         parallel_b = Path(parallel_coord["lanes"]["b"]["worktree"])
         parallel_base = git(parallel_repository, "rev-parse", "HEAD")
         for lane_id, worktree, task_id in (("a", parallel_a, "1.1"), ("b", parallel_b, "2.1")):
             subprocess.run(["git", "-C", str(worktree), "commit", "--allow-empty", "-q", "-m", f"{lane_id} code"], check=True)
-            task_tick(lane_id, task_id, "parallel")
+            tick_fixture(lane_id, task_id, "parallel")
             subprocess.run(["git", "-C", str(worktree), "add", "openspec/changes/parallel/tasks.md"], check=True)
             subprocess.run(["git", "-C", str(worktree), "commit", "-q", "-m", f"{lane_id} tick"], check=True)
         parallel_report = root / "parallel-review.md"
         parallel_report.write_text("review\n", encoding="utf-8")
         for lane_id, worktree in (("a", parallel_a), ("b", parallel_b)):
             head = git(worktree, "rev-parse", "HEAD")
-            lane_review(lane_id, "code", "PASS", head, parallel_report, "r1", change="parallel")
+            lane_review(lane_id, "code-reviewer", "PASS", head, parallel_report, "r1", change="parallel")
         lane_merge("a", "parallel")
-        parallel_coord = _read_state(parallel_coord_path)
+        parallel_coord = read_fixture(parallel_coord_path)
         b_base = _lane_merge_base(
             parallel_repository, parallel_coord["lanes"]["b"]["ref"], git(parallel_repository, "rev-parse", "HEAD")
         )
@@ -6572,7 +6499,7 @@ def _self_check() -> int:
         )
         os.chdir(contract_repository)
         lane_open("only", "contract")
-        contract_coordination = _read_state(_coordination_path("contract", contract_repository))
+        contract_coordination = read_fixture(_coordination_path("contract", contract_repository))
         contract_worktree = Path(contract_coordination["lanes"]["only"]["worktree"])
         contract_plan_path = contract_worktree / "openspec" / "changes" / "contract" / "plan" / "graph-plan.json"
         contract_tasks_path = contract_worktree / "openspec" / "changes" / "contract" / "tasks.md"
@@ -6580,7 +6507,7 @@ def _self_check() -> int:
             ["git", "-C", str(contract_worktree), "commit", "--allow-empty", "-q", "-m", "contract code"],
             check=True,
         )
-        task_tick("only", "1.1", "contract")
+        tick_fixture("only", "1.1", "contract")
         subprocess.run(
             ["git", "-C", str(contract_worktree), "add", "openspec/changes/contract/tasks.md"], check=True
         )
@@ -6590,7 +6517,7 @@ def _self_check() -> int:
         contract_head = git(contract_worktree, "rev-parse", "HEAD")
         contract_report = root / "contract-review.md"
         contract_report.write_text("code review\n", encoding="utf-8")
-        lane_review("only", "code", "PASS", contract_head, contract_report, "contract-r1", change="contract")
+        lane_review("only", "code-reviewer", "PASS", contract_head, contract_report, "contract-r1", change="contract")
         # A lane-authored plan change is refused even while its ticks stay valid, and the
         # review is re-bound to the tampered HEAD so the plan guard is what refuses the merge.
         forged_plan = json.loads(contract_plan_path.read_text(encoding="utf-8"))
@@ -6599,7 +6526,7 @@ def _self_check() -> int:
         subprocess.run(["git", "-C", str(contract_worktree), "add", "."], check=True)
         subprocess.run(["git", "-C", str(contract_worktree), "commit", "-q", "-m", "forge plan"], check=True)
         forged_head = git(contract_worktree, "rev-parse", "HEAD")
-        lane_review("only", "code", "PASS", forged_head, contract_report, "contract-r2", change="contract")
+        lane_review("only", "code-reviewer", "PASS", forged_head, contract_report, "contract-r2", change="contract")
         expect_refusal("lane-merge", "only", "--change", "contract", contains="approved plan")
         subprocess.run(["git", "-C", str(contract_worktree), "reset", "--hard", contract_head], check=True)
         # Rewording a task definition, keeping its identifier and its tick, is refused too. The
@@ -6622,7 +6549,7 @@ def _self_check() -> int:
         subprocess.run(["git", "-C", str(contract_worktree), "reset", "--hard", contract_head], check=True)
         # The lane's own tick, and nothing else, still merges. A review recorded against a commit
         # that already carries one keeps the same round, so the bound is not consumed by re-review.
-        lane_review("only", "code", "PASS", contract_head, contract_report, "contract-r1", change="contract")
+        lane_review("only", "code-reviewer", "PASS", contract_head, contract_report, "contract-r1", change="contract")
         lane_merge("only", "contract")
         # The recorded merge entry makes a re-run idempotent: the completed-lane fast path now
         # validates against the reviewed commit it recorded instead of returning on faith.
@@ -6655,7 +6582,7 @@ def _self_check() -> int:
         amendment_base = git(amendment_repository, "rev-parse", "HEAD")
         lane_open("only", "amendment")
         amendment_coord_path = _coordination_path("amendment", amendment_repository)
-        amendment_runtime = _read_state(amendment_coord_path)["lanes"]["only"]
+        amendment_runtime = read_fixture(amendment_coord_path)["lanes"]["only"]
         amendment_worktree = Path(amendment_runtime["worktree"])
         amendment_ref = amendment_runtime["ref"]
         amendment_tasks_relative = "openspec/changes/amendment/tasks.md"
@@ -6727,7 +6654,7 @@ def _self_check() -> int:
         state_derive("amendment", checkout=amendment_repository)
         amendment_report = root / "amendment-review.md"
         amendment_report.write_text("fixture code review\n", encoding="utf-8")
-        lane_review("only", "code", "PASS", amendment_head, amendment_report, "amendment-r1", change="amendment")
+        lane_review("only", "code-reviewer", "PASS", amendment_head, amendment_report, "amendment-r1", change="amendment")
         expect_refusal("lane-merge", "only", "--change", "amendment", contains="merge failed")
         expect_refusal(
             "lane-merge", "only", "--change", "amendment", "--human-override",
@@ -6754,12 +6681,12 @@ def _self_check() -> int:
         assert _committed_file(amendment_repository, merged_head, amendment_plan_relative) == _committed_file(
             amendment_repository, amendment_base, amendment_plan_relative
         )
-        amendment_state = _read_state(state_derive("amendment", checkout=amendment_repository))
+        amendment_state = read_fixture(state_derive("amendment", checkout=amendment_repository))
         assert amendment_state["source_sha"] == merged_head
         assert set(amendment_state["checked_tasks"]) == {"1.1", "2.1"}
         assert amendment_state["lanes"]["only"]["complete"]
         lane_merge("only", "amendment")
-        recovered_runtime = _read_state(amendment_coord_path)["lanes"]["only"]
+        recovered_runtime = read_fixture(amendment_coord_path)["lanes"]["only"]
         assert recovered_runtime["merge"]["reviewed_head"] == amendment_head
         assert recovered_runtime["base"] == amendment_base
         assert recovered_runtime["reviews"][-1]["binding"]["commit"] == amendment_head
@@ -6790,15 +6717,15 @@ def _self_check() -> int:
         recovery_open, _, recovery_open_error = invoke("lane-open", "only", "--change", "recovery")
         assert recovery_open == 0, recovery_open_error
         recovery_coordination_path = _coordination_path("recovery", recovery_repository)
-        recovery_coordination = _read_state(recovery_coordination_path)
+        recovery_coordination = read_fixture(recovery_coordination_path)
         recovery_worktree = Path(recovery_coordination["lanes"]["only"]["worktree"])
-        task_tick("only", "1.1", "recovery")
+        tick_fixture("only", "1.1", "recovery")
         subprocess.run(["git", "-C", str(recovery_worktree), "add", "."], check=True)
         subprocess.run(["git", "-C", str(recovery_worktree), "commit", "-q", "-m", "recovery tick"], check=True)
         recovery_head = git(recovery_worktree, "rev-parse", "HEAD")
         recovery_report = root / "recovery-review.md"
         recovery_report.write_text("code review\n", encoding="utf-8")
-        lane_review("only", "code", "PASS", recovery_head, recovery_report, "recovery-r1", change="recovery")
+        lane_review("only", "code-reviewer", "PASS", recovery_head, recovery_report, "recovery-r1", change="recovery")
         # A hand-resolved merge: the lane branch lands on the feature branch directly, so the lane
         # becomes complete and lane_merge never records a merge entry for it.
         subprocess.run(
@@ -6806,13 +6733,13 @@ def _self_check() -> int:
              "-m", "hand-resolved merge", "featdev/recovery-only"],
             check=True,
         )
-        recovery_state = _read_state(state_derive("recovery", checkout=recovery_repository))
+        recovery_state = read_fixture(state_derive("recovery", checkout=recovery_repository))
         assert recovery_state["lanes"]["only"]["complete"], recovery_state["lanes"]["only"]
-        recovery_reviews = _read_state(recovery_coordination_path)["lanes"]["only"]["reviews"]
+        recovery_reviews = read_fixture(recovery_coordination_path)["lanes"]["only"]["reviews"]
         assert recovery_reviews, "the recovery lane must hold its review before the merge checks"
 
         def write_recovery_coordination(lane_mutate):
-            coordination = _read_state(recovery_coordination_path)
+            coordination = read_fixture(recovery_coordination_path)
             lane_mutate(coordination["lanes"]["only"])
             _write_coordination(recovery_state, coordination, recovery_plan)
 
@@ -6864,15 +6791,15 @@ def _self_check() -> int:
         # recorded so the recovery cannot be replayed.
         gated_open, _, gated_open_error = invoke("lane-open", "gated", "--change", "recovery")
         assert gated_open == 0, gated_open_error
-        gated_coordination = _read_state(recovery_coordination_path)
+        gated_coordination = read_fixture(recovery_coordination_path)
         gated_worktree = Path(gated_coordination["lanes"]["gated"]["worktree"])
-        task_tick("gated", "1.2", "recovery")
+        tick_fixture("gated", "1.2", "recovery")
         subprocess.run(["git", "-C", str(gated_worktree), "add", "."], check=True)
         subprocess.run(["git", "-C", str(gated_worktree), "commit", "-q", "-m", "gated tick"], check=True)
         gated_head = git(gated_worktree, "rev-parse", "HEAD")
         gated_report = root / "gated-review.md"
         gated_report.write_text("code review\n", encoding="utf-8")
-        lane_review("gated", "code", "PASS", gated_head, gated_report, "recovery-r1", change="recovery")
+        lane_review("gated", "code-reviewer", "PASS", gated_head, gated_report, "recovery-r1", change="recovery")
         subprocess.run(
             ["git", "-C", str(recovery_repository), "merge", "--no-ff", "-q",
              "-m", "hand-resolved gated merge", "featdev/recovery-gated"],
@@ -6887,10 +6814,10 @@ def _self_check() -> int:
             raise AssertionError("a gate-requiring completed lane without a gate record must be refused")
         human_gate("gated", "approved", gated_head, "recovery-r1", None, "recovery")
         lane_merge("gated", "recovery")
-        gated_after = _read_state(recovery_coordination_path)["lanes"]["gated"]
+        gated_after = read_fixture(recovery_coordination_path)["lanes"]["gated"]
         assert gated_after.get("merge", {}).get("reviewed_head") == gated_head, gated_after
         assert recovery_state is not None
-        consumed_gated = _read_state(recovery_coordination_path)["authorizations"]
+        consumed_gated = read_fixture(recovery_coordination_path)["authorizations"]
         # This gate was interactive, so there is no grant to consume - but the recorded completion
         # makes a replay idempotent instead of a second acceptance.
         lane_merge("gated", "recovery")
@@ -6917,19 +6844,19 @@ def _self_check() -> int:
         os.chdir(grant_repository)
         grant_open, _, grant_open_error = invoke("lane-open", "alpha", "--change", "grant")
         assert grant_open == 0, grant_open_error
-        grant_coordination = _read_state(_coordination_path("grant", grant_repository))
+        grant_coordination = read_fixture(_coordination_path("grant", grant_repository))
         grant_worktree = Path(grant_coordination["lanes"]["alpha"]["worktree"])
         subprocess.run(
             ["git", "-C", str(grant_worktree), "commit", "--allow-empty", "-q", "-m", "alpha code"],
             check=True,
         )
-        task_tick("alpha", "1.1", "grant")
+        tick_fixture("alpha", "1.1", "grant")
         subprocess.run(["git", "-C", str(grant_worktree), "add", "."], check=True)
         subprocess.run(["git", "-C", str(grant_worktree), "commit", "-q", "-m", "alpha tick"], check=True)
         grant_head = git(grant_worktree, "rev-parse", "HEAD")
         grant_report = root / "grant-code-review.md"
         grant_report.write_text("code review\n", encoding="utf-8")
-        lane_review("alpha", "code", "PASS", grant_head, grant_report, "grant-r1", change="grant")
+        lane_review("alpha", "code-reviewer", "PASS", grant_head, grant_report, "grant-r1", change="grant")
         # The lane opened from the current feature HEAD, and the plan cannot drift (guarded above),
         # so the approved plan revision the grant must name is the committed plan at that HEAD.
         grant_plan_sha = hashlib.sha256(
@@ -7016,19 +6943,19 @@ def _self_check() -> int:
         # state_derive call left inside lane_merge is the post-merge refresh being tested.
         state_derive("grant", None, grant_repository)
         lane_merge("alpha", "grant")
-        persisted = _read_state(_coordination_path("grant", grant_repository))
+        persisted = read_fixture(_coordination_path("grant", grant_repository))
         assert persisted["lanes"]["alpha"].get("phase") == "merged", persisted["lanes"]["alpha"]
         assert persisted["authorizations"]["grant-a1"]["status"] == "consumed", persisted["authorizations"]
         # Repair the projection, then confirm the retry is idempotent rather than a second merge.
         state_derive("grant", None, grant_repository)
         lane_merge("alpha", "grant")
         lane_close("alpha", "grant")
-        consumed = _read_state(_coordination_path("grant", grant_repository))
+        consumed = read_fixture(_coordination_path("grant", grant_repository))
         assert consumed["authorizations"]["grant-a1"]["status"] == "consumed", consumed["authorizations"]
 
         # Merge-time refusals. Each invalid gate state must be refused by the merge validator with
         # the same answer the summary renders, and the one-use rule must survive.
-        grant_state = _read_state(state_derive("grant", checkout=grant_repository))
+        grant_state = read_fixture(state_derive("grant", checkout=grant_repository))
         grant_lane = grant_state["lanes"]["alpha"]
         original_stand_in_report = stand_in_report.read_text(encoding="utf-8")
         for case_name, mutate, expected in (
@@ -7053,7 +6980,7 @@ def _self_check() -> int:
              ),
              "changed after the approval"),
         ):
-            case_coordination = _read_state(_coordination_path("grant", grant_repository))
+            case_coordination = read_fixture(_coordination_path("grant", grant_repository))
             case_coordination["authorizations"]["grant-a1"]["status"] = "active"
             mutate(case_coordination)
             try:
@@ -7067,11 +6994,11 @@ def _self_check() -> int:
                 raise AssertionError(f"a {case_name} authorization must be refused")
             stand_in_report.write_text(original_stand_in_report, encoding="utf-8")
         # The restored gate is still valid, so the refusals above came from the mutations alone.
-        restored_coordination = _read_state(_coordination_path("grant", grant_repository))
+        restored_coordination = read_fixture(_coordination_path("grant", grant_repository))
         restored_coordination["authorizations"]["grant-a1"]["status"] = "active"
         _validate_human_gate("alpha", grant_lane, grant_head, restored_coordination)
         # A grant bound to a superseded plan revision is stale even when everything else is intact.
-        stale_plan_coordination = _read_state(_coordination_path("grant", grant_repository))
+        stale_plan_coordination = read_fixture(_coordination_path("grant", grant_repository))
         stale_plan_coordination["authorizations"]["grant-a1"]["status"] = "active"
         try:
             _validate_human_gate(
@@ -7086,9 +7013,9 @@ def _self_check() -> int:
         # cannot revive itself after a correction: a renewal must be a new grant.
         beta_open, _, beta_open_error = invoke("lane-open", "beta", "--change", "grant")
         assert beta_open == 0, beta_open_error
-        beta_coordination = _read_state(_coordination_path("grant", grant_repository))
+        beta_coordination = read_fixture(_coordination_path("grant", grant_repository))
         beta_worktree = Path(beta_coordination["lanes"]["beta"]["worktree"])
-        task_tick("beta", "1.2", "grant")
+        tick_fixture("beta", "1.2", "grant")
         subprocess.run(["git", "-C", str(beta_worktree), "add", "."], check=True)
         subprocess.run(["git", "-C", str(beta_worktree), "commit", "-q", "-m", "beta tick"], check=True)
         beta_head = git(beta_worktree, "rev-parse", "HEAD")
@@ -7098,8 +7025,8 @@ def _self_check() -> int:
         # failures, so it must not license a third round later.
         premature_report = root / "beta-premature-mediation.md"
         premature_report.write_text("oracle mediation recorded too early\n", encoding="utf-8")
-        lane_mediate("beta", premature_report, "code", change="grant")
-        lane_review("beta", "code", "PASS", beta_head, beta_report, "beta-r1", change="grant")
+        lane_mediate("beta", premature_report, "code-reviewer", change="grant")
+        lane_review("beta", "code-reviewer", "PASS", beta_head, beta_report, "beta-r1", change="grant")
         beta_grant = dict(grant_record)
         beta_grant["id"] = "grant-b1"
         beta_grant["scope"] = ["beta"]
@@ -7124,7 +7051,7 @@ def _self_check() -> int:
             "--evidence-revision", "beta-r1", "--change", "grant",
         )
         assert beta_rejected == 0, beta_rejected_error
-        suspended = _read_state(_coordination_path("grant", grant_repository))
+        suspended = read_fixture(_coordination_path("grant", grant_repository))
         assert suspended["authorizations"]["grant-b1"]["status"] == "suspended", suspended["authorizations"]
         revived, _, revived_error = invoke(*beta_gate_arguments)
         assert revived == 1 and "not active" in revived_error, (revived, revived_error)
@@ -7136,14 +7063,14 @@ def _self_check() -> int:
             check=True,
         )
         second_head = git(beta_worktree, "rev-parse", "HEAD")
-        lane_review("beta", "code", "MORE WORK", second_head, beta_report, "beta-r2", change="grant")
+        lane_review("beta", "code-reviewer", "MORE WORK", second_head, beta_report, "beta-r2", change="grant")
         subprocess.run(
             ["git", "-C", str(beta_worktree), "commit", "--allow-empty", "-q", "-m", "beta fix 2"],
             check=True,
         )
         third_head = git(beta_worktree, "rev-parse", "HEAD")
         try:
-            lane_review("beta", "code", "PASS", third_head, beta_report, "beta-r3", change="grant")
+            lane_review("beta", "code-reviewer", "PASS", third_head, beta_report, "beta-r3", change="grant")
         except StateError as exc:
             assert "two-round limit" in str(exc), str(exc)
         else:
@@ -7151,12 +7078,12 @@ def _self_check() -> int:
         mediation_report = root / "beta-mediation.md"
         mediation_report.write_text("oracle mediation: root cause and resolution\n", encoding="utf-8")
         mediate_result, _, mediate_error = invoke(
-            "lane-mediate", "beta", "--report", str(mediation_report), "--role", "code", "--change", "grant"
+            "lane-mediate", "beta", "--report", str(mediation_report), "--role", "code-reviewer", "--change", "grant"
         )
         assert mediate_result == 0, mediate_error
-        lane_review("beta", "code", "PASS", third_head, beta_report, "beta-r3", change="grant")
-        mediate_state = _read_state(state_derive("grant", checkout=grant_repository))
-        mediate_coordination = _read_state(_coordination_path("grant", grant_repository))
+        lane_review("beta", "code-reviewer", "PASS", third_head, beta_report, "beta-r3", change="grant")
+        mediate_state = read_fixture(state_derive("grant", checkout=grant_repository))
+        mediate_coordination = read_fixture(_coordination_path("grant", grant_repository))
         beta_operation = dict(mediate_state["lanes"]["beta"])
         beta_operation.update(mediate_coordination["lanes"]["beta"])
         _validate_lane_reviews("beta", beta_operation, third_head)
@@ -7171,7 +7098,7 @@ def _self_check() -> int:
         # The premature record and a tampered digest must not satisfy the gate either.
         for case_name, mediations in (
             ("premature-mediation", [{
-                "role": "code", "report": str(premature_report),
+                "role": "code-reviewer", "report": str(premature_report),
                 "report_sha256": _path_sha256(Path(premature_report)), "round_at_mediation": 0,
             }]),
             ("tampered-mediation-report", [dict(
@@ -7206,24 +7133,24 @@ def _self_check() -> int:
         os.chdir(combined_repository)
         combined_base = git(combined_repository, "rev-parse", "HEAD")
         lane_open("only", "combined")
-        dispatch_run("only", "implementer", "provider/worker:low", "low", "1.1",
+        dispatch_run("only", "implementer",  "1.1",
                      key="combined/only/implementer", change="combined")
         dispatch_done("only", "implementer", "impl/session-1", 20, "0.1", "ok", "combined")
         combined_coordination_path = _coordination_path("combined", combined_repository)
-        combined_coordination = _read_state(combined_coordination_path)
+        combined_coordination = read_fixture(combined_coordination_path)
         assert combined_coordination["lanes"]["only"]["dispatches"][0]["access"] == "write"
         combined_worktree = Path(combined_coordination["lanes"]["only"]["worktree"])
         combined_worktree.joinpath("implementation.txt").write_text("combined implementation\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(combined_worktree), "add", "implementation.txt"], check=True)
         subprocess.run(["git", "-C", str(combined_worktree), "commit", "-q", "-m", "combined code"], check=True)
-        task_tick("only", "1.1", "combined")
+        tick_fixture("only", "1.1", "combined")
         subprocess.run(
             ["git", "-C", str(combined_worktree), "add", "openspec/changes/combined/tasks.md"], check=True
         )
         subprocess.run(["git", "-C", str(combined_worktree), "commit", "-q", "-m", "combined tick"], check=True)
         combined_head = git(combined_worktree, "rev-parse", "HEAD")
         dispatch_run(
-            "only", "oracle", "provider/oracle:review", "normal", "1.1",
+            "only", "oracle",  "1.1",
             key="oracle/author-session", change="combined", access="write",
         )
         dispatch_done("only", "oracle", "oracle/author-session", 15, "0.2", "ok", "combined")
@@ -7234,7 +7161,7 @@ def _self_check() -> int:
         combined_evidence.write_text('{"revision":"combined-r1"}\n', encoding="utf-8")
         combined_acceptance.write_text("classification: pre-release\nversion: 0.2+1\n", encoding="utf-8")
         self_authored_result, _, self_authored_error = invoke(
-            "lane-review", "only", "code", "PASS", "--commit", combined_head,
+            "lane-review", "only", "code-reviewer", "PASS", "--commit", combined_head,
             "--report", str(combined_report), "--evidence-revision", "combined-r1",
             "--evidence", str(combined_evidence), "--combined", "--oracle-provenance", "impl/session-1",
             "--feature-base", combined_base, "--review-base", combined_base,
@@ -7244,7 +7171,7 @@ def _self_check() -> int:
             self_authored_result, self_authored_error
         )
         oracle_author_result, _, oracle_author_error = invoke(
-            "lane-review", "only", "code", "PASS", "--commit", combined_head,
+            "lane-review", "only", "code-reviewer", "PASS", "--commit", combined_head,
             "--report", str(combined_report), "--evidence-revision", "combined-r1",
             "--evidence", str(combined_evidence), "--combined", "--oracle-provenance", "oracle/author-session",
             "--feature-base", combined_base, "--review-base", combined_base,
@@ -7254,7 +7181,7 @@ def _self_check() -> int:
             oracle_author_result, oracle_author_error
         )
         missing_oracle_result, _, missing_oracle_error = invoke(
-            "lane-review", "only", "code", "PASS", "--commit", combined_head,
+            "lane-review", "only", "code-reviewer", "PASS", "--commit", combined_head,
             "--report", str(combined_report), "--evidence-revision", "combined-r1",
             "--evidence", str(combined_evidence), "--combined", "--oracle-provenance", "oracle/missing",
             "--feature-base", combined_base, "--review-base", combined_base,
@@ -7263,16 +7190,16 @@ def _self_check() -> int:
         assert missing_oracle_result == 1 and "exactly one completed Oracle dispatch" in missing_oracle_error, (
             missing_oracle_result, missing_oracle_error
         )
-        combined_coordination = _read_state(combined_coordination_path)
+        combined_coordination = read_fixture(combined_coordination_path)
         combined_coordination["lanes"]["only"]["dispatches"].append({
             "role": "oracle", "model": "provider/oracle:legacy", "level": "normal", "task": "1.1",
             "key": "oracle/legacy", "worker_run_id": "oracle/legacy", "result": "ok",
             "started_at": "2026-09-12T00:00:00Z", "lane_head": combined_head,
         })
-        combined_state = _read_state(state_derive("combined", checkout=combined_repository))
+        combined_state = read_fixture(state_derive("combined", checkout=combined_repository))
         _write_coordination(combined_state, combined_coordination, combined_plan)
         legacy_oracle_result, _, legacy_oracle_error = invoke(
-            "lane-review", "only", "code", "PASS", "--commit", combined_head,
+            "lane-review", "only", "code-reviewer", "PASS", "--commit", combined_head,
             "--report", str(combined_report), "--evidence-revision", "combined-r1",
             "--evidence", str(combined_evidence), "--combined", "--oracle-provenance", "oracle/legacy",
             "--feature-base", combined_base, "--review-base", combined_base,
@@ -7282,13 +7209,13 @@ def _self_check() -> int:
             legacy_oracle_result, legacy_oracle_error
         )
         dispatch_run(
-            "only", "oracle", "provider/oracle:review", "normal", "1.1",
+            "only", "oracle",  "1.1",
             key="oracle/session-1", change="combined", access="read-only",
             acceptance=combined_acceptance, evidence=combined_evidence,
         )
         dispatch_done("only", "oracle", "oracle/author-session", 25, "0.3", "ok", "combined")
         shared_session_result, _, shared_session_error = invoke(
-            "lane-review", "only", "code", "PASS", "--commit", combined_head,
+            "lane-review", "only", "code-reviewer", "PASS", "--commit", combined_head,
             "--report", str(combined_report), "--evidence-revision", "combined-r1",
             "--evidence", str(combined_evidence), "--combined", "--oracle-provenance", "oracle/session-1",
             "--feature-base", combined_base, "--review-base", combined_base,
@@ -7298,20 +7225,20 @@ def _self_check() -> int:
             shared_session_result, shared_session_error
         )
         dispatch_run(
-            "only", "oracle", "provider/oracle:review", "normal", "1.1",
+            "only", "oracle",  "1.1",
             key="oracle/session-2", change="combined", access="read-only",
             acceptance=combined_acceptance, evidence=combined_evidence,
         )
         dispatch_done("only", "oracle", "oracle/session-2", 25, "0.3", "ok", "combined")
         combined_review_arguments = (
-            "lane-review", "only", "code", "PASS", "--commit", combined_head,
+            "lane-review", "only", "code-reviewer", "PASS", "--commit", combined_head,
             "--report", str(combined_report), "--evidence-revision", "combined-r1",
             "--evidence", str(combined_evidence), "--combined", "--oracle-provenance", "oracle/session-2",
             "--feature-base", combined_base, "--review-base", combined_base,
             "--acceptance", str(combined_acceptance), "--change", "combined",
         )
-        combined_coordination = _read_state(combined_coordination_path)
-        combined_state = _read_state(state_derive("combined", checkout=combined_repository))
+        combined_coordination = read_fixture(combined_coordination_path)
+        combined_state = read_fixture(state_derive("combined", checkout=combined_repository))
         combined_dispatches = combined_coordination["lanes"]["only"]["dispatches"]
         session_2_dispatch = next(item for item in combined_dispatches if item.get("key") == "oracle/session-2")
         implementer_dispatch = next(item for item in combined_dispatches if item.get("key") == "combined/only/implementer")
@@ -7331,8 +7258,8 @@ def _self_check() -> int:
         _write_coordination(combined_state, combined_coordination, combined_plan)
         old_head_result, _, old_head_error = invoke(*combined_review_arguments)
         assert old_head_result == 0, old_head_error
-        combined_coordination = _read_state(combined_coordination_path)
-        combined_state = _read_state(state_derive("combined", checkout=combined_repository))
+        combined_coordination = read_fixture(combined_coordination_path)
+        combined_state = read_fixture(state_derive("combined", checkout=combined_repository))
         combined_dispatches = combined_coordination["lanes"]["only"]["dispatches"]
         session_2_dispatch = next(item for item in combined_dispatches if item.get("key") == "oracle/session-2")
         implementer_dispatch = next(item for item in combined_dispatches if item.get("key") == "combined/only/implementer")
@@ -7382,7 +7309,7 @@ def _self_check() -> int:
         changed_acceptance.write_text("classification: retry receipt\n", encoding="utf-8")
         try:
             dispatch_run(
-                "only", "oracle", "provider/oracle:review", "normal", "1.1",
+                "only", "oracle",  "1.1",
                 key="oracle/session-2", change="combined", access="read-only",
                 acceptance=changed_acceptance, evidence=combined_evidence,
             )
@@ -7390,7 +7317,7 @@ def _self_check() -> int:
             assert "different intent or receipt" in str(exc), str(exc)
         else:
             raise AssertionError("a same-key retry with a changed receipt must be refused")
-        persisted_retry = _read_state(combined_coordination_path)
+        persisted_retry = read_fixture(combined_coordination_path)
         persisted_retry_dispatch = next(
             item for item in persisted_retry["lanes"]["only"]["dispatches"]
             if item.get("key") == "oracle/session-2"
@@ -7468,7 +7395,7 @@ def _self_check() -> int:
         _write_coordination(combined_state, combined_coordination, combined_plan)
         combined_review_result, _, combined_review_error = invoke(*combined_review_arguments)
         assert combined_review_result == 0, combined_review_error
-        combined_coordination = _read_state(combined_coordination_path)
+        combined_coordination = read_fixture(combined_coordination_path)
         combined_records = [
             item for item in combined_coordination["lanes"]["only"].get("reviews", [])
             if isinstance(item, dict) and item.get("combined") is True
@@ -7484,7 +7411,7 @@ def _self_check() -> int:
         # Merge revalidation must apply the same session-independence check to an existing
         # combined record, not only to a newly recorded review.
         combined_record["oracle_provenance"] = "oracle/session-1"
-        combined_state = _read_state(state_derive("combined", checkout=combined_repository))
+        combined_state = read_fixture(state_derive("combined", checkout=combined_repository))
         try:
             _write_coordination(combined_state, combined_coordination, combined_plan)
             lane_merge("only", "combined")
@@ -7543,7 +7470,7 @@ def _self_check() -> int:
         subprocess.run(["git", "-C", str(combined_repository), "reset", "--hard", combined_base], check=True)
         lane_merge("only", "combined")
         assert git(combined_repository, "rev-parse", "HEAD") == combined_head
-        combined_coordination = _read_state(combined_coordination_path)
+        combined_coordination = read_fixture(combined_coordination_path)
         combined_merge = combined_coordination["lanes"]["only"]["merge"]
         assert combined_merge["reviewed_head"] == combined_head
         assert combined_merge["merge_commit"] == combined_head
@@ -7553,7 +7480,7 @@ def _self_check() -> int:
         # Completed-lane recovery must re-check both provenance identity and the exact successful
         # Oracle outcome; a hand-edited coordination record cannot turn missing/failed/unknown
         # evidence into a valid combined merge.
-        valid_combined_coordination = _read_state(combined_coordination_path)
+        valid_combined_coordination = read_fixture(combined_coordination_path)
         combined_evidence_copy = root / "combined-evidence-copy.json"
         combined_evidence_copy.write_text(combined_evidence.read_text(encoding="utf-8"), encoding="utf-8")
         for case_name, field, value, expected in (
@@ -7577,7 +7504,7 @@ def _self_check() -> int:
             case_dispatch = next(item for item in case_dispatches if item.get("key") == case_key)
             case_dispatch[field] = value
             _write_coordination(
-                _read_state(state_derive("combined", checkout=combined_repository)),
+                read_fixture(state_derive("combined", checkout=combined_repository)),
                 case_coordination,
                 combined_plan,
             )
@@ -7588,7 +7515,7 @@ def _self_check() -> int:
             else:
                 raise AssertionError(f"{case_name} must block combined merge recovery")
         _write_coordination(
-            _read_state(state_derive("combined", checkout=combined_repository)),
+            read_fixture(state_derive("combined", checkout=combined_repository)),
             valid_combined_coordination,
             combined_plan,
         )
@@ -7644,9 +7571,9 @@ def _self_check() -> int:
         finish_record("pr-check", change="combined")
         lane_merge("only", "combined")
         # Removing the merge record must not turn matching ticks and trees into approval.
-        recovered_coordination = _read_state(combined_coordination_path)
+        recovered_coordination = read_fixture(combined_coordination_path)
         recovered_coordination["lanes"]["only"]["merge"] = None
-        _write_coordination(_read_state(state_derive("combined", checkout=combined_repository)), recovered_coordination, combined_plan)
+        _write_coordination(read_fixture(state_derive("combined", checkout=combined_repository)), recovered_coordination, combined_plan)
         try:
             lane_merge("only", "combined")
         except StateError as exc:
@@ -7660,13 +7587,13 @@ def _self_check() -> int:
         recovered_coordination["lanes"]["only"]["reviews"].append({
             "round": 7,
             "lane": "only",
-            "role": "code",
+            "role": "code-reviewer",
             "verdict": "PASS",
             "reviewed_commit": combined_head,
             "status": "current",
         })
         _write_coordination(
-            _read_state(state_derive("combined", checkout=combined_repository)),
+            read_fixture(state_derive("combined", checkout=combined_repository)),
             recovered_coordination,
             combined_plan,
         )
@@ -7677,7 +7604,7 @@ def _self_check() -> int:
         standard_plan["review_mode"] = "standard"
         combined_plan_path.write_text(json.dumps(standard_plan), encoding="utf-8")
         commit(combined_repository, "switch combined plan to standard mode")
-        standard_state = _read_state(state_derive("combined", checkout=combined_repository))
+        standard_state = read_fixture(state_derive("combined", checkout=combined_repository))
         standard_coordination, standard_runtime = _coordination_lane_for(
             standard_state, standard_plan, "only"
         )
@@ -7686,14 +7613,14 @@ def _self_check() -> int:
         assert not any(item.get("combined") is True for item in standard_reviews), standard_reviews
         assert standard_runtime["dispatches"], "mode switch must retain dispatch state"
         _write_coordination(standard_state, standard_coordination, standard_plan)
-        persisted_standard = _read_state(_coordination_path("combined", combined_repository))
+        persisted_standard = read_fixture(_coordination_path("combined", combined_repository))
         assert not any(
             item.get("combined") is True for item in persisted_standard["lanes"]["only"]["reviews"]
         ), persisted_standard
 
         combined_plan_path.write_text(json.dumps(combined_plan), encoding="utf-8")
         commit(combined_repository, "switch standard plan back to combined mode")
-        combined_again_state = _read_state(state_derive("combined", checkout=combined_repository))
+        combined_again_state = read_fixture(state_derive("combined", checkout=combined_repository))
         combined_again_coordination, combined_again_runtime = _coordination_lane_for(
             combined_again_state, combined_plan, "only"
         )
@@ -7718,15 +7645,15 @@ def _self_check() -> int:
         os.chdir(screen_repository)
         screen_base = git(screen_repository, "rev-parse", "HEAD")
         lane_open("only", "combined-screen")
-        dispatch_run("only", "implementer", "provider/worker:low", "low", "1.1", change="combined-screen")
+        dispatch_run("only", "implementer",  "1.1", change="combined-screen")
         dispatch_done("only", "implementer", "screen/implementer", 20, "0.1", "ok", "combined-screen")
         screen_coordination_path = _coordination_path("combined-screen", screen_repository)
-        screen_coordination = _read_state(screen_coordination_path)
+        screen_coordination = read_fixture(screen_coordination_path)
         screen_worktree = Path(screen_coordination["lanes"]["only"]["worktree"])
         screen_worktree.joinpath("implementation.txt").write_text("screen implementation\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(screen_worktree), "add", "implementation.txt"], check=True)
         subprocess.run(["git", "-C", str(screen_worktree), "commit", "-q", "-m", "screen code"], check=True)
-        task_tick("only", "1.1", "combined-screen")
+        tick_fixture("only", "1.1", "combined-screen")
         subprocess.run(
             ["git", "-C", str(screen_worktree), "add", "openspec/changes/combined-screen/tasks.md"], check=True
         )
@@ -7744,7 +7671,7 @@ def _self_check() -> int:
         screen_evidence.write_text('{"revision":"screen-r1"}\n', encoding="utf-8")
         screen_acceptance.write_text("classification: pre-release\nversion: 0.2+1\n", encoding="utf-8")
         dispatch_run(
-            "only", "oracle", "provider/oracle:review", "normal", "1.1",
+            "only", "oracle",  "1.1",
             key="screen/oracle", change="combined-screen", access="read-only",
             acceptance=screen_acceptance, evidence=screen_evidence,
         )
@@ -7755,12 +7682,12 @@ def _self_check() -> int:
         screen_standin_report.write_text("Oracle stand-in acceptance review\n", encoding="utf-8")
         screen_checklist.write_text("- acceptance checklist complete\n", encoding="utf-8")
         lane_review(
-            "only", "code", "PASS", screen_head, screen_report, "screen-r1", screen_evidence,
+            "only", "code-reviewer", "PASS", screen_head, screen_report, "screen-r1", screen_evidence,
             change="combined-screen", combined=True, oracle_provenance="screen/oracle",
             feature_base=screen_base, review_base=screen_base, acceptance=screen_acceptance,
         )
         lane_review(
-            "only", "ui", "PASS", screen_head, screen_ui_report, "screen-r1", screen_ui_evidence,
+            "only", "ui-reviewer", "PASS", screen_head, screen_ui_report, "screen-r1", screen_ui_evidence,
             change="combined-screen",
         )
         screen_plan_sha = hashlib.sha256(
@@ -7784,10 +7711,10 @@ def _self_check() -> int:
             screen_checklist,
         )
         lane_merge("only", "combined-screen")
-        screen_coordination = _read_state(screen_coordination_path)
+        screen_coordination = read_fixture(screen_coordination_path)
         assert screen_coordination["authorizations"]["screen-grant"]["status"] == "consumed", screen_coordination
         lane_close("only", "combined-screen")
-        screen_state = _read_state(state_derive("combined-screen", checkout=screen_repository))
+        screen_state = read_fixture(state_derive("combined-screen", checkout=screen_repository))
 
         screen_ui_evidence.unlink()
         try:
@@ -7798,7 +7725,7 @@ def _self_check() -> int:
             raise AssertionError("missing completed screen evidence must block combined recovery")
         screen_ui_evidence.write_text("screen evidence\n", encoding="utf-8")
         lane_merge("only", "combined-screen")
-        valid_screen_coordination = _read_state(screen_coordination_path)
+        valid_screen_coordination = read_fixture(screen_coordination_path)
         for case_name, mutate, expected in (
             (
                 "revoked-grant",
@@ -7837,631 +7764,7 @@ def _self_check() -> int:
             _write_coordination(screen_state, valid_screen_coordination, screen_plan)
         os.chdir(root)
 
-        # Review policy: risk-based review decisions and ancestor reuse are opt-in.
-        # Every standard gate still blocks: shadow records never relax the standard gates,
-        # the relaxed path honors only what a recorded decision selects, and the explicit
-        # human override is restricted to waivable review duties.
-        flex_plan = {
-            "schema_version": 1,
-            "change": "reviewflex",
-            "lanes": {
-                "bookkeeping": {"risk": "ordinary", "ui": False, "screen": False, "sensitive": False, "depends_on": []},
-                "critical": {"risk": "high", "ui": False, "screen": False, "sensitive": False, "depends_on": []},
-                "visible": {"risk": "ordinary", "ui": True, "screen": False, "sensitive": False, "depends_on": []},
-                "plain": {"risk": "ordinary", "ui": False, "screen": False, "sensitive": False, "depends_on": []},
-                "late": {"risk": "ordinary", "ui": False, "screen": False, "sensitive": False, "depends_on": []},
-                "spare": {"risk": "ordinary", "ui": False, "screen": False, "sensitive": False, "depends_on": []},
-                "authored": {"risk": "ordinary", "ui": False, "screen": False, "sensitive": False, "depends_on": []},
-                "screened": {"risk": "ordinary", "ui": False, "screen": True, "sensitive": False, "depends_on": []},
-            },
-            "tasks": {
-                "1.1": {"lane": "bookkeeping", "deps": []},
-                "2.1": {"lane": "critical", "deps": []},
-                "3.1": {"lane": "visible", "deps": []},
-                "4.1": {"lane": "plain", "deps": []},
-                "5.1": {"lane": "late", "deps": []},
-                "6.1": {"lane": "spare", "deps": []},
-                "7.1": {"lane": "authored", "deps": []},
-                "8.1": {"lane": "screened", "deps": []},
-            },
-        }
-        flex_repository = make_repository(
-            "flex-repository", "reviewflex", flex_plan,
-            "- [ ] 1.1 bookkeeping\n- [ ] 2.1 critical\n- [ ] 3.1 visible\n- [ ] 4.1 plain\n"
-            "- [ ] 5.1 late\n- [ ] 6.1 spare\n- [ ] 7.1 authored\n- [ ] 8.1 screened\n",
-        )
-        os.chdir(flex_repository)
-        for lane_id in ("bookkeeping", "critical", "visible", "plain", "late", "spare", "authored", "screened"):
-            lane_result, _, lane_error = invoke("lane-open", lane_id, "--change", "reviewflex")
-            assert lane_result == 0, (lane_id, lane_error)
-        flex_coordination_path = _coordination_path("reviewflex", flex_repository)
-        flex_coordination = _read_state(flex_coordination_path)
-        flex_worktrees = {
-            lane_id: Path(flex_coordination["lanes"][lane_id]["worktree"])
-            for lane_id in ("bookkeeping", "critical", "visible", "plain", "late", "spare", "authored", "screened")
-        }
-
-        def flex_work(worktree: Path, tick_lane: str, task_id: str, message: str) -> str:
-            subprocess.run(["git", "-C", str(worktree), "commit", "--allow-empty", "-q", "-m", message], check=True)
-            task_tick(tick_lane, task_id, "reviewflex")
-            subprocess.run(
-                ["git", "-C", str(worktree), "add", "openspec/changes/reviewflex/tasks.md"], check=True
-            )
-            subprocess.run(["git", "-C", str(worktree), "commit", "-q", "-m", f"{tick_lane} tick"], check=True)
-            return git(worktree, "rev-parse", "HEAD")
-
-        # Invalid decision shapes are refused at record time; high-risk lanes cannot skip
-        # independent review, and a lane without UI flags has no UI duty to select.
-        try:
-            review_decision(
-                "bookkeeping", {"code": "sometimes", "test": "full", "ui": "skip"},
-                [], "1.1", [], "why", False, "reviewflex",
-            )
-        except StateError as exc:
-            assert "full, focused, or skip" in str(exc), str(exc)
-        else:
-            raise AssertionError("an unknown duty mode must be refused")
-        expect_refusal(
-            "review-decision", "critical", "--change", "reviewflex",
-            "--code", "skip", "--test", "skip", "--ui", "skip",
-            "--acceptance-coverage", "2.1", "--rationale", "narrow",
-            contains="high-risk changes require independent review",
-        )
-        expect_refusal(
-            "review-decision", "bookkeeping", "--change", "reviewflex",
-            "--code", "skip", "--test", "skip", "--ui", "full",
-            "--acceptance-coverage", "1.1", "--rationale", "n",
-            contains="no UI review duty",
-        )
-
-        # Shadow recording: the record persists and displays as 'skipped', but the legacy
-        # gates stay authoritative and lane-merge still refuses without reviews.
-        flex_decision_arguments = (
-            "review-decision", "bookkeeping", "--change", "reviewflex",
-            "--code", "skip", "--test", "skip", "--ui", "skip",
-            "--risk-factor", "narrow reversible bookkeeping",
-            "--acceptance-coverage", "1.1 is a chores tick; acceptance covered by derived-state checks",
-            "--check", "python3 featdev.py --self-check",
-            "--rationale", "low-risk: no product code, narrow, reversible, no open findings",
-        )
-        decision_result, _, decision_error = invoke(*flex_decision_arguments)
-        assert decision_result == 0, decision_error
-        flex_coordination = _read_state(flex_coordination_path)
-        assert flex_coordination["review_policy"] == "legacy", "shadow recording must not activate risk-based policy"
-        flex_work(flex_worktrees["bookkeeping"], "bookkeeping", "1.1", "bookkeeping change")
-        _, flex_status, _ = invoke("status", "--change", "reviewflex")
-        assert "review decisions code=skipped, test=skipped, ui=skipped" in flex_status, flex_status
-        expect_refusal("lane-merge", "bookkeeping", "--change", "reviewflex", contains="required review")
-
-        # Opt-in activates the risk-based policy and the recorded skip satisfies the lane,
-        # with the selected duty persisted beside the merge (never a PASS label).
-        flex_result, _, flex_error = invoke(*flex_decision_arguments, "--opt-in")
-        assert flex_result == 0, flex_error
-        flex_coordination = _read_state(flex_coordination_path)
-        assert flex_coordination["review_policy"] == "risk-based"
-        lane_merge("bookkeeping", "reviewflex")
-        flex_coordination = _read_state(flex_coordination_path)
-        assert flex_coordination["lanes"]["bookkeeping"]["merge"]["review_duties"] == {"code": "skip"}
-
-        # Parallel lanes opened at the same base pick up the merged feature ticks before
-        # ticking their own tasks, so later lane merges stay conflict-free.
-        for flex_lane in ("critical", "visible", "plain", "late", "spare", "authored", "screened"):
-            subprocess.run(
-                ["git", "-C", str(flex_worktrees[flex_lane]), "merge", "-q", "--no-edit", "main"],
-                check=True, capture_output=True,
-            )
-
-        # RW-C04: screen reuse cannot be recorded without evidence, even if its
-        # source PASS was malformed. Genuine bound evidence remains reusable.
-        screened_head = flex_work(flex_worktrees["screened"], "screened", "8.1", "screen change")
-        review_decision(
-            "screened", {"code": "full", "test": "skip", "ui": "focused"},
-            ["screen presentation"], "8.1", ["screen screenshot"],
-            "screen-only layout needs UI inspection", False, "reviewflex",
-        )
-        assert "ui" in _effective_review_roles(
-            flex_plan["lanes"]["screened"],
-            _read_state(flex_coordination_path)["lanes"]["screened"]["decisions"],
-        )
-        screened_report = root / "screened-report.md"
-        screened_report.write_text("screen review\n", encoding="utf-8")
-        screened_evidence = root / "screened-evidence.json"
-        screened_evidence.write_text('{"screenshot": "original"}\n', encoding="utf-8")
-        lane_review("screened", "code", "PASS", screened_head, screened_report, "sc1",
-                    screened_evidence, change="reviewflex")
-        expect_refusal("lane-merge", "screened", "--change", "reviewflex", contains="required review 'ui'")
-        (flex_worktrees["screened"] / "note.txt").write_text("bookkeeping\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(flex_worktrees["screened"]), "add", "note.txt"], check=True)
-        subprocess.run(["git", "-C", str(flex_worktrees["screened"]), "commit", "-qm", "note"], check=True)
-        screened_diff = root / "screened.diff"
-        screened_diff.write_text(_run_git(flex_worktrees["screened"], "diff", screened_head, "HEAD").stdout,
-                                 encoding="utf-8")
-        screened_args = (
-            "review-reuse", "screened", "code", "--change", "reviewflex", "--ancestor", screened_head,
-            "--intervening-diff", str(screened_diff), "--assessment", "bookkeeping only",
-        )
-        screened_valid = _read_state(flex_coordination_path)
-        screened_missing = json.loads(json.dumps(screened_valid))
-        screened_missing["lanes"]["screened"]["reviews"][-1]["binding"].pop("evidence_path")
-        _atomic_write_json(flex_coordination_path, screened_missing)
-        expect_refusal(*screened_args, contains="requires path and digest for a screen lane")
-        _atomic_write_json(flex_coordination_path, screened_valid)
-        screened_result, _, screened_error = invoke(*screened_args)
-        assert screened_result == 0, screened_error
-        screened_lane = _read_state(flex_coordination_path)["lanes"]["screened"]
-        screened_lane["screen"] = True
-        screened_current = git(flex_worktrees["screened"], "rev-parse", "HEAD")
-        _validate_lane_reviews("screened", screened_lane, screened_current,
-                               repository=flex_repository, allow_reuse=True)
-        for fields in (("evidence_path",), ("evidence_sha256",), ("evidence_path", "evidence_sha256")):
-            missing = json.loads(json.dumps(screened_lane))
-            for field in fields:
-                missing["reviews"][-1]["binding"].pop(field)
-            try:
-                _validate_lane_reviews("screened", missing, screened_current,
-                                       repository=flex_repository, allow_reuse=True)
-            except StateError as exc:
-                assert "requires path and digest for a screen lane" in str(exc), str(exc)
-            else:
-                raise AssertionError("screen reuse without an evidence binding must refuse")
-
-        # A lane without a decision record falls back to the standard gate under the
-        # risk-based policy; a high-risk lane's own decision keeps independent review.
-        flex_work(flex_worktrees["plain"], "plain", "4.1", "plain change")
-        expect_refusal("lane-merge", "plain", "--change", "reviewflex", contains="required review")
-
-        # RW-C03 regression: a selected full/focused test duty binds an ordinary lane too.
-        # The selected duty is enforced at merge and persisted beside it; without a valid
-        # decision record the legacy role set is unchanged.
-        review_decision(
-            "plain", {"code": "skip", "test": "full", "ui": "skip"},
-            ["narrow reversible bookkeeping with a selected test duty"], "4.1",
-            ["python3 featdev.py --self-check"],
-            "ordinary lane selecting a full test duty; the duty is then required",
-            False, "reviewflex",
-        )
-        plain_head = git(flex_worktrees["plain"], "rev-parse", "HEAD")
-        expect_refusal(
-            "lane-merge", "plain", "--change", "reviewflex",
-            contains="required review 'test'",
-        )
-        plain_test_report = root / "flex-plain-test-review.md"
-        plain_test_report.write_text("independent ordinary-lane test review\n", encoding="utf-8")
-        lane_review("plain", "test", "PASS", plain_head, plain_test_report, "pl1", change="reviewflex")
-        lane_merge("plain", "reviewflex")
-        flex_coordination = _read_state(flex_coordination_path)
-        assert flex_coordination["lanes"]["plain"]["merge"]["review_duties"] == {"code": "skip", "test": "full"}
-        flex_work(flex_worktrees["critical"], "critical", "2.1", "critical change")
-        expect_refusal("lane-merge", "critical", "--change", "reviewflex", contains="required review")
-
-        # Ancestor reuse (task 5.2). A fresh ordinary PASS is recorded at the critical
-        # lane's first HEAD; unrelated bookkeeping follows, and only a recorded
-        # intervening diff plus unchanged evidence inputs can reuse that verdict.
-        critical_first_head = git(flex_worktrees["critical"], "rev-parse", "HEAD")
-        critical_report = root / "flex-critical-code-review.md"
-        critical_report.write_text("independent high-risk code review\n", encoding="utf-8")
-        lane_review("critical", "code", "PASS", critical_first_head, critical_report, "cr1", change="reviewflex")
-        (flex_worktrees["critical"] / "bookkeeping-note.txt").write_text("bookkeeping only\n", encoding="utf-8")
-        subprocess.run(
-            ["git", "-C", str(flex_worktrees["critical"]), "add", "bookkeeping-note.txt"], check=True
-        )
-        subprocess.run(
-            ["git", "-C", str(flex_worktrees["critical"]), "commit", "-q", "-m", "unrelated bookkeeping"],
-            check=True,
-        )
-        critical_head = git(flex_worktrees["critical"], "rev-parse", "HEAD")
-        intervening_diff = root / "flex-intervening.diff"
-        intervening_diff.write_text(
-            subprocess.run(
-                ["git", "-C", str(flex_worktrees["critical"]), "diff", critical_first_head, critical_head],
-                capture_output=True, text=True, check=True,
-            ).stdout,
-            encoding="utf-8",
-        )
-        # A non-ancestor commit is never a valid reuse source.
-        subprocess.run(["git", "-C", str(flex_worktrees["plain"]), "commit", "--allow-empty", "-q", "-m", "plain follow-up"], check=True)
-        plain_follow_up = git(flex_worktrees["plain"], "rev-parse", "HEAD")
-        expect_refusal(
-            "review-reuse", "critical", "code", "--change", "reviewflex",
-            "--ancestor", plain_follow_up, "--intervening-diff", str(intervening_diff),
-            "--assessment", "nothing touched",
-            contains="not an ancestor",
-        )
-        # A strict-ancestor citation is refused; record a fresh review at current HEAD instead.
-        expect_refusal(
-            "review-reuse", "critical", "code", "--change", "reviewflex",
-            "--ancestor", critical_head, "--intervening-diff", str(intervening_diff),
-            "--assessment", "nothing touched",
-            contains="strict ancestor",
-        )
-        # Ancestor without a recorded PASS cannot be reused.
-        planning_commit = git(flex_repository, "rev-list", "--max-parents=0", "HEAD")
-        planning_diff = root / "flex-planning.diff"
-        planning_diff.write_text(
-            subprocess.run(
-                ["git", "-C", str(flex_worktrees["critical"]), "diff", planning_commit, critical_head],
-                capture_output=True, text=True, check=True,
-            ).stdout,
-            encoding="utf-8",
-        )
-        expect_refusal(
-            "review-reuse", "critical", "code", "--change", "reviewflex",
-            "--ancestor", planning_commit, "--intervening-diff", str(planning_diff),
-            "--assessment", "nothing touched",
-            contains="no completed ordinary",
-        )
-        # Changed evidence inputs require fresh re-review, not reuse.
-        expect_refusal(
-            "review-reuse", "critical", "code", "--change", "reviewflex",
-            "--ancestor", critical_first_head, "--intervening-diff", str(intervening_diff),
-            "--assessment", "nothing touched", "--evidence-inputs-changed", "yes",
-            contains="fresh re-review",
-        )
-        reuse_result, _, reuse_error = invoke(
-            "review-reuse", "critical", "code", "--change", "reviewflex",
-            "--ancestor", critical_first_head, "--intervening-diff", str(intervening_diff),
-            "--assessment", "unrelated bookkeeping: no behavior or evidence inputs changed",
-        )
-        assert reuse_result == 0, reuse_error
-        _, flex_status, _ = invoke("status", "--change", "reviewflex")
-        assert "code=reused" in flex_status and "=PASS" not in flex_status.split("critical")[1].split("lane visible")[0], flex_status
-        # Reuse cannot chain through another reuse record.
-        (flex_worktrees["critical"] / "bookkeeping-note2.txt").write_text("more bookkeeping\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(flex_worktrees["critical"]), "add", "bookkeeping-note2.txt"], check=True)
-        subprocess.run(["git", "-C", str(flex_worktrees["critical"]), "commit", "-q", "-m", "more bookkeeping"], check=True)
-        critical_head2 = git(flex_worktrees["critical"], "rev-parse", "HEAD")
-        intervening_diff2 = root / "flex-intervening-2.diff"
-        intervening_diff2.write_text(
-            subprocess.run(
-                ["git", "-C", str(flex_worktrees["critical"]), "diff", critical_head, critical_head2],
-                capture_output=True, text=True, check=True,
-            ).stdout,
-            encoding="utf-8",
-        )
-        expect_refusal(
-            "review-reuse", "critical", "code", "--change", "reviewflex",
-            "--ancestor", critical_head, "--intervening-diff", str(intervening_diff2),
-            "--assessment", "nothing touched",
-            contains="no completed ordinary",
-        )
-        # A fresh assessed reuse re-binds the original PASS to the new HEAD.
-        intervening_diff_wide = root / "flex-intervening-wide.diff"
-        intervening_diff_wide.write_text(
-            subprocess.run(
-                ["git", "-C", str(flex_worktrees["critical"]), "diff", critical_first_head, critical_head2],
-                capture_output=True, text=True, check=True,
-            ).stdout,
-            encoding="utf-8",
-        )
-        rebind_result, _, rebind_error = invoke(
-            "review-reuse", "critical", "code", "--change", "reviewflex",
-            "--ancestor", critical_first_head, "--intervening-diff", str(intervening_diff_wide),
-            "--assessment", "still unrelated bookkeeping; evidence inputs unchanged",
-        )
-        assert rebind_result == 0, rebind_error
-        critical_test_report = root / "flex-critical-test-review.md"
-        critical_test_report.write_text("independent test review\n", encoding="utf-8")
-        lane_review("critical", "test", "PASS", critical_head2, critical_test_report, "cr2", change="reviewflex")
-        review_decision(
-            "critical",
-            {"code": "full", "test": "full", "ui": "skip"},
-            ["touches conflict decisions"], "2.1", ["focused suites"], "high-risk lane keeps independent review",
-            False, "reviewflex",
-        )
-        lane_merge("critical", "reviewflex")
-        flex_coordination = _read_state(flex_coordination_path)
-        assert flex_coordination["lanes"]["critical"]["merge"]["review_duties"] == {"code": "full", "test": "full"}
-
-        # RW-C01/C04 regression: reuse binds the real ancestor..HEAD diff, refuses garbage,
-        # refuses post-record tampering (file and digest), and is never honored by legacy.
-        spare_first_head = flex_work(flex_worktrees["spare"], "spare", "6.1", "spare change")
-        spare_report = root / "flex-spare-code-review.md"
-        spare_report.write_text("independent ordinary code review\n", encoding="utf-8")
-        spare_evidence = root / "flex-spare-evidence.json"
-        spare_evidence.write_text('{"screenshot": "original"}\n', encoding="utf-8")
-        lane_review("spare", "code", "PASS", spare_first_head, spare_report, "sp1", spare_evidence, change="reviewflex")
-        # An empty intervening diff cannot bind a reuse record.
-        subprocess.run(
-            ["git", "-C", str(flex_worktrees["spare"]), "commit", "--allow-empty", "-q", "-m", "empty step"],
-            check=True,
-        )
-        garbage_diff = root / "flex-garbage.diff"
-        garbage_diff.write_text("NOT AN INTERVENING DIFF\n", encoding="utf-8")
-        expect_refusal(
-            "review-reuse", "spare", "code", "--change", "reviewflex",
-            "--ancestor", spare_first_head, "--intervening-diff", str(garbage_diff),
-            "--assessment", "nothing touched",
-            contains="empty intervening diff",
-        )
-        # A fabricated diff is refused: the helper binds the actual git diff, not caller input.
-        (flex_worktrees["spare"] / "spare-note.txt").write_text("spare only\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(flex_worktrees["spare"]), "add", "spare-note.txt"], check=True)
-        subprocess.run(["git", "-C", str(flex_worktrees["spare"]), "commit", "-q", "-m", "spare note"], check=True)
-        spare_head = git(flex_worktrees["spare"], "rev-parse", "HEAD")
-        expect_refusal(
-            "review-reuse", "spare", "code", "--change", "reviewflex",
-            "--ancestor", spare_first_head, "--intervening-diff", str(garbage_diff),
-            "--assessment", "nothing touched",
-            contains="does not match the actual git diff",
-        )
-        spare_diff = root / "flex-spare.diff"
-        spare_diff.write_text(
-            subprocess.run(
-                ["git", "-C", str(flex_worktrees["spare"]), "diff", spare_first_head, spare_head],
-                capture_output=True, text=True, check=True,
-            ).stdout,
-            encoding="utf-8",
-        )
-        # TEST-R2-01: ordinary legacy-policy reuse must fail at record time too.
-        spare_before_reuse = _read_state(flex_coordination_path)
-        spare_legacy_record = json.loads(json.dumps(spare_before_reuse))
-        spare_legacy_record["review_policy"] = "legacy"
-        _atomic_write_json(flex_coordination_path, spare_legacy_record)
-        expect_refusal(
-            "review-reuse", "spare", "code", "--change", "reviewflex",
-            "--ancestor", spare_first_head, "--intervening-diff", str(spare_diff),
-            "--assessment", "unchanged inputs",
-            contains="risk-based review policy",
-        )
-        _atomic_write_json(flex_coordination_path, spare_before_reuse)
-        spare_evidence.unlink()
-        expect_refusal(
-            "review-reuse", "spare", "code", "--change", "reviewflex",
-            "--ancestor", spare_first_head, "--intervening-diff", str(spare_diff),
-            "--assessment", "unchanged inputs",
-            contains="ancestor review evidence",
-        )
-        spare_evidence.write_text('{"screenshot": "original"}\n', encoding="utf-8")
-        spare_evidence.write_text('{"screenshot": "changed before reuse"}\n', encoding="utf-8")
-        expect_refusal(
-            "review-reuse", "spare", "code", "--change", "reviewflex",
-            "--ancestor", spare_first_head, "--intervening-diff", str(spare_diff),
-            "--assessment", "unchanged inputs", contains="changed since direct review",
-        )
-        spare_evidence.write_text('{"screenshot": "original"}\n', encoding="utf-8")
-        legacy_digest = _read_state(flex_coordination_path)
-        legacy_digest["lanes"]["spare"]["reviews"][-1]["binding"].pop("evidence_sha256")
-        _atomic_write_json(flex_coordination_path, legacy_digest)
-        expect_refusal(
-            "review-reuse", "spare", "code", "--change", "reviewflex",
-            "--ancestor", spare_first_head, "--intervening-diff", str(spare_diff),
-            "--assessment", "unchanged inputs", contains="changed since direct review",
-        )
-        legacy_digest["lanes"]["spare"]["reviews"][-1]["binding"]["evidence_sha256"] = _path_sha256(spare_evidence)
-        _atomic_write_json(flex_coordination_path, legacy_digest)
-        spare_reuse_result, _, spare_reuse_error = invoke(
-            "review-reuse", "spare", "code", "--change", "reviewflex",
-            "--ancestor", spare_first_head, "--intervening-diff", str(spare_diff),
-            "--assessment", "spare note only; no behavior or evidence inputs changed",
-        )
-        assert spare_reuse_result == 0, spare_reuse_error
-        # RW-C04: even optional bound evidence must keep identical bytes.
-        spare_evidence.write_text('{"screenshot": "changed"}\n', encoding="utf-8")
-        expect_refusal("lane-merge", "spare", "--change", "reviewflex", contains="evidence for 'code' changed")
-        spare_evidence.unlink()
-        expect_refusal("lane-merge", "spare", "--change", "reviewflex", contains="reused review evidence")
-        spare_evidence.write_text('{"screenshot": "original"}\n', encoding="utf-8")
-        valid_evidence_coordination = _read_state(flex_coordination_path)
-        for field, value in (("evidence_sha256", None), ("evidence_path", None)):
-            tampered_evidence = json.loads(json.dumps(valid_evidence_coordination))
-            tampered_evidence["lanes"]["spare"]["reviews"][-1]["binding"][field] = value
-            _atomic_write_json(flex_coordination_path, tampered_evidence)
-            expect_refusal("lane-merge", "spare", "--change", "reviewflex", contains="evidence")
-        # Erasing both optional fields or substituting another valid file must not
-        # detach reuse from the direct ancestor's evidence (normal merge and recovery).
-        def refuse_detached_evidence(valid: dict[str, Any]) -> None:
-            alternate = root / "alternate-evidence.json"
-            alternate.write_text('different evidence\n', encoding="utf-8")
-            for substitute in (False, True):
-                tampered = json.loads(json.dumps(valid))
-                binding = tampered["lanes"]["spare"]["reviews"][-1]["binding"]
-                binding.pop("evidence_path")
-                binding.pop("evidence_sha256")
-                if substitute:
-                    binding.update(evidence_path=str(alternate), evidence_sha256=_path_sha256(alternate))
-                _atomic_write_json(flex_coordination_path, tampered)
-                spare_evidence.write_text('changed source evidence\n', encoding="utf-8")
-                expect_refusal("lane-merge", "spare", "--change", "reviewflex",
-                               contains="differs from its direct ancestor PASS")
-            spare_evidence.write_text('{"screenshot": "original"}\n', encoding="utf-8")
-            _atomic_write_json(flex_coordination_path, valid)
-
-        refuse_detached_evidence(valid_evidence_coordination)
-        # A diff mutated after the record refuses the merge; a mutated digest does too.
-        spare_diff.write_text("TAMPERED AFTER RECORD\n", encoding="utf-8")
-        expect_refusal(
-            "lane-merge", "spare", "--change", "reviewflex",
-            contains="changed after the reuse record",
-        )
-        spare_diff.write_text(
-            subprocess.run(
-                ["git", "-C", str(flex_worktrees["spare"]), "diff", spare_first_head, spare_head],
-                capture_output=True, text=True, check=True,
-            ).stdout,
-            encoding="utf-8",
-        )
-        valid_spare_coordination = _read_state(flex_coordination_path)
-        spare_digest_tamper = json.loads(json.dumps(valid_spare_coordination))
-        spare_digest_tamper["lanes"]["spare"]["reviews"][-1]["binding"]["intervening_diff_sha256"] = "0" * 64
-        _atomic_write_json(flex_coordination_path, spare_digest_tamper)
-        expect_refusal(
-            "lane-merge", "spare", "--change", "reviewflex",
-            contains="changed after the reuse record",
-        )
-        _atomic_write_json(flex_coordination_path, valid_spare_coordination)
-        # Legacy policy never honors a reuse record: the standard gate must still block.
-        spare_legacy = json.loads(json.dumps(valid_spare_coordination))
-        spare_legacy["review_policy"] = "legacy"
-        _atomic_write_json(flex_coordination_path, spare_legacy)
-        expect_refusal(
-            "lane-merge", "spare", "--change", "reviewflex",
-            contains="ancestor-reuse record",
-        )
-        _atomic_write_json(flex_coordination_path, valid_spare_coordination)
-        # The genuine, unchanged bookkeeping diff satisfies the gate end to end.
-        lane_merge("spare", "reviewflex")
-        flex_coordination = _read_state(flex_coordination_path)
-        assert "review_duties" not in flex_coordination["lanes"]["spare"]["merge"]
-        # Completed-merge recovery revalidates evidence, not just its path/revision.
-        spare_evidence.write_text('{"screenshot": "changed after merge"}\n', encoding="utf-8")
-        expect_refusal("lane-merge", "spare", "--change", "reviewflex", contains="evidence for 'code' changed")
-        spare_evidence.unlink()
-        expect_refusal("lane-merge", "spare", "--change", "reviewflex", contains="reused review evidence")
-        spare_evidence.write_text('{"screenshot": "original"}\n', encoding="utf-8")
-        lane_merge("spare", "reviewflex")
-        recovered_spare = _read_state(flex_coordination_path)
-        refuse_detached_evidence(recovered_spare)
-        authored_recovery = json.loads(json.dumps(recovered_spare))
-        authored_recovery["lanes"]["spare"].setdefault("dispatches", []).append(
-            {"role": "oracle", "access": "write"}
-        )
-        _atomic_write_json(flex_coordination_path, authored_recovery)
-        expect_refusal(
-            "lane-merge", "spare", "--change", "reviewflex",
-            contains="direct independent current-HEAD review",
-        )
-        _atomic_write_json(flex_coordination_path, recovered_spare)
-
-        # RW-C05 regression: Oracle-authored write work cannot lose independent review.
-        # Pick up the merged feature ticks before ticking this lane's own task.
-        subprocess.run(
-            ["git", "-C", str(flex_worktrees["authored"]), "merge", "-q", "--no-edit", "main"],
-            check=True, capture_output=True,
-        )
-        authored_decision_arguments = (
-            "review-decision", "authored", "--change", "reviewflex",
-            "--code", "skip", "--test", "skip", "--ui", "skip",
-            "--risk-factor", "narrow authored follow-up",
-            "--acceptance-coverage", "7.1 follow-up tick; acceptance covered by derived-state checks",
-            "--check", "python3 featdev.py --self-check",
-            "--rationale", "ordinary risk: narrow, reversible, no open findings",
-        )
-        authored_decision_result, _, authored_decision_error = invoke(*authored_decision_arguments)
-        assert authored_decision_result == 0, authored_decision_error
-        authored_first_head = flex_work(flex_worktrees["authored"], "authored", "7.1", "pre-Oracle change")
-        authored_report = root / "flex-authored-code-review.md"
-        authored_report.write_text("independent pre-Oracle review\n", encoding="utf-8")
-        lane_review("authored", "code", "PASS", authored_first_head, authored_report, "au0", change="reviewflex")
-        (flex_worktrees["authored"] / "authored-note.txt").write_text("correction\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(flex_worktrees["authored"]), "add", "authored-note.txt"], check=True)
-        subprocess.run(["git", "-C", str(flex_worktrees["authored"]), "commit", "-q", "-m", "correction"], check=True)
-        authored_head = git(flex_worktrees["authored"], "rev-parse", "HEAD")
-        authored_diff = root / "flex-authored.diff"
-        authored_diff.write_text(
-            _run_git(flex_worktrees["authored"], "diff", f"{authored_first_head}..{authored_head}", "--").stdout,
-            encoding="utf-8",
-        )
-        # Record reuse before dispatch to prove merge independently rejects old records.
-        review_reuse("authored", "code", authored_first_head, authored_diff, "unchanged inputs", False, "reviewflex")
-        dispatch_result, _, dispatch_error = invoke(
-            "dispatch", "authored", "oracle", "--model", "oracle-x", "--level", "low",
-            "--task", "7.1", "--access", "write", "--change", "reviewflex",
-        )
-        assert dispatch_result == 0, dispatch_error
-        # TEST-R2-01: write dispatch must also block a newly recorded skip decision.
-        expect_refusal(*authored_decision_arguments, "--opt-in", contains="Oracle-authored")
-        expect_refusal(
-            "review-reuse", "authored", "code", "--change", "reviewflex",
-            "--ancestor", authored_first_head, "--intervening-diff", str(authored_diff),
-            "--assessment", "unchanged inputs", contains="direct independent current-HEAD review",
-        )
-        # The skip decision recorded before the write dispatch can never relax this merge.
-        expect_refusal(
-            "lane-merge", "authored", "--change", "reviewflex",
-            contains="Oracle-authored",
-        )
-        # A fresh decision that keeps the duty plus a current independent PASS satisfies it.
-        review_decision(
-            "authored", {"code": "full", "test": "skip", "ui": "skip"},
-            [], "7.1", [], "authored work keeps an independent code review",
-            False, "reviewflex",
-        )
-        expect_refusal(
-            "lane-merge", "authored", "--change", "reviewflex",
-            contains="direct independent current-HEAD review",
-        )
-        authored_report.write_text("independent review of Oracle-authored work\n", encoding="utf-8")
-        lane_review("authored", "code", "PASS", authored_head, authored_report, "au1", change="reviewflex")
-        lane_merge("authored", "reviewflex")
-        flex_coordination = _read_state(flex_coordination_path)
-        assert flex_coordination["lanes"]["authored"]["merge"]["review_duties"] == {"code": "full"}
-
-        # The visible lane picks up the merged critical tick before ticking its own task.
-        subprocess.run(
-            ["git", "-C", str(flex_worktrees["visible"]), "merge", "-q", "--no-edit", "main"],
-            check=True, capture_output=True,
-        )
-        # The visible lane: a decision record never substitutes for the human checkpoint,
-        # and a human override still binds ticks, tree, base, and the human gate.
-        try:
-            review_decision(
-                "visible", {"code": "focused", "test": "skip", "ui": "full"},
-                ["single-screen copy"], "3.1", ["rendered screenshot review"], "focused UI duty, tests untouched",
-                False, "reviewflex",
-            )
-        except StateError as exc:
-            raise AssertionError(f"visible lane decision must be recordable: {exc}")
-        visible_head = flex_work(flex_worktrees["visible"], "visible", "3.1", "visible change")
-        expect_refusal("lane-merge", "visible", "--change", "reviewflex", contains="required review")
-        visible_code_report = root / "flex-visible-code-review.md"
-        visible_code_report.write_text("focused code review\n", encoding="utf-8")
-        visible_ui_report = root / "flex-visible-ui-review.md"
-        visible_ui_report.write_text("ui review\n", encoding="utf-8")
-        lane_review("visible", "code", "PASS", visible_head, visible_code_report, "vr1", change="reviewflex")
-        lane_review("visible", "ui", "PASS", visible_head, visible_ui_report, "vr1", change="reviewflex")
-        expect_refusal("lane-merge", "visible", "--change", "reviewflex", contains="human gate")
-        # A human override cannot waive the human checkpoint.
-        expect_refusal(
-            "lane-merge", "visible", "--human-override", "--override-reason", "human decision",
-            "--change", "reviewflex", contains="human gate",
-        )
-        human_gate("visible", "approved", visible_head, "vr1", change="reviewflex")
-        # A dirty lane worktree still blocks an override merge.
-        (flex_worktrees["visible"] / "scratch.txt").write_text("dirty\n", encoding="utf-8")
-        expect_refusal(
-            "lane-merge", "visible", "--human-override", "--override-reason", "human decision",
-            "--change", "reviewflex", contains="dirty",
-        )
-        (flex_worktrees["visible"] / "scratch.txt").unlink()
-        # A tampered decision record blocks the gate until a fresh decision is recorded.
-        valid_flex_coordination = _read_state(flex_coordination_path)
-        tampered = json.loads(json.dumps(valid_flex_coordination))
-        tampered["lanes"]["visible"]["decisions"]["duties"]["code"]["mode"] = "skip"
-        _atomic_write_json(flex_coordination_path, tampered)
-        expect_refusal(
-            "lane-merge", "visible", "--change", "reviewflex",
-            contains="review decision record changed",
-        )
-        _atomic_write_json(flex_coordination_path, valid_flex_coordination)
-        lane_merge("visible", "reviewflex")
-        flex_coordination = _read_state(flex_coordination_path)
-        assert flex_coordination["lanes"]["visible"]["merge"]["review_duties"] == {"code": "focused", "ui": "full"}
-
-        # Unticked tasks and an unreconcilable worktree still block an override merge.
-        subprocess.run(
-            ["git", "-C", str(flex_worktrees["late"]), "merge", "-q", "--no-edit", "main"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(["git", "-C", str(flex_worktrees["late"]), "commit", "--allow-empty", "-q", "-m", "late work"], check=True)
-        expect_refusal(
-            "lane-merge", "late", "--human-override", "--override-reason", "human decision",
-            "--change", "reviewflex", contains="unfinished tasks",
-        )
-        task_tick("late", "5.1", "reviewflex")
-        subprocess.run(["git", "-C", str(flex_worktrees["late"]), "add", "openspec/changes/reviewflex/tasks.md"], check=True)
-        subprocess.run(["git", "-C", str(flex_worktrees["late"]), "commit", "-q", "-m", "late tick"], check=True)
-        late_ref = flex_coordination["lanes"]["late"]["ref"]
-        subprocess.run(
-            ["git", "-C", str(flex_repository), "worktree", "remove", "--force", str(flex_worktrees["late"])],
-            check=True,
-        )
-        subprocess.run(["git", "-C", str(flex_repository), "branch", "-D", late_ref], check=True)
-        expect_refusal(
-            "lane-merge", "late", "--human-override", "--override-reason", "human decision",
-            "--change", "reviewflex", contains="reconcile it first",
-        )
-
-        # Plan-phase dispatch and review are recorded before the plan approval commit, without a lane.
+        # Planning reviews use their own scoped ledgers and source bindings.
         plan_repo = root / "planreview"
         plan_repo.mkdir()
         subprocess.run(["git", "init", "-q", "-b", "main", str(plan_repo)], check=True)
@@ -8487,7 +7790,7 @@ def _self_check() -> int:
         plan_reviews.mkdir(parents=True)
         plan_report = plan_reviews / "plan-oracle-r1.md"
         plan_report.write_text("PASS\n", encoding="utf-8")
-        plan_dispatch("oracle", "local/model", "normal", "plan", report=str(plan_report),
+        plan_dispatch("oracle",  "plan", report=str(plan_report),
                       change="planreview")
         plan_review("oracle", "PASS", plan_head, str(plan_report), change="planreview")
         plan_ledger, plan_ledger_path = _load_plan_ledger("planreview", plan_repo)
@@ -8497,25 +7800,32 @@ def _self_check() -> int:
         assert len(plan_ledger["reviews"]) == 1
         assert plan_ledger["reviews"][0]["verdict"] == "PASS"
 
-        # A changed working-tree plan invalidates the dispatch; restoring it allows the verdict.
+        # A changed OpenSpec artifact invalidates its dispatch; the legacy graph is excluded.
         second_report = plan_reviews / "plan-oracle-r2.md"
         second_report.write_text("PASS\n", encoding="utf-8")
-        plan_dispatch("oracle", "local/model", "normal", "plan", key="plan/r2",
+        plan_dispatch("oracle",  "plan", key="plan/r2",
                       report=str(second_report), change="planreview")
-        (plan_dir / "graph-plan.json").write_text(json.dumps(plan_payload, indent=2), encoding="utf-8")
+        (plan_dir.parent / "tasks.md").write_text("- [ ] 1.1 changed requirement\n", encoding="utf-8")
         try:
             plan_review("oracle", "PASS", plan_head, str(second_report), change="planreview")
         except StateError as exc:
             assert "changed" in str(exc), str(exc)
         else:
             raise AssertionError("a changed plan must invalidate the plan dispatch")
-        (plan_dir / "graph-plan.json").write_text(plan_text, encoding="utf-8")
+        (plan_dir.parent / "tasks.md").write_text("- [ ] 1.1 first\n", encoding="utf-8")
         plan_review("oracle", "PASS", plan_head, str(second_report), change="planreview")
 
-        # A third review needs a recorded mediation; a missing report is refused.
+        # Successful earlier planning work does not exhaust the next correction cycle.
+        for correction_round in (1, 2):
+            correction_report = plan_reviews / f"amendment-oracle-r{correction_round}.md"
+            correction_report.write_text("MORE WORK: fixture amendment\n", encoding="utf-8")
+            plan_dispatch("oracle", "plan", key=f"amendment/r{correction_round}",
+                          report=str(correction_report), change="planreview")
+            plan_review("oracle", "MORE WORK", plan_head, str(correction_report), change="planreview")
+        # A third review within that cycle needs mediation; a missing report is refused.
         third_report = plan_reviews / "plan-oracle-r3.md"
         third_report.write_text("PASS\n", encoding="utf-8")
-        plan_dispatch("oracle", "local/model", "normal", "plan", key="plan/r3",
+        plan_dispatch("oracle",  "plan", key="plan/r3",
                       report=str(third_report), change="planreview")
         try:
             plan_review("oracle", "PASS", plan_head, str(third_report), change="planreview")
@@ -8528,10 +7838,10 @@ def _self_check() -> int:
         plan_review("oracle", "PASS", plan_head, str(third_report), mediation=str(mediation),
                     change="planreview")
         plan_ledger, _ = _load_plan_ledger("planreview", plan_repo)
-        assert len(plan_ledger["reviews"]) == 3
+        assert len(plan_ledger["reviews"]) == 5
 
         missing_report = plan_reviews / "plan-oracle-missing.md"
-        plan_dispatch("oracle", "local/model", "normal", "plan", key="plan/missing",
+        plan_dispatch("oracle",  "plan", key="plan/missing",
                       report=str(missing_report), change="planreview")
         try:
             plan_review("oracle", "PASS", plan_head, str(missing_report), change="planreview")
@@ -8560,7 +7870,7 @@ def _selected_change(args: argparse.Namespace) -> str | None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = _ArgumentParser(
-        description="Validate committed feature-development state and record review/finish decisions. Use repository guides for test selection; the standard review gates apply unless a change opts in via review-decision --opt-in.",
+        description="Validate local repo plan/coordination objects and committed OpenSpec task ticks. Record scoped Oracle reviews and lane/finish decisions. Use repository guides for test selection; review roles follow the lane risk and UI flags.",
         epilog=FIELD_TABLE,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -8568,20 +7878,26 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--change", dest="global_change", metavar="<change>", help="select the change state")
     commands = parser.add_subparsers(dest="command")
 
+    commands.add_parser("migrate-repo", help="import retained per-change plans and coordination into repository objects")
+
     validate = commands.add_parser("plan-validate", help="run the four plan checks")
     validate.add_argument("plan", type=Path, metavar="<plan.json>")
     validate.add_argument("--tasks", type=Path, metavar="<tasks.md>")
+    _add_change_option(validate)
 
     graph = commands.add_parser("plan-graph", help="print a read-only plan view")
     graph.add_argument("plan", type=Path, metavar="<plan.json>")
     graph.add_argument("--format", choices=("md", "mermaid"), default="md")
+    _add_change_option(graph)
 
     plan_send = commands.add_parser(
         "plan-dispatch", help="record the Oracle plan-review dispatch intent before launch"
     )
+    plan_send.add_argument("--access", choices=("read-only", "write"), default="read-only",
+                           help="write: bounded Oracle correction after two MORE WORK reviews; never a verdict")
+    plan_send.add_argument("--scope", choices=("change", "graph"), default="change",
+                           help="change: OpenSpec artifacts; graph: repo plan after every included change passes")
     plan_send.add_argument("--role", default="oracle", metavar="<role>")
-    plan_send.add_argument("--model", required=True, metavar="<model>")
-    plan_send.add_argument("--level", required=True, metavar="<level>")
     plan_send.add_argument("--task", default="plan", metavar="<task>")
     plan_send.add_argument("--key", metavar="<key>", help="retry identity; new dispatches generate a unique key")
     plan_send.add_argument("--report", metavar="<path>", help="Oracle plan-review report path")
@@ -8592,6 +7908,7 @@ def _parser() -> argparse.ArgumentParser:
     plan_reviewed = commands.add_parser(
         "plan-review", help="record the Oracle plan-review verdict against the working-tree plan"
     )
+    plan_reviewed.add_argument("--scope", choices=("change", "graph"), default="change")
     plan_reviewed.add_argument("--role", default="oracle", metavar="<role>")
     plan_reviewed.add_argument("verdict", choices=("PASS", "MORE WORK"), metavar="<PASS|MORE WORK>")
     plan_reviewed.add_argument("--head", required=True, metavar="<sha>")
@@ -8600,20 +7917,11 @@ def _parser() -> argparse.ArgumentParser:
     plan_reviewed.add_argument("--plan", type=Path, metavar="<plan.json>")
     _add_change_option(plan_reviewed)
 
-    derive = commands.add_parser("state-derive", help="derive change state from committed artifacts")
-    derive.add_argument("change", metavar="<change>")
-    derive.add_argument("--ref", dest="source_ref", metavar="<committed-ref>")
-
-    tick = commands.add_parser("task-tick", help="check a plan-assigned task in a lane worktree")
-    tick.add_argument("lane", metavar="<lane>")
-    tick.add_argument("task", metavar="<task>")
-    _add_change_option(tick)
-
     send = commands.add_parser("dispatch", help="record a temporary worker dispatch intent")
-    send.add_argument("lane", metavar="<lane>")
+    send.add_argument("lane", nargs="?", metavar="<lane>")
+    send.add_argument("--scope", choices=("lane", "finish"), default="lane")
+    send.add_argument("--worktree", type=Path, help="finish worker checkout; required for authors")
     send.add_argument("role", metavar="<role>")
-    send.add_argument("--model", required=True, metavar="<model>")
-    send.add_argument("--level", required=True, metavar="<level>")
     send.add_argument("--task", required=True, metavar="<task>")
     send.add_argument("--key", metavar="<key>", help="retry identity; new dispatches generate a unique key")
     send.add_argument(
@@ -8631,7 +7939,8 @@ def _parser() -> argparse.ArgumentParser:
     _add_change_option(send)
 
     sent = commands.add_parser("dispatch-done", help="record a temporary worker outcome")
-    sent.add_argument("lane", metavar="<lane>")
+    sent.add_argument("lane", nargs="?", metavar="<lane>")
+    sent.add_argument("--scope", choices=("lane", "finish"), default="lane")
     sent.add_argument("role", metavar="<role>")
     sent.add_argument("--key", help="complete the dispatch with this unique key")
     sent.add_argument("--worker-run-id", metavar="<worker-run-id>")
@@ -8719,53 +8028,7 @@ def _parser() -> argparse.ArgumentParser:
     mediate.add_argument("--role", metavar="<role>", help="limit the mediation to one review role")
     _add_change_option(mediate)
 
-    decision = commands.add_parser(
-        "review-decision",
-        help="record the Coordinator's per-lane review-duty decision for code/test/ui",
-        epilog=(
-            "Without --opt-in the record is shadow-only under the standard review gates. With\n"
-            "--opt-in the change's review policy becomes risk-based and lane-merge honors the\n"
-            "selected duties. Skips are\n"
-            "low-risk only, never PASS."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    decision.add_argument("lane", metavar="<lane>")
-    decision.add_argument("--code", required=True, choices=_DECISION_MODES, metavar="<full|focused|skip>")
-    decision.add_argument("--test", required=True, choices=_DECISION_MODES, metavar="<full|focused|skip>")
-    decision.add_argument("--ui", required=True, choices=_DECISION_MODES, metavar="<full|focused|skip>")
-    decision.add_argument("--risk-factor", action="append", default=[], metavar="<factor>")
-    decision.add_argument("--acceptance-coverage", required=True, metavar="<text>")
-    decision.add_argument("--check", dest="checks", action="append", default=[], metavar="<check>")
-    decision.add_argument("--rationale", required=True, metavar="<text>")
-    decision.add_argument(
-        "--opt-in", action="store_true",
-        help="activate risk-based review for this change's lanes (otherwise the record is shadow-only and the standard gates apply)",
-    )
-    _add_change_option(decision)
-
-    reuse = commands.add_parser(
-        "review-reuse",
-        help="record assessed reuse of an ordinary agent PASS recorded at an ancestor commit",
-        epilog=(
-            "Requires the intervening diff, an assessment of what it does not touch, and\n"
-            "unchanged evidence inputs; affected/uncertain changes require fresh re-review.\n"
-            "Human and combined-Oracle approvals stay exact-bound and are never reused."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    reuse.add_argument("lane", metavar="<lane>")
-    reuse.add_argument("role", metavar="<role>")
-    reuse.add_argument("--ancestor", required=True, metavar="<sha>")
-    reuse.add_argument("--intervening-diff", required=True, metavar="<path>")
-    reuse.add_argument("--assessment", required=True, metavar="<text>")
-    reuse.add_argument(
-        "--evidence-inputs-changed", choices=("no", "yes"), default="no",
-        help="'yes' refuses the record: affected/uncertain changes require re-review",
-    )
-    _add_change_option(reuse)
-
-    defer = commands.add_parser("human-defer", help="record bounded low-risk UI deferral to repository-defined integrated human inspection (opt-in)")
+    defer = commands.add_parser("human-defer", help="record bounded low-risk UI deferral to repository-defined integrated human inspection")
     defer.add_argument("lane")
     defer.add_argument("--commit", required=True)
     defer.add_argument("--evidence-revision", required=True)
@@ -8790,7 +8053,7 @@ def _parser() -> argparse.ArgumentParser:
     _add_change_option(merged)
 
     finish = commands.add_parser("finish-record", help="bind classification/version before final capture; restage after changes and recapture before PR")
-    finish.add_argument("action", choices=("classify", "restage", "capture", "check", "inspect", "pr-check"))
+    finish.add_argument("action", choices=("classify", "restage", "capture", "inspect", "pr-check"))
     finish.add_argument("--classification", help="human release classification from repository policy")
     finish.add_argument("--version", help="optional version label; repository tooling validates the version")
     finish.add_argument(
@@ -8837,50 +8100,54 @@ def main(argv: list[str] | None = None) -> int:
         return _self_check()
     selected_change = _selected_change(args)
     try:
+        if args.command == "migrate-repo":
+            path = migrate_repository()
+            print(f"migrate-repo: imported {path}; review the local repository plan; legacy files are retained; neither runtime object is committed")
+            return 0
         if args.command == "plan-validate":
-            validate_plan(args.plan, args.tasks)
+            validate_plan(args.plan, args.tasks, selected_change)
             print(f"plan-validate: PASS ({args.plan})")
             return 0
         if args.command == "plan-graph":
             plan = _load_json(args.plan)
+            if selected_change is not None:
+                plan = _selected_plan(plan, selected_change)
             output = render_markdown(plan) if args.format == "md" else render_mermaid(plan)
             print(output, end="")
             return 0
         if args.command == "plan-dispatch":
             path = plan_dispatch(
-                args.role, args.model, args.level, args.task, args.key, args.report,
-                args.head, selected_change, args.plan,
+                args.role,  args.task, args.key, args.report,
+                args.head, selected_change, args.plan, args.scope, args.access,
             )
             print(f"plan-dispatch: recorded {args.role} ({path})")
             return 0
         if args.command == "plan-review":
             path = plan_review(
                 args.role, args.verdict, args.head, args.report, args.mediation,
-                selected_change, args.plan,
+                selected_change, args.plan, args.scope,
             )
             print(f"plan-review: recorded {args.role}={args.verdict} ({path})")
             return 0
-        if args.command == "state-derive":
-            state_derive(args.change, args.source_ref)
-            print(f"state-derive: derived {args.change} in memory (coordination.json is the store)")
-            return 0
-        if args.command == "task-tick":
-            path = task_tick(args.lane, args.task, selected_change)
-            print(f"task-tick: checked {args.lane}/{args.task} ({path})")
-            return 0
+        if args.command in {"dispatch", "dispatch-done"}:
+            if (args.scope == "lane") != (args.lane is not None):
+                raise StateError("dispatch: lane scope requires a lane; finish scope takes only the role")
         if args.command == "dispatch":
             path = dispatch_run(
-                args.lane, args.role, args.model, args.level, args.task, args.key, selected_change,
-                args.access, args.acceptance, args.evidence,
+                args.lane, args.role,  args.task, args.key, selected_change,
+                args.access, args.acceptance, args.evidence, args.worktree,
             )
-            key = args.key or _read_state(path)["lanes"][args.lane]["dispatches"][-1]["key"]
-            print(f"dispatch: recorded {args.lane}/{args.role} key={key} ({path})")
+            change = selected_change or _infer_change(Path.cwd())
+            node = _read_state(path)["changes"][change]
+            rows = node.get("finish_dispatches", []) if args.scope == "finish" else node["lanes"][args.lane]["dispatches"]
+            key = args.key or rows[-1]["key"]
+            print(f"dispatch: recorded {args.lane or 'finish'}/{args.role} key={key} ({path})")
             return 0
         if args.command == "dispatch-done":
             path = dispatch_done(
                 args.lane, args.role, args.worker_run_id, args.tokens, args.cost, args.result, selected_change, args.key
             )
-            print(f"dispatch-done: recorded {args.lane}/{args.role} ({path})")
+            print(f"dispatch-done: recorded {args.lane or 'finish'}/{args.role} ({path})")
             return 0
         if args.command == "lane-open":
             path = lane_open(args.lane, selected_change)
@@ -8898,13 +8165,6 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"lane-review: recorded {args.lane}/{args.role}={args.verdict} ({path})")
             return 0
-        if args.command == "review-reuse":
-            path = review_reuse(
-                args.lane, args.role, args.ancestor, args.intervening_diff, args.assessment,
-                args.evidence_inputs_changed == "yes", selected_change,
-            )
-            print(f"review-reuse: recorded {args.lane}/{args.role} reuse from {args.ancestor} ({path})")
-            return 0
         if args.command == "human-gate":
             stand_in = None
             if args.stand_in_report is not None or args.stand_in_verdict is not None:
@@ -8918,15 +8178,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "lane-mediate":
             path = lane_mediate(args.lane, args.report, args.role, selected_change)
             print(f"lane-mediate: recorded {args.lane} ({path})")
-            return 0
-        if args.command == "review-decision":
-            path = review_decision(
-                args.lane, {"code": args.code, "test": args.test, "ui": args.ui},
-                args.risk_factor, args.acceptance_coverage, args.checks, args.rationale,
-                args.opt_in, selected_change,
-            )
-            policy = "risk-based" if args.opt_in else "legacy (shadow-only record)"
-            print(f"review-decision: recorded {args.lane} [{policy}] ({path})")
             return 0
         if args.command == "human-defer":
             path = human_defer(args.lane, args.commit, args.evidence_revision, args.rationale,

@@ -16,6 +16,10 @@ processes; you do not implement. Feature implementation, code edits, and test au
 instead of editing. Use the capability map supplied in the brief to resolve generic tool names; the
 profile is authoritative.
 
+Lane briefs identify the OpenSpec change and lane in repo-level `.agents/workflow/plan-graph.json`.
+Finish briefs instead identify the change, integrated HEAD, owned scope, and repository release criteria; no active lane is required.
+Only the Coordinator writes the shared `.agents/workflow/coordination.json`.
+
 ## Duties
 
 - Execute exactly what the Coordinator's brief specifies: long commands (test suites, builds, end-to-end

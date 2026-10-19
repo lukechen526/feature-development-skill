@@ -1,22 +1,98 @@
 # Recovery
 
-1. Re-derive committed view ([lane.md](lane.md) § Derived state); inspect surviving worktrees/refs.
-2. Missing dispatch/review record: redo affected work/review, never infer completion/approval.
-   Unprovable current human approval: repeat checkpoint.
-   Missing decision records are not recoverable from scratch: the standard review gate applies.
-   Reused ancestor verdicts need their recorded ancestor commit, intervening-diff binding, and
-   unchanged evidence inputs; a broken binding reverts that duty to the standard review gate.
-   Human authorization and combined-Oracle approvals are never reused or recovered by ancestry.
-   A deferred-to-integrated decision is not an approval: recover its exact lane commit and
-   eligibility or require the early lane checkpoint. Lost repository-defined human inspection checkpoints
-   must be repeated personally; a changed integrated HEAD or inspection record cannot be
-   repaired by Oracle stand-in or by a preauthorized PR approval.
-3. Before same-worktree redispatch, use dispatch key to prove prior session absent, stopped, or released.
-   Unknown session: stop for human; never start second writer.
-4. Reuse `PASS` only after checking clean tree, exact reviewed `HEAD`, and existing evidence.
-5. Check ancestry and recorded intents; never double-dispatch, double-merge, or double-remove.
-   Combined review also requires recorded base, candidate, acceptance/evidence bindings, and exact post-merge `HEAD`.
-   Equal trees/ancestry alone never prove approval.
+Command syntax: [helper command reference](helper-commands.md).
+
+## When to use recovery
+
+Recovery is an exception path inside the current phase, not a final phase after finish.
+The Coordinator enters it before further affected actions when any of these conditions applies:
+
+| Trigger | Entry point |
+|---|---|
+| A Coordinator session resumes after an interruption | Before another dispatch, record mutation, merge, cleanup, or PR action |
+| A worker stops, times out, or disappears with uncertain ownership or outcome | Before continuation or replacement in that worktree |
+| Expected local objects or decision records are unexpectedly missing, unreadable, stale, or inconsistent with the actual work | Before trusting those records or changing the affected work |
+| A dispatch, merge, cleanup, or record write partially succeeds | Before retrying the operation |
+
+Routine new-repository setup is not recovery. Neither are normal review corrections, known failed checks, or planned human approval waits.
+Those remain in their owning phase while records and execution state are trustworthy.
+An evidence refresh already prescribed by the phase guide does not require restarting the workflow.
+
+## Reconcile and resume
+
+1. Pause the affected lane or phase.
+2. Pause all coordinator writes if the shared local objects are unreliable.
+3. Identify the interrupted phase, change, lane, and last confirmed operation.
+4. Read the retained local plan, coordination records, reports, and approval bindings.
+5. Compare those records with committed OpenSpec artifacts, task ticks, and surviving worktrees/refs.
+6. Establish the actual status and ownership of every affected worker.
+7. Repair the interrupted operation or renew only the affected missing evidence and decisions.
+   Resolve implementation conflicts in the lane worktree with fresh review, never as unreviewed feature-branch edits.
+   For finish workers, inspect `finish_dispatches` and its worktree/HEAD binding before resuming or replacing a worker.
+   For Oracle planning authors, establish graph ownership before any graph mutation or independent review.
+8. Refresh coordination and inspect status after reconciliation.
+9. Resume the owning phase at its first incomplete operation.
+
+Recovery ends when records and execution state agree, worker ownership is known, and the next action is identified.
+A missing approval remains a gate in the owning phase. Request it there; recovery never substitutes for consent.
+If the state cannot be reconciled or worker ownership remains unknown, stop for the human.
+Do not replay completed phases, redispatch completed tasks, or repeat a successful merge merely to recreate the normal sequence.
+
+## Binding and ownership rules
+
+- Missing dispatch records require reconciliation of the worker outcome before another launch. Never assume the old worker stopped.
+- Missing or stale review records require a fresh independent current-HEAD verdict. Never infer approval from code or task ticks.
+- Unprovable human acceptance requires a renewed checkpoint. Silence, chat recollection, and green checks are not substitutes.
+- Before same-worktree redispatch, prove the prior session is absent, stopped, or released. Never start a second writer.
+- A retained pass counts only with its exact reviewed HEAD, current lane contract, and valid evidence bindings.
+- Human authorization and combined-Oracle approvals cannot be reconstructed from ancestry or equal trees.
+- A deferred checkpoint is not approval. Retain its exact eligibility and binding or perform the early human checkpoint.
+- Missing final hands-on inspection records require the human to repeat the inspection. Oracle stand-in cannot replace it.
+- Confirm operation results before retrying; never double-dispatch, double-merge, or double-remove.
+
+The local graph and coordination file are not reconstructible from Git alone. Preserve them together.
+Use the conditional sections below only when their specific legacy-record condition applies.
+
+## Repository-object migration
+
+Use this section only when upgrading older per-change storage to the current repo-level objects.
+Do not run migration during routine setup, every session restart, or ordinary lane recovery.
+
+The authoritative local files are `.agents/workflow/plan-graph.json` and `.agents/workflow/coordination.json`.
+Both use `schema_version: 2` and nest `changes → lanes → tasks`. Neither is committed.
+Retained per-change legacy plans remain readable until the shared local graph exists.
+The helper imports retained legacy ledgers on the first shared coordination write.
+Once a shared object exists, legacy files never replace its entries.
+
+1. Pause dispatches before migration.
+2. Back up both existing plans and coordination records together.
+3. Run `python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" migrate-repo` from the feature checkout.
+4. Inspect the imported change, lane, task, review, and dispatch records.
+5. Obtain current OpenSpec artifact passes for each affected change.
+6. Obtain a separate Oracle repo graph pass after every included change's artifact review passes.
+7. Obtain human approval of the local graph and affected OpenSpec artifacts.
+8. Commit only affected OpenSpec artifacts and the approval checkpoint, never either repo object.
+9. Renew affected lane reviews, plan-bound grants, release evidence, and human inspections.
+
+Migration retains source files, reports, worker IDs, and dispatch keys.
+It carries recorded approval bindings forward only when the exact legacy commit proves the same contract.
+Grant scope and consent remain unchanged; unverifiable bindings require renewed review or approval.
+Retries add missing entries without replacing newer shared records. Each file write is atomic.
+A graph write followed by a failed coordination write is recoverable by rerunning migration.
+Legacy graph-only plan verdicts do not count as OpenSpec artifact verdicts in the new two-stage flow.
+No migration command commits files or invents approvals.
+For rollback, restore matching source and runtime backups before using the older helper.
+Do not overwrite newer progress with an older backup without reconciliation.
+
+Legacy input paths are `openspec/changes/<change>/plan/graph-plan.json` and
+`.agents/workflow/<change>/coordination.json`. New work never creates them.
+Git retains historical OpenSpec artifacts and ticks, but cannot reconstruct a lost local graph or ledger.
+Lost local objects require a backup or renewed planning/review/approval—not inferred consent.
+
+## Finish records
+
+Use this section when resuming finish with an older record that lacks the current preparation binding.
+Normal changes to release inputs follow restaging in [finish.md](finish.md), without restarting completed phases.
 
 Existing finish records without a preparation artifact require `finish-record restage`.
 Restage reuses the stored classification; supply the new preparation receipt and its committed input
@@ -28,3 +104,14 @@ Block on missing/stale binding, unknown worker, unapproved changed plan, failed 
 unresolved Oracle escalation, or unmet human gate. Account for all workers/worktrees/sessions/temp resources before stopping.
 
 Prefer completion events; bound fallback polling/output. Reuse preflight only while mechanism/model/level/environment/evidence bindings match.
+
+## Retired review exceptions
+
+Use this section only when retained records contain the removed skipped-duty or ancestor-review exceptions.
+New workflows do not enter this branch.
+
+Required reviewers now follow lane risk and UI flags only.
+Old skipped-duty decisions and carried-forward ancestor verdicts cannot satisfy current review gates.
+Obtain fresh direct current-HEAD verdicts for affected active lanes.
+If a closed legacy lane cannot meet the new gates through normal commands, stop for a human-approved record repair.
+Never fabricate a pass, reopen completed tasks, or reset review history to bypass the gate.

@@ -15,6 +15,8 @@ Clarification never authorizes review-time edits, expands scope, hides correctio
 Resolve conflicting requirements before dependent edits.
 Read-only Oracle consultation answers one uncertainty; never resets rounds.
 
+Helper syntax lives in [helper-commands.md](helper-commands.md). Briefs select the relevant command and fill every placeholder.
+
 ## Set locations (no ad-hoc paths)
 
 Every handoff artifact has one home, under the coordinator store:
@@ -23,17 +25,29 @@ Every handoff artifact has one home, under the coordinator store:
 |---|---|
 | Capability map | `.agents/workflow/capability-map.md` |
 | Model selection | `.agents/workflow/model-selection.json` |
+| Local repository plan (gitignored) | `.agents/workflow/plan-graph.json` |
+| Repository coordination | `.agents/workflow/coordination.json` |
 | Filled brief | `.agents/workflow/<change>/briefs/<lane>-<role>-<task-or-round>.md` |
 | Lane live report | `.agents/workflow/<change>/reports/<lane>-report.md` |
 | Runner report | `.agents/workflow/<change>/reports/<lane>-runner-<task>.md` |
 | Review report | `.agents/workflow/<change>/reviews/<lane>-<role>-r<round>.md` |
-| Oracle plan review | `.agents/workflow/<change>/reviews/plan-<role>-r<round>.md` |
+| Artifact-review ledger | `.agents/workflow/<change>/plan-reviews.json` |
+| Graph-review ledger | `.agents/workflow/plan-graph-review.json` |
+| Oracle artifact review | `.agents/workflow/<change>/reviews/artifacts-oracle-r<round>.md` |
+| Oracle repo graph review | `.agents/workflow/reviews/plan-graph-oracle-r<round>.md` |
 | Evidence and logs | `.agents/workflow/<change>/evidence/<lane>/<revision>/` |
 
 The Coordinator writes the brief before dispatch and passes its absolute path, together with the
 capability map's absolute path. The worker writes the report at the named path, updating it after every
 commit and check. A later session must find every artifact by pattern, without asking the Coordinator.
 Missing directory: create it, do not relocate it.
+Every brief identifies the OpenSpec change, lane, and task or review round.
+The plan and coordination entries use `changes.<change>.lanes.<lane>.tasks.<task>`.
+Workers normally read the shared plan without editing it. Only a bounded Oracle planning correction may write it.
+Only the Coordinator writes coordination. During Oracle graph authorship, the Coordinator pauses graph mutations.
+Finish briefs replace lane/task identity with finish scope, change, integrated HEAD, and explicit owned paths.
+Use predictable `briefs/finish-<role>-<task>.md` and `reports/finish-<role>-<task>.md` paths.
+Preparation authors receive a separate worktree; read-only finish workers may use the feature checkout.
 
 ## Output
 
@@ -91,23 +105,22 @@ verdict. Its report is evidence input; it never satisfies a review duty.
 ## Review
 
 ```text
-Role: <code/test/UI/Oracle> | lane: <id> | mode: <initial/correction/impact>
+Role: <code-reviewer/test-reviewer/ui-reviewer/oracle> | lane: <id> | mode: <initial/correction/impact>
 Role source: <absolute path to the role file> | profile: <id or sha256>
 Capability map: <absolute path to capability-map.md> | sha256: <hash>
 UI reviewer briefs: evidence-ingest only — never launch/build/capture; judge supplied screenshots/manifests.
 Worktree: <absolute path> | review range: <base SHA>..<HEAD SHA>
 Sources: <role brief; rules; plan; relevant spec/design; task definitions>
 Remit: <assigned criterion IDs; risk/UI/screen flags; exclusions>
-Selected duties: <recorded review-decision modes for code/test/ui, plus any ancestor-reuse
-assessment the reviewer must verify; omit only when the standard gate applies>
+Required reviews: <roles selected by lane risk/UI flags; current-HEAD remit and checks>
 Evidence: <paths; revision; check results/provenance; independent checks to run>
 Prior findings: <none, or report path + IDs + closure checks>
 Deliver: <report path; PASS or MORE WORK; limitations>
 ```
 
-The review role ID is `code`, `test`, or `ui`. Ordinary lanes dispatch `code` for the combined code/test
-review; high-risk lanes dispatch separate `code` and `test` reviews. An explicitly selected separate test
-duty also uses `test`. Combined Oracle review is recorded with `role=code`.
+The review role ID is `code-reviewer`, `test-reviewer`, or `ui-reviewer`. Ordinary lanes dispatch `code-reviewer` for the combined code/test
+review; high-risk lanes dispatch separate `code-reviewer` and `test-reviewer` reviews.
+Combined Oracle review is recorded with `role=code-reviewer`.
 Correction/impact: include previous reviewed SHA, correction range, full lane range.
 Preserve full-lane access; investigate relevant dependencies only.
 Combined Oracle: whole-change target base, feature/lane base, code/test/complete-change implementation duties, provenance, candidate acceptance
@@ -140,6 +153,9 @@ Conflict or failure: <exact evidence; attempted approaches and results>
 Deliver: <decision and rationale; minimal correction; closure check; report path>
 ```
 
-Plan review: review template + proposal/design/spec/tasks/graph.
+OpenSpec artifact review: identify one change; supply proposal/design/spec/tasks, not the repo graph.
+Repo graph review: supply the whole local graph and every included change's current artifact verdict and sources.
+Run graph review only after every included change passes artifact review. Use separate fresh Oracle contexts and report paths.
+Implementation review: supply the selected change/lane contract digest alongside commit and evidence bindings.
 Consultation never authorizes edits or resets rounds.
 Explicitly authorized Oracle fix: implementation template; record `dispatch --access write`.
