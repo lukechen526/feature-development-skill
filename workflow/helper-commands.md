@@ -19,7 +19,8 @@ Use a command's `--help` for the complete parser flags.
 The repo-level `.agents/workflow/plan-graph.json` and `coordination.json` are local and gitignored.
 Artifact reviews use `.agents/workflow/<change>/plan-reviews.json`.
 Repo graph reviews use `.agents/workflow/plan-graph-review.json`.
-Neither runtime object nor any review ledger is committed.
+Plan approval uses `.agents/workflow/plan-approval.json`.
+No runtime object or review/approval record is committed.
 
 ## Command index
 
@@ -30,6 +31,7 @@ Neither runtime object nor any review ledger is committed.
 | `plan-graph <plan.json>` | read-only; `--format md` or `--format mermaid` |
 | `plan-dispatch …` | record an Oracle intent: `--scope change` for artifacts, then `--scope graph` for the repo graph |
 | `plan-review …` | record the corresponding scoped verdict; graph scope requires every included artifact PASS |
+| `plan-approve …` | record human approval of committed artifacts and the reviewed repo graph |
 | `dispatch [<lane>] <role> …` | record lane intent or `--scope finish` before worker starts |
 | `dispatch-done [<lane>] <role> …` | record lane or finish session/outcome |
 | `lane-open <lane>` | create/recover worktree/ref |
@@ -105,6 +107,17 @@ python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" plan-review   --scope graph --role 
 Every included change needs a current artifact `PASS` first. Launch a separate Oracle between intent and verdict commands.
 This scope covers the entire local graph; `--change` is refused. See [Oracle stage 2](plan.md#oracle-stage-2-the-repo-level-graph).
 
+## Plan approval
+
+```bash
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" plan-approve [--approver <label>]
+```
+
+Run after the human approves the artifacts and the current repo graph PASS, and after committing the OpenSpec artifacts.
+It records the approver, current HEAD, graph digest, and per-change artifact digests in
+`.agents/workflow/plan-approval.json`. It refuses uncommitted `openspec/changes` content or a missing/stale graph PASS.
+It records consent; it never grants approval. `status` shows whether the record is current, stale, or missing.
+
 ## Plan validation and rendering
 
 ```bash
@@ -156,7 +169,7 @@ python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
   [--evidence-revision <rev>] [--evidence <path>]
 ```
 
-Only `--commit` and `--report` are generally required. Screen lanes require current evidence for `PASS`.
+Only `--commit` and `--report` are generally required. UI lanes require current evidence for the `ui-reviewer` `PASS`.
 Only direct current-HEAD verdicts satisfy gates; earlier verdicts are history.
 The default evidence revision is `r<round>`. The same commit retains its round; a new commit advances it.
 An ordinary lane uses `code-reviewer` for implementation and test adequacy. High-risk lanes also need `test-reviewer`.
@@ -176,8 +189,10 @@ python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
   --change <change> human-defer <lane-id> \
   --commit <head-sha> --evidence-revision <rev> \
   --rationale "<bounded, reversible, low-risk; excluded sensitive effects>" \
-  --risk-assessment low [--evidence <path>]
+  --risk-assessment low --evidence <path>
 ```
+
+`--evidence` is required for a UI lane: the deferred human gate must bind current rendered evidence.
 
 ## oracle-stand-in
 

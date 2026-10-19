@@ -75,7 +75,8 @@ Finish includes post-PR follow-up. Human approval to open a PR never authorizes 
 
 - Committed `tasks.md` ticks prove task completion.
 - The local `.agents/workflow/plan-graph.json` defines the repo-level plan; recorded reviews bind its digests.
-- OpenSpec artifacts and task ticks remain committed; the graph and coordination file never are.
+- OpenSpec artifacts and task ticks remain committed; the graph, coordination file, and approval record never are.
+- The repo-level `plan-approval.json` record binds the committed artifact digests and the reviewed graph digest.
 - Feature-branch commits record lane integration.
 - Recorded reviews, human gates, and finish artifacts prove their own decisions.
 - Derived state, dashboards, chat history, and scratch files never prove completion or approval.
@@ -87,11 +88,12 @@ Finish includes post-PR follow-up. Human approval to open a PR never authorizes 
 - repo-level `capability-map.md` and `model-selection.json` (written once per repository and reused by
   every change; a different selection requires an explicit human-approved update);
 - repo-level `plan-graph.json` and `coordination.json` with `changes.<change>.lanes.<lane>.tasks.<task>`;
+- repo-level `plan-approval.json` naming the approver, HEAD, graph digest, and artifact digests;
 - repo-level `plan-graph-review.json` and `reviews/` for the separate graph review;
 - per-change `<change>/plan-reviews.json`, `briefs/`, `reviews/`, `reports/`, and `evidence/`.
 
-The graph and coordination file live together in this ignored store. Neither is committed.
-Both repository objects group tasks under lanes and lanes under changes.
+The graph, coordination file, and approval record live together in this ignored store. None is committed.
+The graph and coordination file group tasks under lanes and lanes under changes.
 Use `--change <change>` for change-specific commands when the graph contains multiple changes.
 One Coordinator owns the shared store across all changes. Only the Coordinator writes coordination.
 A bounded Oracle planning correction may temporarily own graph writes while the Coordinator pauses graph mutations.
@@ -130,8 +132,9 @@ Resume the owning phase at its first incomplete operation; never restart complet
    Record each Oracle artifact review with `plan-dispatch` / `plan-review --scope change`.
    After every included change passes, author and validate the local repo-level graph.
    Record a separate Oracle graph review with `plan-dispatch` / `plan-review --scope graph`.
-   Obtain human approval, commit only the OpenSpec artifacts, and record the approval checkpoint.
-   Never commit the graph or coordination file. NO implementation dispatch before the checkpoint.
+   Obtain human approval, commit only the OpenSpec artifacts, and record the approval with `plan-approve`.
+   Never commit the graph, coordination file, or approval record. NO implementation dispatch before that
+   committed and recorded state.
 3. **Step 3 — Lanes** ([workflow/lane.md](workflow/lane.md)):
    - dispatch one fresh implementer subagent per task;
    - implement, review, correct, and integrate lanes;
@@ -186,7 +189,7 @@ substitutes or consent.
 
 ## Non-negotiable gates
 
-- No implementation dispatch before the approved-plan checkpoint commit.
+- No implementation dispatch before the approved plan is committed and the approval is recorded.
 - Every required review must be independent and must bind the exact current lane `HEAD`.
 - The Coordinator never patches or approves its own implementation; reviewers never patch reviewed work;
   the Oracle never self-approves.

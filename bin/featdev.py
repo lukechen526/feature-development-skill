@@ -21,9 +21,9 @@ from typing import Any
 
 
 FIELD_TABLE = """Plan fields:
-  schema_version  2 for repository-level plan-graph.json
+  schema_version  3 for repository-level plan-graph.json
   changes         OpenSpec change id -> review_mode, lanes
-  lanes           per change: lane id -> risk, ui, screen, sensitive, depends_on, tasks
+  lanes           per change: lane id -> risk, ui, sensitive, depends_on, tasks
   tasks           per lane: task id -> deps (task IDs within the same change)
   review_mode     per change: optional 'standard' (default) or 'combined-single-lane'
 
@@ -92,8 +92,13 @@ def _change_plans(document: dict[str, Any]) -> dict[str, dict[str, Any]]:
             raise PlanError("shape: plan needs a non-empty changes object")
         return {change: document}
     changes = document.get("changes")
-    if document.get("schema_version") != 2 or not isinstance(changes, dict) or not changes:
-        raise PlanError("shape: repository plan requires schema_version 2 and a non-empty changes object")
+    if document.get("schema_version") == 2 and isinstance(changes, dict):
+        raise PlanError(
+            "shape: schema_version 2 is retired; convert each lane's ui/screen to one ui flag "
+            "(ui = ui or screen), remove screen, and set schema_version 3"
+        )
+    if document.get("schema_version") != 3 or not isinstance(changes, dict) or not changes:
+        raise PlanError("shape: repository plan requires schema_version 3 and a non-empty changes object")
     result = {}
     for change, node in changes.items():
         _safe_change(change)
@@ -115,18 +120,43 @@ def _change_plans(document: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return result
 
 
+def _upgrade_lane_flags(lane: dict[str, Any]) -> dict[str, Any]:
+    """Collapse the retired screen flag into ui; screen-only lanes become user-facing."""
+    value = {key: item for key, item in lane.items() if key != "screen"}
+    if "screen" in lane:
+        ui, screen = lane.get("ui", False), lane.get("screen")
+        if not isinstance(ui, bool) or not isinstance(screen, bool):
+            raise PlanError("shape: legacy lane ui/screen flags must be true or false before conversion")
+        value["ui"] = ui or screen
+    return value
+
+
+def _upgrade_document_v3(document: dict[str, Any]) -> dict[str, Any]:
+    """Convert a repository plan's ui/screen flags to the single v3 ui flag."""
+    if document.get("schema_version") != 2 or not isinstance(document.get("changes"), dict):
+        return document
+    for node in document["changes"].values():
+        if not isinstance(node, dict) or not isinstance(node.get("lanes"), dict):
+            continue
+        for lane_id, lane in node["lanes"].items():
+            if isinstance(lane, dict):
+                node["lanes"][lane_id] = _upgrade_lane_flags(lane)
+    document["schema_version"] = 3
+    return document
+
+
 def _repository_plan(plans: dict[str, dict[str, Any]]) -> dict[str, Any]:
     changes = {}
     for change, plan in plans.items():
         node = {key: value for key, value in plan.items() if key not in {"change", "schema_version", "tasks", "lanes"}}
         node["lanes"] = {
-            lane_id: {**lane, "tasks": {
+            lane_id: {**_upgrade_lane_flags(lane), "tasks": {
                 task_id: {key: value for key, value in task.items() if key != "lane"}
                 for task_id, task in plan["tasks"].items() if task["lane"] == lane_id
             }} for lane_id, lane in plan["lanes"].items()
         }
         changes[change] = node
-    return {"schema_version": 2, "changes": changes}
+    return {"schema_version": 3, "changes": changes}
 
 
 def _selected_plan(document: dict[str, Any], change: str) -> dict[str, Any]:
@@ -216,13 +246,18 @@ def migrate_repository(checkout: Path | None = None) -> Path:
     root = (checkout or Path.cwd()).resolve()
     _require_coordinator_cwd({}, "migrate-repo")
     path = root / _REPO_PLAN
-    existing = _load_json(path) if path.exists() else {}
+    existing = _upgrade_document_v3(_load_json(path)) if path.exists() else {}
     plans = _change_plans(existing) if existing else {}
     for legacy in sorted((root / "openspec" / "changes").glob("*/plan/graph-plan.json")):
         name = legacy.parent.parent.name
         if name not in plans:
-            validate_plan(legacy)
-            plans[name] = _load_json(legacy)
+            legacy_plan = _load_json(legacy)
+            lanes = legacy_plan.get("lanes")
+            if isinstance(lanes, dict):
+                for lane_id, lane in lanes.items():
+                    if isinstance(lane, dict):
+                        lanes[lane_id] = _upgrade_lane_flags(lane)
+            plans[name] = legacy_plan
     if not plans:
         raise PlanError("shape: no plans to migrate; author .agents/workflow/plan-graph.json first")
     document = {**existing, **_repository_plan(plans)}
@@ -289,10 +324,15 @@ def _check_shape(plan: dict[str, Any], plan_path: Path) -> None:
             raise PlanError(
                 f"shape: lane {lane_id!r} risk must be 'high' or 'ordinary'; change the lane risk"
             )
-        # The three gate-driving flags are required, not optional. A missing flag would be
+        if "screen" in lane:
+            raise PlanError(
+                f"shape: lane {lane_id!r} uses the retired screen flag; set ui to ui or screen "
+                "and remove screen (schema_version 3)"
+            )
+        # The gate-driving flags are required, not optional. A missing flag would be
         # coerced to false in the derived lane views, silently dropping the UI review and the
         # human checkpoint the plan flags exist to require.
-        for flag in ("ui", "screen", "sensitive"):
+        for flag in ("ui", "sensitive"):
             if not isinstance(lane.get(flag), bool):
                 raise PlanError(
                     f"shape: lane {lane_id!r} {flag} must be true or false; change the lane flag"
@@ -488,7 +528,7 @@ def render_markdown(plan: dict[str, Any]) -> str:
         members = [task_id for task_id, task in tasks.items() if task.get("lane") == lane_id]
         lines.append(
             f"- `{lane_id}` — risk: `{lane.get('risk', '')}`; ui: `{_bool(lane.get('ui'))}`; "
-            f"screen: `{_bool(lane.get('screen'))}`; depends_on: {_list(lane.get('depends_on', []))}"
+            f"sensitive: `{_bool(lane.get('sensitive'))}`; depends_on: {_list(lane.get('depends_on', []))}"
         )
         lines.append(f"  - tasks: {_list(members)}")
     lines.extend(["", "## Tasks", ""])
@@ -527,7 +567,7 @@ def render_mermaid(plan: dict[str, Any]) -> str:
         dependencies = ", ".join(str(item) for item in lane.get("depends_on", [])) or "none"
         label = (
             f"{lane_id} — risk: {lane.get('risk', '')}; ui: {_bool(lane.get('ui'))}; "
-            f"screen: {_bool(lane.get('screen'))}; depends_on: {dependencies}"
+            f"sensitive: {_bool(lane.get('sensitive'))}; depends_on: {dependencies}"
         )
         lines.append(f'  subgraph {lane_node}["{_mermaid_text(label)}"]')
         for task_id, task in tasks.items():
@@ -684,6 +724,7 @@ def _atomic_write_json(path: Path, value: object) -> None:
 
 _PLAN_LEDGER = "plan-reviews.json"
 _GRAPH_REVIEW_LEDGER = "plan-graph-review.json"
+_PLAN_APPROVAL = "plan-approval.json"
 
 
 def _plan_reviews_path(change: str | None, checkout: Path | None = None) -> Path:
@@ -971,6 +1012,67 @@ def plan_review(
     return _write_plan_ledger(change, checkout, ledger)
 
 
+def plan_approve(approver: str = "human") -> Path:
+    """Record the human's plan approval for the committed artifacts and reviewed graph."""
+    _require_coordinator_cwd({}, "plan-approve")
+    root, _, plan_path, plan_sha256, head = _plan_context(None, None, "graph")
+    ledger, _ = _load_plan_ledger(None, root)
+    reviews = [
+        item for item in ledger.get("reviews", [])
+        if isinstance(item, dict) and item.get("scope") == "graph" and item.get("verdict") == "PASS"
+    ]
+    latest = reviews[-1] if reviews else None
+    if not latest or latest.get("plan_sha256") != plan_sha256:
+        raise StateError(
+            "plan: a current repo graph PASS is required before recording approval; "
+            "run plan-review --scope graph first"
+        )
+    status = _state_git(root, "status", "--porcelain", "--untracked-files=all", "--", "openspec/changes")
+    if status.returncode:
+        raise StateError(f"plan: cannot inspect OpenSpec artifacts: {_one_line(status.stderr)}; repair the checkout")
+    if status.stdout.strip():
+        raise StateError("plan: commit the OpenSpec artifacts before recording approval")
+    document = _load_json(plan_path)
+    artifacts = _reviewed_change_artifacts(root, document)
+    label = approver.strip() if isinstance(approver, str) and approver.strip() else "human"
+    record = {
+        "schema_version": 1,
+        "scope": "repo",
+        "approver": label,
+        "approved_at": _utc_timestamp(),
+        "head": head,
+        "plan_sha256": plan_sha256,
+        "artifacts": artifacts,
+    }
+    path = workflow_dir(root) / _PLAN_APPROVAL
+    _atomic_write_json(path, record)
+    return path
+
+
+def _plan_approval_status(state: dict[str, Any]) -> dict[str, Any]:
+    checkout = state.get("feature_checkout")
+    if not isinstance(checkout, str) or not checkout:
+        return {"state": "unavailable"}
+    path = workflow_dir(Path(checkout)) / _PLAN_APPROVAL
+    if not path.is_file():
+        return {"state": "missing"}
+    try:
+        record = _load_json(path)
+    except (OSError, ValueError) as exc:
+        return {"state": "unreadable", "error": _one_line(exc)}
+    try:
+        current = _plan_context(None, None, "graph")[3]
+    except (OSError, PlanError, StateError, ValueError):
+        current = None
+    return {
+        "state": "current" if current and record.get("plan_sha256") == current else "stale",
+        "approver": record.get("approver"),
+        "approved_at": record.get("approved_at"),
+        "head": record.get("head"),
+        "plan_sha256": record.get("plan_sha256"),
+    }
+
+
 def _state_git(repository: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
@@ -1106,7 +1208,6 @@ def _derived_lane_views(
         lane_view["depends_on"] = list(lane.get("depends_on", []))
         lane_view["risk"] = lane.get("risk")
         lane_view["ui"] = bool(lane.get("ui"))
-        lane_view["screen"] = bool(lane.get("screen"))
         lane_view["sensitive"] = bool(lane.get("sensitive"))
         lane_view["tasks"] = members
         lane_view["checked_tasks"] = [task_id for task_id in members if task_id in checked_tasks]
@@ -2259,6 +2360,7 @@ def _inflight_task_status(
 def _status_view(state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
     view = json.loads(json.dumps(state))
     _annotate_review_view(view)
+    view["plan_approval"] = _plan_approval_status(view)
     view["ready_lanes"] = _ready_lanes(view, plan)
     view["readiness"] = _readiness_reasons(view, plan)
     change = str(view.get("change") or "")
@@ -2301,6 +2403,17 @@ def _status_text(view: dict[str, Any]) -> str:
         f"source: {view.get('source_sha', '')}",
         f"ready lanes: {', '.join(view.get('ready_lanes', [])) or 'none'}",
     ]
+    approval = view.get("plan_approval")
+    if isinstance(approval, dict):
+        if approval.get("state") == "missing":
+            lines.append("plan approval: missing (record it with plan-approve)")
+        elif approval.get("state") == "unreadable":
+            lines.append(f"plan approval: unreadable ({approval.get('error')})")
+        else:
+            lines.append(
+                f"plan approval: {approval.get('approver')} at {str(approval.get('head'))[:12]} "
+                f"({approval.get('state')})"
+            )
     if not view.get("dispatch_view_available", True):
         reason = view.get("dispatch_view_error") or "coordination data is unavailable"
         lines.append(f"open dispatch intents: unavailable ({_one_line(reason)})")
@@ -3105,8 +3218,7 @@ def human_defer(lane_id: str, commit: str, evidence_revision: str, rationale: st
     _reject_finished_lane(lane_id, lane)
     if _review_mode(plan) == "combined-single-lane":
         raise StateError("lane: combined review does not allow checkpoint deferral")
-    if (not (lane.get("ui") or lane.get("screen")) or lane.get("sensitive")
-            or lane.get("risk") == "high"):
+    if not lane.get("ui") or lane.get("sensitive") or lane.get("risk") == "high":
         raise StateError("lane: sensitive, high-risk, or non-UI lanes cannot defer the human checkpoint")
     if risk_assessment != "low" or not isinstance(rationale, str) or not rationale.strip():
         raise StateError("lane: deferral requires low-risk assessment and rationale for bounded, reversible impact and each excluded sensitive effect")
@@ -3116,8 +3228,8 @@ def human_defer(lane_id: str, commit: str, evidence_revision: str, rationale: st
     if prior is not None and (not isinstance(prior, dict) or prior.get("state") != "waiting"):
         raise StateError("lane: existing human decision cannot be replaced by deferral; resolve checkpoint with human")
     evidence_path = _review_binding_path(evidence)
-    if lane.get("screen") and not evidence_path:
-        raise StateError("lane: screen deferral requires current evidence; provide --evidence")
+    if lane.get("ui") and not evidence_path:
+        raise StateError("lane: ui deferral requires current evidence; provide --evidence")
     operation_lane = dict(lane)
     operation_lane.update(runtime)
     worktree, _ = _lane_runtime_for_operation(state, lane_id, operation_lane)
@@ -3145,7 +3257,7 @@ def human_defer(lane_id: str, commit: str, evidence_revision: str, rationale: st
 def _lane_requires_human_gate(lane: dict[str, Any]) -> bool:
     # A plan declaration, not an inferred state: `sensitive` marks a lane that touches
     # user-facing wording or content, safety, privacy, or other sensitive material.
-    return bool(lane.get("ui") or lane.get("screen") or lane.get("sensitive"))
+    return bool(lane.get("ui") or lane.get("sensitive"))
 
 
 def human_gate(
@@ -3188,7 +3300,7 @@ def human_gate(
             f"lane: human gate commit {reviewed_head} is not the lane HEAD {actual_head}; approve current HEAD"
         )
     evidence_path = _review_binding_path(evidence)
-    if lane.get("screen") and not evidence_path:
+    if lane.get("ui") and not evidence_path:
         raise StateError(f"lane: lane {lane_id!r} requires evidence for a human gate; provide --evidence")
     gates = coordination.setdefault("human_gates", {})
     if not isinstance(gates, dict):
@@ -3278,7 +3390,7 @@ def _validate_human_gate(
         raise StateError(f"lane: human gate for {lane_id!r} has a stale plan binding; obtain fresh approval")
     if gate.get("state") == "deferred-to-integrated" and allow_deferred:
         binding = gate.get("binding")
-        if (lane.get("sensitive") or lane.get("risk") == "high" or not (lane.get("ui") or lane.get("screen"))
+        if (lane.get("sensitive") or lane.get("risk") == "high" or not lane.get("ui")
                 or not isinstance(binding, dict) or binding.get("commit") != head
                 or not binding.get("evidence_revision") or not gate.get("rationale")
                 or gate.get("risk_assessment") != "low"
@@ -3287,12 +3399,12 @@ def _validate_human_gate(
                 or not {"safety", "privacy", "sharing", "data-integrity", "content-correctness"}.issubset(gate.get("excluded_effects", []))):
             raise StateError("lane: deferred checkpoint is ineligible or stale; obtain early human approval")
         evidence_path = binding.get("evidence_path")
-        if lane.get("screen") and not evidence_path:
-            raise StateError("lane: screen deferral has no current evidence; obtain fresh evidence")
+        if lane.get("ui") and not evidence_path:
+            raise StateError("lane: ui deferral has no current evidence; obtain fresh evidence")
         if evidence_path:
             if (not isinstance(evidence_path, str) or not Path(evidence_path).is_file()
                     or _path_sha256(Path(evidence_path)) != binding.get("evidence_sha256")):
-                raise StateError("lane: deferred screen evidence changed or missing; recapture before merge")
+                raise StateError("lane: deferred ui evidence changed or missing; recapture before merge")
         return
     if gate.get("state") != "approved":
         state_value = gate.get("state") or "missing"
@@ -3317,7 +3429,7 @@ def _validate_human_gate(
         _review_binding_path(evidence_path)
         if _path_sha256(Path(evidence_path)) != binding.get("evidence_sha256"):
             raise StateError(f"lane: human gate for {lane_id!r} has changed evidence; obtain fresh approval")
-    if lane.get("screen") and not evidence_path:
+    if lane.get("ui") and not evidence_path:
         raise StateError(f"lane: human gate for {lane_id!r} has no current evidence; obtain fresh approval")
     approved_by = gate.get("approved_by")
     if approved_by == "human":
@@ -3346,9 +3458,7 @@ def _validate_human_gate(
 def _human_gate_flag(lane: dict[str, Any]) -> str:
     if lane.get("sensitive"):
         return "sensitive"
-    if lane.get("ui"):
-        return "ui"
-    return "screen"
+    return "ui"
 
 
 def _human_gate_summary(
@@ -3660,8 +3770,8 @@ def lane_review(
         )
     report_path = _review_report(report)
     evidence_path = _review_binding_path(evidence)
-    if lane.get("screen") and verdict == "PASS" and not evidence_path:
-        raise StateError(f"lane: lane {lane_id!r} requires evidence for a PASS; provide --evidence")
+    if lane.get("ui") and role == "ui-reviewer" and verdict == "PASS" and not evidence_path:
+        raise StateError(f"lane: lane {lane_id!r} requires evidence for a UI PASS; provide --evidence")
     reviews = runtime.setdefault("reviews", [])
     if not isinstance(reviews, list):
         raise StateError("state: reviews are malformed; repair coordination data")
@@ -4281,10 +4391,10 @@ def _validate_lane_reviews(
         report = review.get("report")
         if not isinstance(report, str) or not Path(report).is_file() or Path(report).stat().st_size == 0:
             raise StateError(f"lane: review {role!r} report is missing or empty; re-review the lane")
-        if lane.get("screen"):
+        if lane.get("ui") and role == "ui-reviewer":
             evidence = binding.get("evidence_path")
             if not isinstance(evidence, str) or not Path(evidence).is_file() or Path(evidence).stat().st_size == 0:
-                raise StateError(f"lane: review {role!r} changed-screen evidence is missing; re-review with --evidence")
+                raise StateError(f"lane: review {role!r} UI evidence is missing; re-review with --evidence")
             if _path_sha256(Path(evidence)) != binding.get("evidence_sha256"):
                 raise StateError(f"lane: review {role!r} evidence changed; obtain a fresh current-HEAD review")
 
@@ -5288,7 +5398,7 @@ def _self_check() -> int:
         # Normal dispatches, cleanup, and release recording work without application-specific files.
         finish_repo = make_repository("finishcase", "finishcase", {
             "schema_version": 1, "change": "finishcase",
-            "lanes": {"one": {"risk": "ordinary", "ui": False, "screen": False,
+            "lanes": {"one": {"risk": "ordinary", "ui": False,
                                "sensitive": False, "depends_on": []}},
             "tasks": {"1.1": {"lane": "one", "deps": []},
                       "1.2": {"lane": "one", "deps": ["1.1"]}},
@@ -5433,7 +5543,7 @@ def _self_check() -> int:
         # Deferred UI: merge after selected duties, never consume authorization; PR
         # requires the declared human acceptances bound to the integrated HEAD.
         ui_plan = {"schema_version": 1, "change": "defercase", "lanes": {
-            "ui": {"risk": "ordinary", "ui": True, "screen": True, "sensitive": False, "depends_on": []}},
+            "ui": {"risk": "ordinary", "ui": True, "sensitive": False, "depends_on": []}},
             "tasks": {"1.1": {"lane": "ui", "deps": []}}}
         ui_repo = make_repository("defercase", "defercase", ui_plan, "- [ ] 1.1 UI\n")
         (ui_repo / ".gitignore").write_text(".agents/tmp/\n")
@@ -5488,27 +5598,27 @@ def _self_check() -> int:
         _write_coordination(ui_state, ui_coord, ui_plan)
         expect_refusal("--change", "defercase", "human-defer", "ui", "--commit", ui_head,
                        "--evidence-revision", "r1", "--risk-assessment", "low", "--rationale",
-                       defer_rationale, contains="screen deferral requires")
+                       defer_rationale, contains="ui deferral requires")
         assert invoke("--change", "defercase", "human-gate", "ui", "--state", "waiting",
                       "--commit", ui_head, "--evidence-revision", "r1", "--evidence", str(screen_evidence))[0] == 0
         human_defer("ui", ui_head, "r1", defer_rationale, "defercase", "low", str(screen_evidence))
         ui_coord = _load_coordination(ui_state, ui_plan)
         assert ui_coord["authorizations"]["unused"]["status"] == "active"
-        screen_lane = {"ui": True, "screen": True, "risk": "ordinary"}
+        screen_lane = {"ui": True, "risk": "ordinary"}
         _validate_human_gate("ui", screen_lane, ui_head, ui_coord, allow_deferred=True)
         no_screen_evidence = json.loads(json.dumps(ui_coord))
         no_screen_evidence["human_gates"]["ui"]["binding"].pop("evidence_path")
         try:
             _validate_human_gate("ui", screen_lane, ui_head, no_screen_evidence, allow_deferred=True)
         except StateError as exc:
-            assert "screen deferral has no current evidence" in str(exc)
+            assert "ui deferral has no current evidence" in str(exc)
         else:
             raise AssertionError("screen deferral without evidence accepted")
         screen_evidence.write_text("changed screen evidence")
         try:
             _validate_human_gate("ui", screen_lane, ui_head, ui_coord, allow_deferred=True)
         except StateError as exc:
-            assert "screen evidence changed" in str(exc)
+            assert "deferred ui evidence changed" in str(exc)
         else:
             raise AssertionError("changed screen evidence accepted")
         screen_evidence.write_text("current screen evidence")
@@ -5520,7 +5630,7 @@ def _self_check() -> int:
             else:
                 raise AssertionError("sensitive/high-risk deferral accepted")
         # High-risk internal tooling needs code/test agents, not a new human lane gate.
-        internal = {"risk": "high", "ui": False, "screen": False, "sensitive": False}
+        internal = {"risk": "high", "ui": False, "sensitive": False}
         _validate_human_gate("internal", internal, ui_head, ui_coord)
         assert _required_review_roles(internal) == ["code-reviewer", "test-reviewer"]
         stale_gate = json.loads(json.dumps(ui_coord))
@@ -5607,7 +5717,7 @@ def _self_check() -> int:
         check_plan = {
             "schema_version": 1,
             "change": "check",
-            "lanes": {"one": {"risk": "ordinary", "ui": False, "screen": False,
+            "lanes": {"one": {"risk": "ordinary", "ui": False,
                               "sensitive": False, "depends_on": []}},
             "tasks": {"1.1": {"lane": "one", "deps": []}},
         }
@@ -5684,7 +5794,7 @@ def _self_check() -> int:
         # Every gate-driving flag is required and must be a real boolean. A lane that omitted one
         # previously passed validation and then silently lost the review and human checkpoint it
         # drives, because the derived lane views coerce a missing flag to false.
-        for required_flag in ("ui", "screen", "sensitive"):
+        for required_flag in ("ui", "sensitive"):
             incomplete = json.loads(json.dumps(check_plan))
             del incomplete["lanes"]["one"][required_flag]
             plan_path.write_text(json.dumps(incomplete), encoding="utf-8")
@@ -5699,7 +5809,7 @@ def _self_check() -> int:
         # A lane that declares none of the gate-driving flags requires no human gate. The
         # flags themselves are mandatory in the plan, which the shape cases above pin down.
         assert not _lane_requires_human_gate(
-            {"risk": "ordinary", "ui": False, "screen": False, "sensitive": False}
+            {"risk": "ordinary", "ui": False, "sensitive": False}
         )
 
         # Derived state is rebuilt from committed artifacts, not a working-tree tick or a
@@ -5708,8 +5818,8 @@ def _self_check() -> int:
             "schema_version": 1,
             "change": "derived",
             "lanes": {
-                "root": {"risk": "ordinary", "ui": False, "screen": False, "sensitive": False, "depends_on": []},
-                "child": {"risk": "high", "ui": False, "screen": False, "sensitive": False, "depends_on": ["root"]},
+                "root": {"risk": "ordinary", "ui": False, "sensitive": False, "depends_on": []},
+                "child": {"risk": "high", "ui": False, "sensitive": False, "depends_on": ["root"]},
             },
             "tasks": {
                 "1.1": {"lane": "root", "deps": []},
@@ -5751,7 +5861,7 @@ def _self_check() -> int:
         assert "lane root: complete from committed ticks (coordination: created);" in complete_status
         os.chdir(root)
         derived_plan_path = derived_repository / "openspec" / "changes" / "derived" / "plan" / "graph-plan.json"
-        derived_plan["lanes"]["root"]["screen"] = True
+        derived_plan["lanes"]["root"]["ui"] = True
         derived_plan_path.write_text(json.dumps(derived_plan), encoding="utf-8")
         revised_head = commit(derived_repository, "revise plan")
         revised_state = state_derive("derived", checkout=derived_repository)
@@ -5782,8 +5892,8 @@ def _self_check() -> int:
             "schema_version": 1,
             "change": "mixed",
             "lanes": {
-                "prep": {"risk": "ordinary", "ui": False, "screen": False, "sensitive": False, "depends_on": []},
-                "work": {"risk": "ordinary", "ui": False, "screen": False, "sensitive": False, "depends_on": []},
+                "prep": {"risk": "ordinary", "ui": False, "sensitive": False, "depends_on": []},
+                "work": {"risk": "ordinary", "ui": False, "sensitive": False, "depends_on": []},
             },
             "tasks": {
                 "1.1": {"lane": "prep", "deps": []},
@@ -5826,7 +5936,7 @@ def _self_check() -> int:
             "schema_version": 1,
             "change": "visible",
             "lanes": {
-                "visible": {"risk": "ordinary", "ui": True, "screen": False, "sensitive": False, "depends_on": []},
+                "visible": {"risk": "ordinary", "ui": True, "sensitive": False, "depends_on": []},
             },
             "tasks": {"1.1": {"lane": "visible", "deps": []}},
         }
@@ -5853,41 +5963,45 @@ def _self_check() -> int:
         human_head = git(human_worktree, "rev-parse", "HEAD")
         human_code_report = root / "human-code-review.md"
         human_code_report.write_text("code review\n", encoding="utf-8")
-        lane_review("visible", "code-reviewer", "PASS", human_head, human_code_report, "human-r1", change="visible")
+        human_evidence = root / "human-evidence.txt"
+        human_evidence.write_text("rendered ui evidence\n", encoding="utf-8")
+        lane_review("visible", "code-reviewer", "PASS", human_head, human_code_report, "human-r1",
+                    human_evidence, change="visible")
         human_ui_report = root / "human-ui-review.md"
         human_ui_report.write_text("ui review\n", encoding="utf-8")
-        lane_review("visible", "ui-reviewer", "PASS", human_head, human_ui_report, "human-r1", change="visible")
+        lane_review("visible", "ui-reviewer", "PASS", human_head, human_ui_report, "human-r1",
+                    human_evidence, change="visible")
         expect_refusal("lane-merge", "visible", "--change", "visible", contains="human gate")
         human_result, _, human_error = invoke(
             "human-gate", "visible", "--state", "approved", "--commit", human_head,
-            "--evidence-revision", "human-r1", "--change", "visible",
+            "--evidence-revision", "human-r1", "--evidence", str(human_evidence), "--change", "visible",
         )
         assert human_result == 0, human_error
         human_coordination = read_fixture(human_coordination_path)
         human_coordination["human_gates"]["visible"]["state"] = "revoked"
         write_fixture(human_coordination_path, human_coordination)
         expect_refusal("lane-merge", "visible", "--change", "visible", contains="human gate")
-        human_gate("visible", "approved", human_head, "human-r1", change="visible")
+        human_gate("visible", "approved", human_head, "human-r1", human_evidence, change="visible")
         human_coordination = read_fixture(human_coordination_path)
         human_coordination["human_gates"]["visible"]["revoked"] = True
         write_fixture(human_coordination_path, human_coordination)
         expect_refusal("lane-merge", "visible", "--change", "visible", contains="human gate")
-        human_gate("visible", "approved", human_head, "human-r1", change="visible")
+        human_gate("visible", "approved", human_head, "human-r1", human_evidence, change="visible")
         human_coordination = read_fixture(human_coordination_path)
         human_coordination["human_gates"]["visible"]["stale"] = True
         write_fixture(human_coordination_path, human_coordination)
         expect_refusal("lane-merge", "visible", "--change", "visible", contains="human gate")
-        human_gate("visible", "approved", human_head, "human-r1", change="visible")
+        human_gate("visible", "approved", human_head, "human-r1", human_evidence, change="visible")
         human_coordination = read_fixture(human_coordination_path)
         human_coordination["human_gates"]["visible"]["binding"]["commit"] = "0" * 40
         write_fixture(human_coordination_path, human_coordination)
         expect_refusal("lane-merge", "visible", "--change", "visible", contains="human gate")
-        human_gate("visible", "approved", human_head, "human-r1", change="visible")
+        human_gate("visible", "approved", human_head, "human-r1", human_evidence, change="visible")
         human_coordination = read_fixture(human_coordination_path)
         del human_coordination["human_gates"]["visible"]["binding"]
         write_fixture(human_coordination_path, human_coordination)
         expect_refusal("lane-merge", "visible", "--change", "visible", contains="human gate")
-        human_gate("visible", "approved", human_head, "human-r1", change="visible")
+        human_gate("visible", "approved", human_head, "human-r1", human_evidence, change="visible")
         human_coordination = read_fixture(human_coordination_path)
         human_coordination["human_gates"]["visible"]["authorization_id"] = "grant"
         write_fixture(human_coordination_path, human_coordination)
@@ -5897,7 +6011,7 @@ def _self_check() -> int:
         expect_refusal("lane-merge", "visible", "--change", "visible", contains="human gate")
         human_coordination["human_gates"] = {}
         write_fixture(human_coordination_path, human_coordination)
-        human_gate("visible", "approved", human_head, "human-r1", change="visible")
+        human_gate("visible", "approved", human_head, "human-r1", human_evidence, change="visible")
         lane_merge("visible", "visible")
         lane_close("visible", "visible")
         human_coordination_path.write_text("{bad json", encoding="utf-8")
@@ -5919,9 +6033,9 @@ def _self_check() -> int:
             "schema_version": 1,
             "change": "sensitive",
             "lanes": {
-                "safety": {"risk": "ordinary", "ui": False, "screen": False,
+                "safety": {"risk": "ordinary", "ui": False,
                            "sensitive": True, "depends_on": []},
-                "screening": {"risk": "ordinary", "ui": False, "screen": True, "sensitive": False, "depends_on": []},
+                "screening": {"risk": "ordinary", "ui": True, "sensitive": False, "depends_on": []},
             },
             "tasks": {"1.1": {"lane": "safety", "deps": []},
                       "1.2": {"lane": "screening", "deps": []}},
@@ -5976,13 +6090,19 @@ def _self_check() -> int:
             "screening", "code-reviewer", "PASS", screening_head, screening_report, "sensitive-r1",
             screening_evidence, change="sensitive",
         )
+        screening_ui_report = root / "screening-ui-review.md"
+        screening_ui_report.write_text("ui review\n", encoding="utf-8")
+        lane_review(
+            "screening", "ui-reviewer", "PASS", screening_head, screening_ui_report, "sensitive-r1",
+            screening_evidence, change="sensitive",
+        )
         # Every refusal branch must render the same answer as the merge validator. The expected
         # text comes from enforcement, never the summary that renders it, so a false approval
         # cannot pass simply because this fixture happens not to sample its invalid gate state.
         sensitive_state = read_fixture(state_derive("sensitive", checkout=sensitive_repository))
         sensitive_lanes = {
             "safety": {"flag": "sensitive", "head": sensitive_head, "evidence": None},
-            "screening": {"flag": "screen", "head": screening_head, "evidence": screening_evidence},
+            "screening": {"flag": "ui", "head": screening_head, "evidence": screening_evidence},
         }
 
         def reset_sensitive_gate(lane_id: str) -> None:
@@ -6063,7 +6183,7 @@ def _self_check() -> int:
         refresh_plan = {
             "schema_version": 1,
             "change": "refresh",
-            "lanes": {"only": {"risk": "ordinary", "ui": False, "screen": False, "sensitive": False, "depends_on": []}},
+            "lanes": {"only": {"risk": "ordinary", "ui": False, "sensitive": False, "depends_on": []}},
             "tasks": {"1.1": {"lane": "only", "deps": []}},
         }
         refresh_repository = make_repository(
@@ -6111,9 +6231,9 @@ def _self_check() -> int:
             "schema_version": 1,
             "change": "flow",
             "lanes": {
-                "a": {"risk": "ordinary", "ui": False, "screen": False, "sensitive": False, "depends_on": []},
-                "b": {"risk": "ordinary", "ui": False, "screen": False, "sensitive": False, "depends_on": ["a"]},
-                "c": {"risk": "ordinary", "ui": False, "screen": False, "sensitive": False, "depends_on": ["b"]},
+                "a": {"risk": "ordinary", "ui": False, "sensitive": False, "depends_on": []},
+                "b": {"risk": "ordinary", "ui": False, "sensitive": False, "depends_on": ["a"]},
+                "c": {"risk": "ordinary", "ui": False, "sensitive": False, "depends_on": ["b"]},
             },
             "tasks": {
                 "1.1": {"lane": "a", "deps": []},
@@ -6440,8 +6560,8 @@ def _self_check() -> int:
             "schema_version": 1,
             "change": "parallel",
             "lanes": {
-                "a": {"risk": "ordinary", "ui": False, "screen": False, "sensitive": False, "depends_on": []},
-                "b": {"risk": "ordinary", "ui": False, "screen": False, "sensitive": False, "depends_on": []},
+                "a": {"risk": "ordinary", "ui": False, "sensitive": False, "depends_on": []},
+                "b": {"risk": "ordinary", "ui": False, "sensitive": False, "depends_on": []},
             },
             "tasks": {
                 "1.1": {"lane": "a", "deps": []},
@@ -6489,7 +6609,7 @@ def _self_check() -> int:
             "schema_version": 1,
             "change": "contract",
             "lanes": {
-                "only": {"risk": "ordinary", "ui": False, "screen": False,
+                "only": {"risk": "ordinary", "ui": False,
                          "sensitive": False, "depends_on": []},
             },
             "tasks": {"1.1": {"lane": "only", "deps": []}},
@@ -6562,7 +6682,7 @@ def _self_check() -> int:
             "schema_version": 1,
             "change": "amendment",
             "lanes": {
-                lane_id: {"risk": "ordinary", "ui": False, "screen": False,
+                lane_id: {"risk": "ordinary", "ui": False,
                           "sensitive": False, "depends_on": []}
                 for lane_id in ("prior", "only", "foreign")
             },
@@ -6702,9 +6822,9 @@ def _self_check() -> int:
         recovery_plan = {
             "schema_version": 1,
             "change": "recovery",
-            "lanes": {"only": {"risk": "ordinary", "ui": False, "screen": False,
+            "lanes": {"only": {"risk": "ordinary", "ui": False,
                                "sensitive": False, "depends_on": []},
-                      "gated": {"risk": "ordinary", "ui": False, "screen": False,
+                      "gated": {"risk": "ordinary", "ui": False,
                                 "sensitive": True, "depends_on": []}},
             "tasks": {"1.1": {"lane": "only", "deps": []},
                       "1.2": {"lane": "gated", "deps": []}},
@@ -6831,9 +6951,9 @@ def _self_check() -> int:
             "schema_version": 1,
             "change": "grant",
             "lanes": {
-                "alpha": {"risk": "ordinary", "ui": False, "screen": False,
+                "alpha": {"risk": "ordinary", "ui": False,
                           "sensitive": True, "depends_on": []},
-                "beta": {"risk": "ordinary", "ui": False, "screen": False,
+                "beta": {"risk": "ordinary", "ui": False,
                          "sensitive": True, "depends_on": []},
             },
             "tasks": {"1.1": {"lane": "alpha", "deps": []}, "1.2": {"lane": "beta", "deps": []}},
@@ -7122,7 +7242,7 @@ def _self_check() -> int:
             "change": "combined",
             "review_mode": "combined-single-lane",
             "lanes": {
-                "only": {"risk": "ordinary", "ui": False, "screen": False,
+                "only": {"risk": "ordinary", "ui": False,
                           "sensitive": False, "depends_on": []},
             },
             "tasks": {"1.1": {"lane": "only", "deps": []}},
@@ -7634,7 +7754,7 @@ def _self_check() -> int:
             "change": "combined-screen",
             "review_mode": "combined-single-lane",
             "lanes": {
-                "only": {"risk": "ordinary", "ui": True, "screen": True,
+                "only": {"risk": "ordinary", "ui": True,
                           "sensitive": True, "depends_on": []},
             },
             "tasks": {"1.1": {"lane": "only", "deps": []}},
@@ -7777,7 +7897,7 @@ def _self_check() -> int:
         plan_payload = {
             "schema_version": 1,
             "change": "planreview",
-            "lanes": {"one": {"risk": "ordinary", "ui": False, "screen": False,
+            "lanes": {"one": {"risk": "ordinary", "ui": False,
                                "sensitive": False, "depends_on": []}},
             "tasks": {"1.1": {"lane": "one", "deps": []}},
         }
@@ -7917,6 +8037,11 @@ def _parser() -> argparse.ArgumentParser:
     plan_reviewed.add_argument("--plan", type=Path, metavar="<plan.json>")
     _add_change_option(plan_reviewed)
 
+    approve = commands.add_parser(
+        "plan-approve", help="record human approval of committed OpenSpec artifacts and the reviewed repo graph"
+    )
+    approve.add_argument("--approver", default="human", metavar="<approver>", help="approver label; defaults to human")
+
     send = commands.add_parser("dispatch", help="record a temporary worker dispatch intent")
     send.add_argument("lane", nargs="?", metavar="<lane>")
     send.add_argument("--scope", choices=("lane", "finish"), default="lane")
@@ -8034,7 +8159,7 @@ def _parser() -> argparse.ArgumentParser:
     defer.add_argument("--evidence-revision", required=True)
     defer.add_argument("--rationale", required=True, help="bounded/reversible risk and excluded sensitive effects")
     defer.add_argument("--risk-assessment", required=True, choices=("low", "high", "uncertain"))
-    defer.add_argument("--evidence", help="required for screen lanes; current changed-screen receipt")
+    defer.add_argument("--evidence", help="required for UI lanes; current rendered-UI evidence")
     _add_change_option(defer)
 
     merged = commands.add_parser("lane-merge", help="merge a reviewed lane")
@@ -8128,6 +8253,10 @@ def main(argv: list[str] | None = None) -> int:
                 selected_change, args.plan, args.scope,
             )
             print(f"plan-review: recorded {args.role}={args.verdict} ({path})")
+            return 0
+        if args.command == "plan-approve":
+            path = plan_approve(args.approver)
+            print(f"plan-approve: recorded ({path})")
             return 0
         if args.command in {"dispatch", "dispatch-done"}:
             if (args.scope == "lane") != (args.lane is not None):

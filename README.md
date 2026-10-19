@@ -75,13 +75,14 @@ No helper command opens or merges a PR.
 | `.agents/workflow/coordination.json` in the consuming repository | Shared runtime records: changes → lanes → tasks |
 | `.agents/workflow/<change>/` in the consuming repository | OpenSpec artifact-review ledger, briefs, reports, and evidence |
 | `.agents/workflow/plan-graph-review.json` in the consuming repository | Separate repository graph-review ledger |
+| `.agents/workflow/plan-approval.json` in the consuming repository | Human plan-approval record: approver, HEAD, graph and artifact digests |
 | `.agents/workflow/` in the consuming repository | Repo-level capability map and model choices |
 
 Treat the installed skill as read-only.
 Run workflow commands from the consuming feature checkout, except worker commands assigned to a lane worktree.
 The helper locally excludes `.agents/workflow/` from Git when it creates records.
-Keep the graph and coordination file together in the same checkout for recovery.
-Neither is committed; back up both outside Git.
+Keep the graph, coordination file, and approval record together in the same checkout for recovery.
+None is committed; back them up outside Git.
 Planning reviews each change's OpenSpec artifacts first, then the whole repository graph.
 One Coordinator writes the shared coordination file across all changes.
 Use `--change <change>` for change-specific commands when the graph contains multiple changes.

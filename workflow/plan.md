@@ -8,8 +8,9 @@ The Coordinator owns planning. No implementation begins before both Oracle revie
 - Archived changes retain their identity in the local graph. Approved corrective work may amend their archived artifacts.
 - The repo-level graph is `.agents/workflow/plan-graph.json`.
 - The repo-level runtime store is `.agents/workflow/coordination.json`.
-- Both repo-level objects are local and gitignored. Neither is a committed artifact.
-- Both group `changes → lanes → tasks`. The Coordinator preserves unrelated entries during updates.
+- The plan-approval record is `.agents/workflow/plan-approval.json`.
+- These repo-level objects are local and gitignored. None is a committed artifact.
+- The graph and coordination file group `changes → lanes → tasks`; the Coordinator preserves unrelated entries during updates.
 - Only the Coordinator writes coordination. Oracle may temporarily own bounded graph corrections under the exception below.
 
 ## Required order
@@ -22,12 +23,12 @@ The Coordinator owns planning. No implementation begins before both Oracle revie
 6. Obtain a separate independent Oracle verdict for the whole repo-level graph.
 7. Obtain the human's explicit approval of the artifacts and graph.
 8. Commit only the approved OpenSpec artifacts.
-9. Commit an approval checkpoint naming the approver and reviewed graph digest.
-10. Start implementation from that checkpoint.
+9. Record the human approval with `plan-approve`.
+10. Start implementation from that committed and recorded state.
 
 OpenSpec edits remain uncommitted during both review stages. No intermediate artifact commit occurs between Oracle correction cycles.
-The graph and coordination file remain gitignored throughout; approval never changes their storage policy.
-A graph-only approval checkpoint can use an empty Git commit. It never includes either runtime file.
+The graph, coordination file, and approval record remain gitignored throughout; approval never changes their storage policy.
+The approval record is not a Git object; it binds the committed artifact digests and the reviewed graph digest.
 
 ## Discover and author change artifacts
 
@@ -65,7 +66,7 @@ Each change contains one or more lanes. Each lane contains one or more tasks.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "changes": {
     "example-change": {
       "review_mode": "standard",
@@ -73,7 +74,6 @@ Each change contains one or more lanes. Each lane contains one or more tasks.
         "store": {
           "risk": "high",
           "ui": false,
-          "screen": false,
           "sensitive": false,
           "depends_on": [],
           "tasks": {
@@ -81,10 +81,9 @@ Each change contains one or more lanes. Each lane contains one or more tasks.
             "1.2": {"deps": ["1.1"]}
           }
         },
-        "screen": {
+        "ui": {
           "risk": "ordinary",
           "ui": true,
-          "screen": true,
           "sensitive": false,
           "depends_on": ["store"],
           "tasks": {
@@ -99,13 +98,12 @@ Each change contains one or more lanes. Each lane contains one or more tasks.
 
 | Field | Required | Rule |
 |---|---|---|
-| `schema_version` | yes | `2` |
+| `schema_version` | yes | `3` |
 | `changes` | yes | non-empty object keyed by OpenSpec change directory name |
 | `changes.<change>.review_mode` | no | default `standard`; eligible `combined-single-lane` |
 | `changes.<change>.lanes` | yes | non-empty lane-id object |
 | `lanes.<lane>.risk` | yes | `ordinary` or `high` |
-| `lanes.<lane>.ui` | yes | boolean; user-facing appearance/interaction |
-| `lanes.<lane>.screen` | yes | boolean; rendered-screen evidence needed |
+| `lanes.<lane>.ui` | yes | boolean; user-facing appearance/interaction, including rendered evidence and human review |
 | `lanes.<lane>.sensitive` | yes | boolean; content correctness, safety, privacy, other sensitive content |
 | `lanes.<lane>.depends_on` | no | lane IDs in the same change; default none |
 | `lanes.<lane>.tasks` | yes | non-empty task-id object; nesting defines ownership |
@@ -115,16 +113,16 @@ Lane fields are relative to `changes.<change>`.
 Task IDs are unique across lanes within a change and match that change's top-level `tasks.md` IDs exactly.
 Different changes can reuse lane IDs and task IDs. Dependencies do not cross change boundaries.
 Missing gate flags and empty change/lane/task collections are refused.
+`schema_version: 2` is retired: convert each lane with `ui = ui or screen`, remove `screen`, and set `schema_version: 3`.
 Roughly 2–4 tasks per lane is guidance, not a validation rule.
 
 Declared flags drive gates:
 - `risk: high` requires separate `code-reviewer` and `test-reviewer` verdicts; ordinary lanes combine those duties.
-- `ui: true` requires `ui-reviewer` inspection of supplied rendered evidence.
-- `screen: true` requires current screen evidence, but not a separate UI verdict by itself.
-- Any `ui`, `screen`, or `sensitive` flag requires a human checkpoint, subject to the documented deferral rules.
+- `ui: true` requires `ui-reviewer` inspection of supplied rendered evidence, a human checkpoint, and current evidence for both.
+- `sensitive: true` requires a human checkpoint, subject to the documented deferral rules.
 
 `combined-single-lane` requires exactly one ordinary-risk lane within the selected change.
-It retains independent Oracle implementation review, UI/human gates, and exact candidate/evidence bindings.
+It retains independent Oracle implementation review, the UI review and human gate, and exact candidate/evidence bindings.
 It does not replace either planning review stage or the final release gates.
 
 ### Structural validation
@@ -175,12 +173,14 @@ The author cannot approve its own correction. See [planning correction commands]
 A stale intent requires a fresh unique `--key`; never reuse a dispatch ID for different inputs.
 
 After both stages pass, obtain explicit human approval of the artifacts and local graph.
-Commit the OpenSpec artifacts first, then the approval checkpoint naming the approver and graph-review digest.
-Never stage `plan-graph.json`, `coordination.json`, or their review ledgers.
-The helper never grants human approval or commits these files.
+Commit the OpenSpec artifacts first, then record the approval with `plan-approve`.
+The record names the approver, current HEAD, graph digest, and per-change artifact digests.
+It refuses uncommitted `openspec/changes` content or a missing/stale graph PASS.
+Never stage `plan-graph.json`, `coordination.json`, or their review/approval records.
+The helper records the decision; it never grants human approval or commits these files.
 
-Plan amendments require affected artifact review, then repo graph review, then human approval before renewed implementation.
+Plan amendments require affected artifact review, then repo graph review, then human approval recorded with `plan-approve` before renewed implementation.
 Lane review and human-gate bindings include the lane contract digest; material lane edits require fresh verdicts.
 Unrelated changes or lanes do not invalidate an unchanged ordinary lane's review binding.
 Combined Oracle approvals and plan-bound grants retain their exact selected-change bindings.
-Back up the graph and coordination file together; Git cannot reconstruct either local object.
+Back up the graph, coordination file, and approval record together; Git cannot reconstruct these local objects.

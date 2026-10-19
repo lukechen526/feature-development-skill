@@ -100,7 +100,7 @@ Only hand off for human merge after the archival commit's required checks and bo
 Amend the archived change when later PR findings require corrective implementation.
 Preserve its existing completed tasks, closed lanes, history, and archive identity.
 The Coordinator adds new corrective tasks and lanes in the archived artifacts and local graph.
-Renew affected artifact review, graph review, and human plan approval before dispatching corrective implementation.
+Renew affected artifact review, graph review, and human plan approval with `plan-approve` before dispatching corrective implementation.
 Workers edit the archived `tasks.md`; the helper validates the same task ownership and current-HEAD gates there.
 After integration, refresh finish records and human inspections for the updated HEAD.
 Sync only the new approved specification changes into the baseline using the repository's OpenSpec procedure.
@@ -166,7 +166,7 @@ Repository guides define the release classification, preparation commands, check
    The version is descriptive; repository tooling validates it.
    Add `--check <id>` for every selected release check so `pr-check` can detect an omitted or extra check.
    Add `--inspection <checkpoint-id>` for each required direct human inspection.
-   A deferred UI checkpoint requires at least one declared integrated inspection.
+   A deferred `ui` checkpoint requires at least one declared integrated inspection.
 
 6. Run the selected release checks on committed integrated HEAD.
 7. Record each result with `finish-record capture --check <id> --artifact <receipt> --input <path> ...`.

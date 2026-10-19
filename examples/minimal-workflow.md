@@ -71,14 +71,13 @@ The graph is local and ignored, just like coordination.
 mkdir -p "$(dirname "$PLAN")"
 cat > "$PLAN" <<'JSON'
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "changes": {
     "hello-message": {
       "lanes": {
         "message": {
           "risk": "ordinary",
           "ui": false,
-          "screen": false,
           "sensitive": false,
           "depends_on": [],
           "tasks": {
@@ -110,16 +109,20 @@ The artifact ledger is `$STORE/plan-reviews.json`.
 The graph ledger is `.agents/workflow/plan-graph-review.json`.
 Neither verdict substitutes for the other or grants human approval.
 
-CAUTION: The following commits record approval; they do not obtain it.
+CAUTION: The following commands record approval; they do not obtain it.
 Obtain explicit human approval of the OpenSpec artifacts and local graph before running them.
-Never stage either repo-level runtime object.
+Commit the artifacts first, then record the approval in the coordinator store.
+Never stage a repo-level runtime object.
 
 ```bash
-GRAPH_DIGEST="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["plan_sha256"])'   "$FEATURE_CHECKOUT/.agents/workflow/plan-graph-review.json")"
 git add "openspec/changes/$CHANGE"
 git commit -m "docs: add approved greeting artifacts"
-git commit --allow-empty -m "planning checkpoint approved by human; graph digest $GRAPH_DIGEST"
+python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" plan-approve --approver human
 ```
+
+`plan-approve` writes `.agents/workflow/plan-approval.json` with the approver, current HEAD,
+graph digest, and per-change artifact digests. It refuses uncommitted artifact changes or a
+missing/stale graph `PASS`.
 
 ## 3. Dispatch the implementer
 
@@ -203,7 +206,7 @@ python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" sync
 
 For `MORE WORK`, record that verdict instead of merging.
 Follow [lane correction and escalation](../workflow/lane.md).
-This lane has no UI, screen, or sensitive flag, so no per-lane human checkpoint is required.
+This lane has no UI or sensitive flag, so no per-lane human checkpoint is required.
 
 ## 5. Finish on the feature branch
 
@@ -272,6 +275,7 @@ Recheck the archival commit on the PR. The human retains the later PR merge deci
 | `.agents/workflow/model-selection.json` | Human-approved repo-level role profiles |
 | `.agents/workflow/hello-message/plan-reviews.json` | Current Oracle verdict for OpenSpec artifacts only |
 | `.agents/workflow/plan-graph-review.json` | Separate Oracle verdict for the whole repo graph |
+| `.agents/workflow/plan-approval.json` | Human plan approval bound to committed artifacts and the reviewed graph |
 | `.agents/workflow/plan-graph.json` | Local repo-level change/lane/task graph; never committed |
 | `.agents/workflow/coordination.json` | Completed dispatches, reviews, merge, finish, and lane tasks under `changes.hello-message` |
 | `openspec/changes/hello-message/tasks.md` | Task `1.1` committed and checked on the feature branch |

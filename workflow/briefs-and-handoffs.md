@@ -111,7 +111,7 @@ Capability map: <absolute path to capability-map.md> | sha256: <hash>
 UI reviewer briefs: evidence-ingest only — never launch/build/capture; judge supplied screenshots/manifests.
 Worktree: <absolute path> | review range: <base SHA>..<HEAD SHA>
 Sources: <role brief; rules; plan; relevant spec/design; task definitions>
-Remit: <assigned criterion IDs; risk/UI/screen flags; exclusions>
+Remit: <assigned criterion IDs; risk/UI/sensitive flags; exclusions>
 Required reviews: <roles selected by lane risk/UI flags; current-HEAD remit and checks>
 Evidence: <paths; revision; check results/provenance; independent checks to run>
 Prior findings: <none, or report path + IDs + closure checks>

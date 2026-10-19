@@ -38,9 +38,9 @@ class RepositoryObjectsTest(unittest.TestCase):
         self.git("config", "user.name", "Test")
         self.git("config", "user.email", "test@example.test")
         f._ensure_workflow_ignored(self.repo)
-        lane = {"risk": "ordinary", "ui": False, "screen": False, "sensitive": False,
+        lane = {"risk": "ordinary", "ui": False, "sensitive": False,
                 "depends_on": [], "tasks": {"1.1": {"deps": []}}}
-        self.document = {"schema_version": 2, "changes": {
+        self.document = {"schema_version": 3, "changes": {
             name: {"lanes": {"work": copy.deepcopy(lane)}} for name in ("alpha", "beta")
         }}
         self.plan_path = self.repo / ".agents/workflow/plan-graph.json"
@@ -256,28 +256,105 @@ class RepositoryObjectsTest(unittest.TestCase):
         self.assertEqual([row["round"] for row in ledger["reviews"]], [1, 2, 3, 1])
         self.assertEqual(next(row for row in ledger["dispatches"] if row["key"] == "author")["result"], "corrected")
 
-    def test_replaced_screen_receipt_requires_review_and_human_renewal(self):
-        self.document["changes"]["alpha"]["lanes"]["work"]["screen"] = True
+    def test_replaced_ui_receipt_requires_review_and_human_renewal(self):
+        self.document["changes"]["alpha"]["lanes"]["work"]["ui"] = True
         self.write(self.plan_path, self.document)
         f.lane_open("work", "alpha")
         worktree = Path(self.read()["changes"]["alpha"]["lanes"]["work"]["worktree"])
         self.mark_complete(worktree, "alpha", "1.1")
-        head = self.commit(worktree, "screen fixture")
-        evidence = self.repo / ".agents/workflow/alpha/evidence/screen.md"
+        head = self.commit(worktree, "ui fixture")
+        evidence = self.repo / ".agents/workflow/alpha/evidence/ui.md"
         evidence.parent.mkdir(parents=True)
-        evidence.write_text("Original screen evidence\n")
+        evidence.write_text("Original UI evidence\n")
         report = evidence.with_name("review.md")
         report.write_text("PASS\n")
         f.lane_review("work", "code-reviewer", "PASS", head, report, evidence=evidence, change="alpha")
+        f.lane_review("work", "ui-reviewer", "PASS", head, report, evidence=evidence, change="alpha")
         f.human_gate("work", "approved", head, "r1", evidence=evidence, change="alpha")
-        evidence.write_text("Regenerated screen evidence at the same path\n")
+        evidence.write_text("Regenerated UI evidence at the same path\n")
         with self.assertRaisesRegex(f.StateError, "evidence changed"):
             f.lane_merge("work", "alpha")
         f.lane_review("work", "code-reviewer", "PASS", head, report, evidence=evidence, change="alpha")
+        f.lane_review("work", "ui-reviewer", "PASS", head, report, evidence=evidence, change="alpha")
         with self.assertRaisesRegex(f.StateError, "changed evidence"):
             f.lane_merge("work", "alpha")
         f.human_gate("work", "approved", head, "r1", evidence=evidence, change="alpha")
         f.lane_merge("work", "alpha")
+
+    def test_migrate_collapses_screen_into_ui(self):
+        self.document["schema_version"] = 2
+        for node in self.document["changes"].values():
+            node["lanes"]["work"].pop("ui")
+            node["lanes"]["work"]["screen"] = True
+        self.write(self.plan_path, self.document)
+        f.migrate_repository()
+        migrated = json.loads(self.plan_path.read_text())
+        lane = migrated["changes"]["alpha"]["lanes"]["work"]
+        self.assertEqual(migrated["schema_version"], 3)
+        self.assertTrue(lane["ui"])
+        self.assertNotIn("screen", lane)
+
+    def test_ui_lane_requires_ui_review_and_evidence(self):
+        self.document["changes"]["alpha"]["lanes"]["work"]["ui"] = True
+        self.write(self.plan_path, self.document)
+        f.lane_open("work", "alpha")
+        worktree = Path(self.read()["changes"]["alpha"]["lanes"]["work"]["worktree"])
+        self.mark_complete(worktree, "alpha", "1.1")
+        head = self.commit(worktree, "ui gate fixture")
+        evidence = self.repo / ".agents/workflow/alpha/evidence/ui-gate.txt"
+        evidence.parent.mkdir(parents=True)
+        evidence.write_text("current rendered evidence\n")
+        code_report = evidence.with_name("code.md")
+        code_report.write_text("PASS\n")
+        f.lane_review("work", "code-reviewer", "PASS", head, code_report, evidence=evidence, change="alpha")
+        with self.assertRaisesRegex(f.StateError, "ui-reviewer"):
+            f.lane_merge("work", "alpha")
+        ui_report = evidence.with_name("ui.md")
+        ui_report.write_text("PASS\n")
+        with self.assertRaisesRegex(f.StateError, "requires evidence"):
+            f.lane_review("work", "ui-reviewer", "PASS", head, ui_report, change="alpha")
+        f.lane_review("work", "ui-reviewer", "PASS", head, ui_report, evidence=evidence, change="alpha")
+        with self.assertRaisesRegex(f.StateError, "requires evidence for a human gate"):
+            f.human_gate("work", "approved", head, "r1", change="alpha")
+        f.human_gate("work", "approved", head, "r1", evidence=evidence, change="alpha")
+        f.lane_merge("work", "alpha")
+
+    def test_plan_approval_records_committed_artifacts_and_reviewed_graph(self):
+        self.artifact_pass("alpha")
+        self.artifact_pass("beta")
+        with self.assertRaisesRegex(f.StateError, "current repo graph PASS"):
+            f.plan_approve()
+        head = self.git("rev-parse", "HEAD")
+        report = self.repo / ".agents/workflow/reviews/graph.md"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text("PASS\n")
+        f.plan_dispatch("oracle", scope="graph", report=report)
+        f.plan_review("oracle", "PASS", head, report, scope="graph")
+        tasks = self.repo / "openspec/changes/alpha/tasks.md"
+        original = tasks.read_text()
+        tasks.write_text(original.replace("- [ ] 1.1", "- [x] 1.1"))
+        with self.assertRaisesRegex(f.StateError, "commit the OpenSpec artifacts"):
+            f.plan_approve()
+        tasks.write_text(original)
+        f.plan_approve("Test Human")
+        record = json.loads((self.repo / ".agents/workflow/plan-approval.json").read_text())
+        self.assertEqual(record["approver"], "Test Human")
+        self.assertEqual(record["head"], head)
+        self.assertEqual(record["plan_sha256"], f._plan_context(None, None, "graph")[3])
+        self.assertEqual(set(record["artifacts"]), {"alpha", "beta"})
+        view = json.loads(f.status("alpha", as_json=True))
+        self.assertEqual(view["plan_approval"]["state"], "current")
+
+    def test_plan_rejects_retired_screen_flag_and_schema_v2(self):
+        self.document["schema_version"] = 2
+        self.write(self.plan_path, self.document)
+        with self.assertRaisesRegex(f.PlanError, "schema_version 2 is retired"):
+            f.validate_plan(self.plan_path)
+        self.document["schema_version"] = 3
+        self.document["changes"]["alpha"]["lanes"]["work"]["screen"] = False
+        self.write(self.plan_path, self.document)
+        with self.assertRaisesRegex(f.PlanError, "retired screen flag"):
+            f.validate_plan(self.plan_path)
 
     def test_override_consumes_oracle_standin_grant(self):
         self.document["changes"]["alpha"]["lanes"]["work"]["sensitive"] = True

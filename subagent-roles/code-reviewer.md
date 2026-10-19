@@ -30,8 +30,8 @@ test adequacy, coverage, and test quality for the touched behavior. High-risk la
 implementation and task completeness; the separate test reviewer owns test adequacy, coverage, test
 quality, fixtures/mocks, and mutation testing. Do not duplicate that remit when the brief assigns a
 separate test reviewer; report implementation findings and leave test-adequacy verdicts to that role.
-`ui: true` requires a separate UI review of supplied rendered evidence. `screen: true` alone requires
-current screen evidence, not a separate UI review; verify its binding within your assigned remit.
+`ui: true` requires a separate UI review of supplied rendered evidence; the UI `PASS` and human gate each
+require current evidence. Verify the evidence binding within your assigned remit.
 Remits must cover every criterion.
 
 Start full lane diff/named dependencies; expand only for concrete failure/requirement violation.

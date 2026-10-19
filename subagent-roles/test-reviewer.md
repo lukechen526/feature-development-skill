@@ -29,8 +29,8 @@ Ordinary lanes: this role is not separately required by default; the code review
 code/test review. You are dispatched for high-risk lanes. You own test adequacy, coverage, test quality, fixture/mocking scope, and mutation
 testing. Do not take ownership of implementation correctness; report a test finding that depends on a
 production-code defect, but leave the implementation verdict to the code reviewer.
-`ui: true` requires a separate UI review of supplied rendered evidence. `screen: true` alone requires
-current screen evidence, not a separate UI review; verify its binding within your assigned remit.
+`ui: true` requires a separate UI review of supplied rendered evidence; the UI `PASS` and human gate each
+require current evidence. Verify the evidence binding within your assigned remit.
 Remits must cover every criterion.
 
 Start full lane diff/named dependencies; expand only for concrete failure/requirement violation.

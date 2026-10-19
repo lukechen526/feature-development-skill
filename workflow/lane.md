@@ -94,9 +94,8 @@ This is a procedural check, not an approval or a generated review package.
 |---|---|
 | Ordinary risk | `code-reviewer` covers implementation, task completeness, and test adequacy |
 | High risk | `code-reviewer` covers implementation and task completeness; separate `test-reviewer` covers test adequacy |
-| `ui: true` | Add `ui-reviewer` inspection of supplied rendered evidence |
-| `screen: true` | Require current screen evidence; this flag alone does not add a UI reviewer |
-| Eligible `combined-single-lane` | Independent Oracle covers code, tests, and whole-change implementation coherence; UI/human gates still apply |
+| `ui: true` | Add `ui-reviewer` inspection of supplied rendered evidence; the UI `PASS` and human gate each require current evidence |
+| Eligible `combined-single-lane` | Independent Oracle covers code, tests, and whole-change implementation coherence; the UI review and human gate still apply |
 
 Use the [review brief](briefs-and-handoffs.md#review). Reviewers read approved sources, the lane diff, and relevant dependencies directly.
 Every assigned acceptance criterion and completed task needs review coverage.
@@ -140,20 +139,20 @@ The two-round limit and unresolved findings continue under [Escalation](#escalat
 
 ### Human checkpoints
 
-A declared `ui`, `screen`, or `sensitive` flag requires a human checkpoint. High risk alone does not add one.
+A declared `ui` or `sensitive` flag requires a human checkpoint. High risk alone does not add one.
 Repository guides define the states, visual variants, environments, and acceptance criteria the human must inspect.
 Record the actual human decision against the current lane commit and evidence revision with [human-gate](helper-commands.md#human-gate).
-Screen lanes require current evidence for that checkpoint.
+UI lanes require current evidence for that checkpoint.
 
 Missing, rejected, revoked, stale, or wrong-commit approval blocks integration. Silence and green automation never imply consent.
 Other independent ready lanes may continue while one lane waits for a human.
 
 An explicit [human-defer](helper-commands.md#human-defer) can move an eligible checkpoint to integrated inspection:
 
-- The lane has UI or screen work, ordinary risk, and no sensitive flag.
+- The lane has UI work, ordinary risk, and no sensitive flag.
 - The Coordinator records bounded, reversible impact and the excluded sensitive effects.
 - Combined mode is not active.
-- The deferral binds current lane HEAD, evidence revision, and required screen evidence.
+- The deferral binds current lane HEAD, evidence revision, and required UI evidence.
 
 Deferral is not approval and does not waive any independent review.
 Finish must declare appropriate direct human inspection checkpoints covering the deferred work.
@@ -197,7 +196,7 @@ The override cannot waive:
 
 - Completion and ownership of assigned tasks, or preservation of other task definitions and ticks.
 - Clean worktrees, a valid lane ref, candidate identity, or base/ancestry validation.
-- Required screen evidence or the current human checkpoint.
+- Required UI evidence or the current human checkpoint.
 - Authorization scope, current bindings, or one-use grant rules.
 - Release checks, final human inspections, PR-opening consent, or the human's PR merge decision.
 
@@ -229,7 +228,7 @@ Final hands-on release inspections remain human-only, as specified in [finish](f
 
 ## Merge and close
 
-Normal integration requires current independent reviewer passes, required screen evidence, and the bound human checkpoint.
+Normal integration requires current independent reviewer passes, current UI evidence where `ui: true`, and the bound human checkpoint.
 The [merge command reference](helper-commands.md#lane-merge-and-lane-close) contains syntax, not authority to waive those gates.
 
 The helper validates:

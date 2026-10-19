@@ -132,9 +132,8 @@ Combined Oracle review is recorded under `role=code-reviewer`; there is no separ
 
 Ordinary lanes require the combined `code-reviewer` review, which covers code and test adequacy. High-risk lanes
 require separate `code-reviewer` and `test-reviewer` reviews. The standard gate requires `ui-reviewer` review only when the plan sets `ui: true`.
-The plan's `ui` flag is unchanged.
-`screen: true` requires current screen evidence, not a separate UI review. Either flag requires a human
-checkpoint, subject to the documented deferral rules.
+`ui: true` also requires current rendered evidence for the UI `PASS` and the human checkpoint.
+A `ui` or `sensitive` flag requires a human checkpoint, subject to the documented deferral rules.
 
 ## Record the selection
 

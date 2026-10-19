@@ -23,7 +23,7 @@ An evidence refresh already prescribed by the phase guide does not require resta
 1. Pause the affected lane or phase.
 2. Pause all coordinator writes if the shared local objects are unreliable.
 3. Identify the interrupted phase, change, lane, and last confirmed operation.
-4. Read the retained local plan, coordination records, reports, and approval bindings.
+4. Read the retained local plan, plan-approval record, coordination records, reports, and approval bindings.
 5. Compare those records with committed OpenSpec artifacts, task ticks, and surviving worktrees/refs.
 6. Establish the actual status and ownership of every affected worker.
 7. Repair the interrupted operation or renew only the affected missing evidence and decisions.
@@ -50,7 +50,7 @@ Do not replay completed phases, redispatch completed tasks, or repeat a successf
 - Missing final hands-on inspection records require the human to repeat the inspection. Oracle stand-in cannot replace it.
 - Confirm operation results before retrying; never double-dispatch, double-merge, or double-remove.
 
-The local graph and coordination file are not reconstructible from Git alone. Preserve them together.
+The local graph, coordination file, and approval record are not reconstructible from Git alone. Preserve them together.
 Use the conditional sections below only when their specific legacy-record condition applies.
 
 ## Repository-object migration
@@ -59,19 +59,21 @@ Use this section only when upgrading older per-change storage to the current rep
 Do not run migration during routine setup, every session restart, or ordinary lane recovery.
 
 The authoritative local files are `.agents/workflow/plan-graph.json` and `.agents/workflow/coordination.json`.
-Both use `schema_version: 2` and nest `changes → lanes → tasks`. Neither is committed.
+The graph uses `schema_version: 3`; coordination uses `schema_version: 2`.
+Both nest `changes → lanes → tasks` and neither is committed.
+Migration collapses a legacy lane's `ui` and `screen` flags into `ui = ui or screen`; affected lanes need fresh reviews and gates.
 Retained per-change legacy plans remain readable until the shared local graph exists.
 The helper imports retained legacy ledgers on the first shared coordination write.
 Once a shared object exists, legacy files never replace its entries.
 
 1. Pause dispatches before migration.
-2. Back up both existing plans and coordination records together.
+2. Back up the existing plans, coordination records, and approval record together.
 3. Run `python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" migrate-repo` from the feature checkout.
-4. Inspect the imported change, lane, task, review, and dispatch records.
+4. Inspect the imported change, lane, task, review, dispatch, and approval records.
 5. Obtain current OpenSpec artifact passes for each affected change.
 6. Obtain a separate Oracle repo graph pass after every included change's artifact review passes.
 7. Obtain human approval of the local graph and affected OpenSpec artifacts.
-8. Commit only affected OpenSpec artifacts and the approval checkpoint, never either repo object.
+8. Commit only affected OpenSpec artifacts, then record the approval with `plan-approve`; never commit a repo object.
 9. Renew affected lane reviews, plan-bound grants, release evidence, and human inspections.
 
 Migration retains source files, reports, worker IDs, and dispatch keys.
@@ -100,7 +102,7 @@ paths. Pass `--check` to replace the declared check set. Repeat release checks a
 inspections. Use `checkpoint:` in new human inspection artifacts. See [finish.md](finish.md) for the record format.
 
 Preserve reports/evidence under absolute change directory.
-Block on missing/stale binding, unknown worker, unapproved changed plan, failed required check,
+Block on missing/stale plan approval or review binding, unknown worker, unapproved changed plan, failed required check,
 unresolved Oracle escalation, or unmet human gate. Account for all workers/worktrees/sessions/temp resources before stopping.
 
 Prefer completion events; bound fallback polling/output. Reuse preflight only while mechanism/model/level/environment/evidence bindings match.
