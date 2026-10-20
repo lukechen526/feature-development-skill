@@ -85,8 +85,8 @@ Do not substitute defaults or create a per-change selection file.
 
 ### Review the OpenSpec change
 
-The proposal, design, and delta specs already exist from the consuming repository's OpenSpec process.
-The Coordinator writes the task checklist. No graph is required for this review.
+This fixture starts from an existing change, so its proposal, design, and delta specs are already authored; the Coordinator writes the task checklist.
+Starting from a bare request instead means authoring those artifacts first ([plan](plan.md#from-user-intent-to-change-artifacts)). No graph is required for this review.
 
 ```bash
 python3 - "$TASKS" <<'PY'

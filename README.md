@@ -30,7 +30,7 @@ It adds deliberate coordination overhead and is not an unattended system.
 
 Four gated phases:
 
-1. **Plan** — OpenSpec artifacts plus a lane plan; two separate Oracle reviews; then your approval.
+1. **Plan** — turn your request into OpenSpec artifacts, then a lane plan; two separate Oracle reviews; then your approval.
 2. **Lanes** — one task per fresh implementer in an isolated Git worktree; independent review; gated merge into the feature branch.
 3. **Finish** — you set the release classification; one repository-level finish record covers the whole PR under the repository's own evidence, review, and inspection rules.
 4. **Follow-up** — PR consent, findings, and archive recorded and rechecked.

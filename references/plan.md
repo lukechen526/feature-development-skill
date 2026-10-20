@@ -1,6 +1,6 @@
 # Plan phase
 
-The Coordinator owns planning. No implementation begins before both Oracle review stages and explicit human approval.
+The Coordinator owns planning. Planning starts from the human's request, not from an existing OpenSpec change: the Coordinator turns that intent into reviewed OpenSpec artifacts, then into the lane graph. No implementation begins before both Oracle review stages and explicit human approval.
 
 ## Objects and ownership
 
@@ -15,27 +15,51 @@ The Coordinator owns planning. No implementation begins before both Oracle revie
 
 ## Required order
 
-1. Discover the included OpenSpec changes.
-2. Author each change's OpenSpec artifacts.
-3. Obtain an independent Oracle artifact verdict for each change.
-4. Complete every included change's artifact corrections before graph review.
-5. Build or update the repo-level graph from the reviewed change artifacts.
-6. Obtain a separate independent Oracle verdict for the whole repo-level graph.
-7. Obtain the human's explicit approval of the artifacts and graph.
-8. Commit only the approved OpenSpec artifacts.
-9. Record the human approval with `plan-approve`.
-10. Start implementation from that committed and recorded state.
+1. Receive the human's feature intent and clarify scope, behavior, and non-goals.
+2. Choose the included changes: reuse a matching existing change or create one with `openspec-propose`.
+3. Author each included change's OpenSpec artifacts from that intent.
+4. Obtain an independent Oracle artifact verdict for each change.
+5. Complete every included change's artifact corrections before graph review.
+6. Build or update the repo-level graph from the reviewed change artifacts.
+7. Obtain a separate independent Oracle verdict for the whole repo-level graph.
+8. Obtain the human's explicit approval of the artifacts and graph.
+9. Commit only the approved OpenSpec artifacts.
+10. Record the human approval with `plan-approve`.
+11. Start implementation from that committed and recorded state.
 
 OpenSpec edits remain uncommitted during both review stages. No intermediate artifact commit occurs between Oracle correction cycles.
 The graph, coordination file, and approval record remain gitignored throughout; approval never changes their storage policy.
 The approval record is not a Git object; it binds the committed artifact digests and the reviewed graph digest.
 
-## Discover and author change artifacts
+## From user intent to change artifacts
 
-Run `openspec list --json`. Reuse relevant changes or use `openspec-propose` for a new change.
-Read each change's proposal, design, delta specs, tasks, and applicable baseline requirements.
-Resolve material ambiguity with the human.
-Only unique top-level checklist IDs identify tasks. Nested checkboxes annotate their parent tasks.
+The Plan phase assumes no OpenSpec change exists. The Coordinator reads the human's request, resolves material ambiguity with the human, and writes the artifacts that define the feature.
+
+### Intake and clarification
+
+Restate the intended behavior, affected surfaces, and non-goals, and confirm them with the human before authoring.
+Resolve scope boundaries, user-visible behavior, compatibility and data constraints, and what would make the change unacceptable.
+Ask when a requirement is missing, conflicting, or untestable; never substitute a plausible guess.
+Return the request to the human when it is too small to need this workflow or is really several unrelated features.
+
+### Choose the included changes
+
+Run `openspec list --json`. Reuse a matching change rather than duplicating it; use `openspec-propose` when none matches.
+For a reused change, read its current artifacts and resolve gaps before review.
+Use several changes only when each delivers independently reviewable behavior; otherwise keep one.
+Every later review, lane, and finish record covers exactly the included changes.
+
+### Author the artifacts
+
+For each included change, author under `openspec/changes/<change>/`:
+
+- `proposal.md`: why the change is needed and what it changes.
+- `design.md`: the chosen approach, alternatives, and trade-offs implementation must respect.
+- delta specs: the requirements the change adds, modifies, or removes, each with observable acceptance criteria or scenarios, expressed against the applicable baseline specifications.
+- `tasks.md`: unique top-level checklist IDs that implement the specifications; nested checkboxes annotate their parent task.
+
+Acceptance criteria must be observable and testable by an independent reviewer, and tasks must map back to them so review coverage is checkable.
+The artifacts are the implementation contract: do not start implementation or build the lane graph before both Oracle stages and human approval.
 
 ### Oracle stage 1: each change's OpenSpec artifacts
 

@@ -23,8 +23,9 @@ and its gates before starting the next. Do not batch, reorder, or skip phase gat
 1. **[Preflight and roles](references/preflight-and-roles.md).** Verify harness
    capabilities, resolve the skill root, obtain human-selected role/model/thinking
    profiles, and provision roles. Complete preflight before any role dispatch.
-2. **[Plan](references/plan.md).** Author the OpenSpec artifacts. Obtain separate
-   Oracle reviews of each change's artifacts and then the whole repository graph.
+2. **[Plan](references/plan.md).** Turn the human's feature intent into OpenSpec
+   artifacts, reusing an existing change when one matches. Obtain separate Oracle
+   reviews of each change's artifacts and then the whole repository graph.
    Obtain human approval, commit the approved artifacts, and record approval with
    [plan-approve](references/helper-commands.md#plan-approval) in
    `.agents/workflow/plan-approval.json` before implementation.
