@@ -354,6 +354,8 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> dashboard --s
 
 Sync and task-status writes belong to the Coordinator. A `done` claim never replaces a committed task tick.
 Status JSON and dashboards are per-change views of the shared objects, not independent sources of approval.
+Before the first plan commit, they show draft planning with no ready lanes or completed tasks.
+Draft checkboxes never satisfy implementation gates; review and human approval still precede the plan commit.
 
 ## Finish records
 

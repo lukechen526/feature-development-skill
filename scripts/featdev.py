@@ -1176,7 +1176,9 @@ def _committed_file(checkout: Path, commit: str, relative: str) -> str:
     return result.stdout
 
 
-def _committed_tasks(checkout: Path, commit: str, change: str) -> tuple[str, str]:
+def _committed_tasks(
+    checkout: Path, commit: str, change: str, allow_draft: bool = False,
+) -> tuple[str, str]:
     active = f"openspec/changes/{_safe_change(change)}/tasks.md"
     result = _state_git(checkout, "show", f"{commit}:{active}")
     if result.returncode == 0:
@@ -1186,6 +1188,8 @@ def _committed_tasks(checkout: Path, commit: str, change: str) -> tuple[str, str
                and _archive_name_matches(Path(path).parent.name, change)]
     if len(matches) > 1:
         raise StateError(f"state: multiple committed archives match change {change!r}; reconcile the archive identity")
+    if allow_draft and not matches and (checkout / active).is_file():
+        return (checkout / active).read_text(encoding="utf-8"), active
     relative = matches[0] if matches else active
     return _committed_file(checkout, commit, relative), relative
 
@@ -1303,15 +1307,21 @@ def _derived_task_views(plan: dict[str, Any], checked_tasks: set[str]) -> dict[s
     return tasks
 
 
-def state_derive(change: str, source_ref: str | None = None, checkout: Path | None = None) -> dict[str, Any]:
+def state_derive(
+    change: str, source_ref: str | None = None, checkout: Path | None = None,
+    allow_draft: bool = False,
+) -> dict[str, Any]:
     change = _safe_change(change)
     repository = (checkout or Path.cwd()).resolve()
     _ensure_workflow_ignored(repository)
     resolved_ref, source_sha = _resolve_state_ref(repository, source_ref)
     plan, plan_sha256, plan_relative = _change_plan_at(repository, source_sha, change)
-    tasks_text, tasks_relative = _committed_tasks(repository, source_sha, change)
+    tasks_text, tasks_relative = _committed_tasks(repository, source_sha, change, allow_draft)
+    draft = allow_draft and _state_git(
+        repository, "cat-file", "-e", f"{source_sha}:{tasks_relative}"
+    ).returncode != 0
     _validate_change_plan(plan, change, tasks_text, repository)
-    checked_order = _checked_task_ids_from_text(tasks_text)
+    checked_order = [] if draft else _checked_task_ids_from_text(tasks_text)
     checked_tasks = set(checked_order)
     lanes, ready_lanes = _derived_lane_views(plan, checked_tasks)
     owner = _workflow_checkout(repository)
@@ -1335,6 +1345,8 @@ def state_derive(change: str, source_ref: str | None = None, checkout: Path | No
         "lanes": lanes,
         "ready_lanes": ready_lanes,
     }
+    if draft:
+        state["planning"] = "draft"
     return state
 
 
@@ -1630,7 +1642,7 @@ def _lane_review_status(lane: dict[str, Any]) -> dict[str, Any] | None:
         "state": "passed" if last.get("verdict") == "PASS" else "changes_requested",
         "round": len(reviews),
         "reviewer": last.get("role"),
-        "commit": last.get("commit"),
+        "commit": _review_commit(last),
         "report": last.get("report"),
     }
 
@@ -1879,7 +1891,8 @@ def _state_context(
     root = (checkout or Path.cwd()).resolve()
     requested = _safe_change(change) if change else None
     selected = requested or _infer_change(root)
-    state = state_derive(selected, None, root)
+    state = (state_derive(selected, None, root, allow_draft=True)
+             if coordination_optional else state_derive(selected, None, root))
     if state.get("run_id"):
         raise StateError("state: legacy run state is not a source of truth; derive the change state")
     checkout_value = state.get("feature_checkout")
@@ -1894,7 +1907,7 @@ def _state_context(
         raise StateError("state: source SHA is missing; re-derive the state")
     try:
         plan, _, _ = _change_plan_at(repository, source_sha, state_change)
-        tasks_text, _ = _committed_tasks(repository, source_sha, state_change)
+        tasks_text, _ = _committed_tasks(repository, source_sha, state_change, coordination_optional)
     except json.JSONDecodeError as exc:
         raise PlanError(f"shape: cannot load committed plan at {source_sha}: {_one_line(exc)}; fix the plan") from exc
     if not isinstance(plan, dict):
@@ -2434,6 +2447,7 @@ def _status_view(state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
     coordination_available = view.get("coordination_available", True)
     for lane_id, lane in view.get("lanes", {}).items():
         if isinstance(lane, dict):
+            lane["review_status"] = _lane_review_status(lane)
             lane["phase"] = _coordination_phase_for_display(lane, change, plan)
             lane["inflight"] = _inflight_task_status(view, lane, plan)
             lane["coordinator_status"] = lane.get("status")
@@ -2461,6 +2475,12 @@ def _status_view(state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
         view["dispatch_view_error"] = str(
             view.get("coordination_error") or "coordination data is unavailable"
         )
+    if view.get("planning") == "draft":
+        reason = "blocked: planning artifacts are uncommitted; obtain approval before implementation"
+        view["ready_lanes"] = []
+        view["readiness"] = {lane_id: reason for lane_id in view.get("lanes", {})}
+        for lane in view.get("lanes", {}).values():
+            lane.update({"ready": False, "readiness": reason})
     return view
 
 
@@ -2470,6 +2490,8 @@ def _status_text(view: dict[str, Any]) -> str:
         f"source: {view.get('source_sha', '')}",
         f"ready lanes: {', '.join(view.get('ready_lanes', [])) or 'none'}",
     ]
+    if view.get("planning") == "draft":
+        lines.append("planning: draft (reviews and human approval required before committing)")
     approval = view.get("plan_approval")
     if isinstance(approval, dict):
         if approval.get("state") == "missing":
@@ -5335,6 +5357,53 @@ def _self_check() -> int:
             {"risk": "ordinary", "ui": False, "sensitive": False}
         )
 
+        # Draft planning is visible without treating uncommitted ticks as implementation progress.
+        draft_repository = root / "draft-repository"
+        draft_repository.mkdir()
+        draft_repository.joinpath(".gitignore").write_text(".agents/workflow/\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", "-b", "main", str(draft_repository)], check=True)
+        git(draft_repository, "config", "user.email", "self-check@example.com")
+        git(draft_repository, "config", "user.name", "Self Check")
+        draft_head = commit(draft_repository, "baseline before planning")
+        draft_tasks = draft_repository / "openspec/changes/draft/tasks.md"
+        draft_tasks.parent.mkdir(parents=True)
+        draft_tasks.write_text("- [x] 1.1 uncommitted task\n", encoding="utf-8")
+        write_fixture(draft_repository / _REPO_PLAN, {
+            "schema_version": 3, "changes": {"draft": {"lanes": {
+                "one": {"risk": "ordinary", "ui": False, "sensitive": False,
+                        "depends_on": [], "tasks": {"1.1": {"deps": []}}}
+            }}}
+        })
+        os.chdir(draft_repository)
+        draft_result, draft_output, draft_error = invoke("status", "--change", "draft", "--json")
+        assert draft_result == 0, draft_error
+        draft_view = json.loads(draft_output)
+        assert draft_view["planning"] == "draft"
+        assert draft_view["checked_tasks"] == [] and draft_view["ready_lanes"] == []
+        assert not draft_view["lanes"]["one"]["ready"]
+        assert draft_view["plan_approval"]["state"] == "missing"
+        assert "planning artifacts are uncommitted" in draft_view["readiness"]["one"]
+        draft_result, draft_output, draft_error = invoke("status", "--change", "draft")
+        assert draft_result == 0 and "planning: draft" in draft_output, draft_error
+        draft_page = root / "draft-dashboard.html"
+        draft_result, _, draft_error = invoke(
+            "dashboard", "--change", "draft", "--output", str(draft_page)
+        )
+        assert draft_result == 0 and draft_page.is_file(), draft_error
+        expect_refusal("lane-open", "one", "--change", "draft", contains="committed artifact")
+        assert git(draft_repository, "rev-parse", "HEAD") == draft_head
+        draft_tasks.write_text("- [ ] 1.1 uncommitted task\n", encoding="utf-8")
+        commit(draft_repository, "commit planning after approval")
+        draft_result, draft_output, draft_error = invoke("status", "--change", "draft", "--json")
+        assert draft_result == 0 and "planning" not in json.loads(draft_output), draft_error
+        expect_refusal("lane-open", "one", "--change", "draft", contains="approval")
+        os.chdir(root)
+
+        for review in ({"binding": {"commit": "a" * 40}, "reviewed_commit": "b" * 40},
+                       {"reviewed_commit": "a" * 40}):
+            review.update({"verdict": "PASS", "role": "code-reviewer"})
+            assert _lane_review_status({"reviews": [review]})["commit"] == "a" * 40
+
         # Derived state is rebuilt from committed artifacts, not a working-tree tick or a
         # legacy run file. Plan changes refresh the stamp instead of refusing the state.
         derived_plan = {
@@ -5830,6 +5899,9 @@ def _self_check() -> int:
         report = root / "review.md"
         report.write_text("PASS\n", encoding="utf-8")
         lane_review("a", "code-reviewer", "PASS", a_head, report, "flow-r1", change="flow")
+        summary_result, summary_output, summary_error = invoke("status", "--change", "flow", "--json")
+        assert summary_result == 0, summary_error
+        assert json.loads(summary_output)["lanes"]["a"]["review_status"]["commit"] == a_head
         coordination = read_fixture(coordination_path)
         assert coordination["lanes"]["a"]["reviews"][0]["reviewed_commit"] == a_head
         lane_merge("a", "flow")
