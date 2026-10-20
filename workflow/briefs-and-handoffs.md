@@ -17,6 +17,17 @@ Read-only Oracle consultation answers one uncertainty; never resets rounds.
 
 Helper syntax lives in [helper-commands.md](helper-commands.md). Briefs select the relevant command and fill every placeholder.
 
+## Repository instructions
+
+Before planning or scoped work, look for applicable agent instruction files.
+Check the repository root and directories that govern the assigned paths.
+Common examples include `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.github/copilot-instructions.md`,
+`.github/instructions/*.instructions.md`, and `.cursor/rules/*`. These are examples, not required filenames.
+Follow each file's scope and the harness's instruction precedence. Do not combine unrelated scoped rules.
+The Coordinator lists discovered applicable files in the brief's Sources; workers check for additional instructions within their assigned scope.
+If no agent instruction file exists, use the repository's relevant guides and approved brief.
+A missing example filename alone never blocks work. Ask the human when required rules are missing or conflicting.
+
 ## Set locations (no ad-hoc paths)
 
 Every handoff artifact has one home, under the coordinator store:

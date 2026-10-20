@@ -179,7 +179,9 @@ Legacy migration sections apply only when older records need conversion, not on 
 
 ## Context and stopping rules
 
-Follow `AGENTS.md`, including required reads. Discover the change with `openspec list --json`; verify
+Discover and follow applicable [repository agent instructions](workflow/briefs-and-handoffs.md#repository-instructions), including required reads.
+Look for files such as `AGENTS.md` and `CLAUDE.md`; neither filename is mandatory.
+Discover the change with `openspec list --json`; verify
 `openspec --version` when establishing CLI availability. Reuse a relevant active change; use
 `openspec-propose` only for new work. Approved plan/specs define scope.
 

@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest import mock
+from urllib.parse import unquote
 
 SPEC = importlib.util.spec_from_file_location("featdev", Path(__file__).resolve().parents[1] / "bin/featdev.py")
 f = importlib.util.module_from_spec(SPEC)
@@ -100,6 +101,45 @@ class RepositoryObjectsTest(unittest.TestCase):
         report.write_text("PASS: isolated test fixture review\n")
         f.lane_review("work", "code-reviewer", "PASS", head, report, change=change)
         return worktree, head
+
+    def test_same_named_repositories_get_distinct_escaped_worktree_paths(self):
+        other = self.repo.parent / "other % project" / self.repo.name
+        other.parent.mkdir()
+        self.git("clone", "-q", "--no-hardlinks", str(self.repo), str(other))
+        self.write(other / ".agents/workflow/plan-graph.json", self.document)
+        f.lane_open("work", "alpha")
+        first = Path(self.read()["changes"]["alpha"]["lanes"]["work"]["worktree"])
+        os.chdir(other)
+        f.lane_open("work", "alpha")
+        coordination = json.loads((other / ".agents/workflow/coordination.json").read_text())
+        second = Path(coordination["changes"]["alpha"]["lanes"]["work"]["worktree"])
+        self.assertNotEqual(first, second)
+        root = Path(os.environ["FEATDEV_LANE_WORKTREE_ROOT"]).resolve()
+        for checkout, worktree in ((self.repo, first), (other, second)):
+            parts = worktree.relative_to(root).parts
+            self.assertEqual(unquote(parts[0]), str(checkout.resolve()))
+            self.assertEqual(parts[1:], ("feature", "alpha", "work"))
+            self.assertEqual(f._worktree_branch(checkout, worktree), "featdev/alpha-work")
+        self.assertIn("%20", second.relative_to(root).parts[0])
+        self.assertIn("%25", second.relative_to(root).parts[0])
+
+    def test_existing_basename_worktree_survives_new_path_naming(self):
+        f.coordination_sync("alpha")
+        legacy = Path(os.environ["FEATDEV_LANE_WORKTREE_ROOT"]) / self.repo.name / "feature/alpha/work"
+        head = self.git("rev-parse", "HEAD")
+        self.git("worktree", "add", "-b", "featdev/alpha-work", str(legacy), head)
+        data = self.read()
+        data["changes"]["alpha"]["lanes"]["work"].update(
+            worktree=str(legacy), ref="featdev/alpha-work", base=head, phase="writing")
+        self.write(self.coord_path, data)
+
+        worktree, _ = self.finish_lane("alpha")
+
+        self.assertEqual(worktree, legacy)
+        f.lane_merge("work", "alpha")
+        f.lane_close("work", "alpha")
+        self.assertFalse(legacy.exists())
+        self.assertEqual(self.read()["changes"]["alpha"]["lanes"]["work"]["phase"], "closed")
 
     def test_conflicts_are_resolved_in_lane_and_reviewed_at_the_new_head(self):
         (self.repo / "shared.txt").write_text("base\n")

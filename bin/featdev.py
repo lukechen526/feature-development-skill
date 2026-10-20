@@ -16,7 +16,7 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from typing import Any
 
 
@@ -2835,7 +2835,8 @@ def _lane_worktree_path(state: dict[str, Any], lane_id: str) -> Path:
     if any(not part or part in {".", ".."} for part in branch.split("/")) or "\n" in branch or "\r" in branch:
         raise StateError("lane: branch must be a safe git branch name; repair the derived state")
     checkout = Path(checkout_value).resolve()
-    repo = _safe_component(checkout.name, "repository")
+    # shortcut: escaped paths must fit one directory name; use bounded naming if long checkout paths need support.
+    repo = quote(str(checkout), safe="")
     lane_id = _safe_component(lane_id, "lane id")
     change = _safe_component(change, "change")
     result = _lane_worktree_root(state) / repo
@@ -3609,12 +3610,11 @@ def lane_open(lane_id: str, change: str | None = None) -> Path:
         )
     coordination, runtime = _coordination_lane_for(state, plan, lane_id)
     phase = runtime.get("phase", "created")
-    expected_path = _lane_worktree_path(state, lane_id).resolve()
     expected_ref = _lane_ref(state, lane_id)
     recorded_path = runtime.get("worktree")
     recorded_ref = runtime.get("ref")
-    if recorded_path and Path(recorded_path).resolve() != expected_path:
-        raise StateError(f"lane: lane {lane_id!r} has a different recorded worktree; reconcile it first")
+    expected_path = (Path(recorded_path).expanduser() if recorded_path
+                     else _lane_worktree_path(state, lane_id)).resolve()
     if recorded_ref and recorded_ref != expected_ref:
         raise StateError(f"lane: lane {lane_id!r} has a different recorded ref; reconcile it first")
     repository = Path(state["feature_checkout"]).resolve()

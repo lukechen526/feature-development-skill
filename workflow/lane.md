@@ -34,6 +34,9 @@ Status and dashboards are derived per-change views, not approval records. Chat h
 
 Open the lane with [lane-open](helper-commands.md#lane-open) before its first implementation dispatch.
 The default worktree is `~/.agents/worktrees/<repo>/<branch>/<change>/<lane>/`, with ref `featdev/<change>-<lane>`.
+`<repo>` is the URL-escaped resolved full feature-checkout path, not its folder name.
+For example, `/clients/alice/app` becomes `%2Fclients%2Falice%2Fapp`, including the escaped leading separator.
+The escaped path must fit the filesystem limit for one directory name.
 `FEATDEV_LANE_WORKTREE_ROOT` permits an absolute Coordinator-controlled root override.
 A recorded worktree remains authoritative for that lane's lifetime, including recovery and cleanup.
 Optional environment-specific worktree registration is best-effort; the workflow does not depend on it.

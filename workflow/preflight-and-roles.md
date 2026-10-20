@@ -8,6 +8,9 @@ human changes it.
 
 ## Step 0 — capability preflight (once per repo/harness)
 
+Discover applicable [repository agent instructions](briefs-and-handoffs.md#repository-instructions) before planning or dispatch.
+Record their paths for scoped briefs. No particular instruction filename is required.
+
 Do not assume a provider, harness, or agent registry. Inspect the live tool surface and record what it
 actually supports. Do not infer a capability from a tool name, a package manifest, or a previous run.
 

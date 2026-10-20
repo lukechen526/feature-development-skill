@@ -22,7 +22,7 @@ Only the Coordinator writes the shared `.agents/workflow/coordination.json`.
 ## Evidence and remit
 
 Use the scoped brief's plan/criteria/remit/boundaries/exclusions/check owner/worktree/base/`HEAD`/findings/evidence.
-Read approved task/OpenSpec/`AGENTS.md`/canonical docs/flags directly; run relevant checks.
+Read approved task/OpenSpec/applicable repository agent instructions/canonical docs/flags directly; run relevant checks.
 No generated review packets/verdict files. Coordinator records verdict.
 
 Ordinary lanes: this role is not separately required by default; the code reviewer performs the combined
