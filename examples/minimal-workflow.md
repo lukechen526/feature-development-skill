@@ -1,9 +1,42 @@
-# Minimal workflow
+# Worked example: a reviewed greeting feature
 
-This recipe uses one ordinary lane and one task in a disposable consuming repository.
+This walkthrough follows a feature from an OpenSpec requirement through implementation, independent review, and PR preparation.
+It shows what the Coordinator records and where real agents and the human must act.
+For realistic feature requests and when to use the skill, start with the [README](../README.md#when-to-use-it).
+
+The feature is deliberately tiny so the workflow stays readable.
+A real one-function change would rarely justify this much coordination.
+Normally, use the skill for features with several tasks, dependencies, or explicit review and approval requirements.
+
+## Request and acceptance criteria
+
+Example request:
+
+> Use feature-development-skill to implement the hello-message change.
+> Provide message.greeting(), returning exactly hello.
+> Use the project's focused check and release rules.
+> Review the specification and plan before asking me to approve implementation.
+
+| Criterion | How it is checked |
+|---|---|
+| `message.greeting()` returns exactly `hello` | A Python assertion runs in the lane and again on the integrated feature branch. |
+| Implementation matches the approved task | A separate code reviewer checks the current lane commit and test adequacy. |
+| The integrated output is acceptable | The human inspects the output under this fixture's release rules. |
+
+The Coordinator obtains two separate planning verdicts: one for OpenSpec artifacts and one for the lane graph.
+The human then approves the plan. Only after that does an Implementer write code in an isolated worktree.
+The greeting lane has its own branch and working directory, separate from the Coordinator's feature checkout.
+The Implementer runs checks and commits there. The Coordinator integrates that commit only after independent review passes.
+The greeting lane is ordinary risk with no UI or sensitive flag, so it requires one combined code/test review.
+The fixture's final human output inspection is a release rule, not an automatic requirement for every CLI project.
+
+## Before running commands
+
+This recipe uses one lane and one task in a disposable consuming repository.
 It is not a live harness validation result.
 Commands record real events; they do not launch agents, perform reviews, or grant consent.
 Never use sample text as a review report or human approval.
+Do not paste the entire walkthrough as an unattended script: stop at every agent handoff and human decision.
 
 Read [the skill](../SKILL.md) and [the handoff contract](../workflow/briefs-and-handoffs.md) first.
 Stop after any failed command or unmet gate.
@@ -267,7 +300,33 @@ Route actionable findings through implementation and independent review, then re
 Sync and archive the completed OpenSpec change before human merge using [the finish sequence](../workflow/finish.md#openspec-sync-and-archive).
 Recheck the archival commit on the PR. The human retains the later PR merge decision.
 
+## Monitor or resume this example
+
+Ask the Coordinator for progress while workers run:
+
+> Show the hello-message dashboard.
+> Summarize completed work, pending reviews, and blockers.
+
+Use the [status and dashboard commands](../workflow/helper-commands.md#status-and-task-status) from the feature checkout.
+A live dashboard is optional; run its server in a separate terminal.
+The dashboard shows recorded progress. It never supplies a review verdict or human approval.
+
+After an interruption, keep the same feature checkout and its local workflow records.
+Ask:
+
+> Resume hello-message with feature-development-skill.
+> Reconcile records and worker ownership.
+> Continue from the first incomplete operation.
+> Do not repeat completed tasks or recreate approval from chat history.
+
+The Coordinator follows [recovery](../workflow/recovery.md) before further affected operations.
+Do not restart the walkthrough at step 1 merely because a new session begins.
+
 ## Expected records
+
+These paths describe the state before OpenSpec sync and archive.
+After archive, the completed task file lives in its verified archive directory instead of the active change directory.
+Local records remain in the same coordinator store.
 
 | Location | Expected result |
 |---|---|

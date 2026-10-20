@@ -1,123 +1,133 @@
 # Feature Development Skill
 
-An [Agent Skill](https://agentskills.io/specification) for coordinated OpenSpec feature development.
-It separates planning, isolated implementation, independent review, lane integration, and release preparation.
-Human approval remains separate from automated checks.
-After PR opening, the coordinator monitors automated PR checks and bot code-review comments before the human's merge decision.
+**Build new features with spec-driven development and a coordinated multi-agent workflow.**
 
-Start with [SKILL.md](SKILL.md) for agent instructions.
-Use the [helper command reference](workflow/helper-commands.md) for CLI syntax and flags.
-Use the [minimal workflow](examples/minimal-workflow.md) for a small command-by-command example.
+This [Agent Skill](https://agentskills.io/specification) helps your coding agent take a feature from an idea to a reviewed pull request.
 
-## Requirements
+It uses OpenSpec to define the expected behavior, design, acceptance criteria, and tasks before implementation starts. A Coordinator assigns scoped work to implementation agents and separate review agents. Implementation happens in isolated Git worktrees. You approve the plan, make release decisions, and retain the final PR merge decision.
 
-- Python 3.9 or later for the helper. The helper uses only the standard library.
-- Git with worktree support and a configured commit identity.
-- The OpenSpec CLI, available as `openspec`.
-- A harness that can launch fresh-context subagents with a selected working directory and the supplied role prompt.
-- A consuming Git repository with OpenSpec artifacts and repository-owned testing and release guidance.
+Install the skill in your coding agent. Run it inside the project you want to change, not inside this skill repository.
 
-Model selection, tool restrictions, continuation, and completion notifications depend on the harness.
-The [preflight](workflow/preflight-and-roles.md) records supported capabilities and limitations.
-No live cross-harness certification is claimed.
+## When to use it
 
-## Install
+Use this skill when a feature needs more coordination than a single edit session:
 
-Use your harness's skill installer when it accepts a local skill directory.
-Select this repository's root directory, which contains `SKILL.md`.
-Preserve the installed directory name: `feature-development-skill`.
+- The feature spans several parts of a project, such as storage, an API, and a user interface.
+- Tasks have dependencies or need separate owners without overlapping writes.
+- You want independent review, rather than the implementation agent approving its own work.
+- You need explicit approval checkpoints and recorded test or UI evidence.
+- Work may span several sessions, so progress, decisions, and recovery must be recorded.
 
-For manual installation:
+It works for backend, frontend, CLI, and other Git-based projects.
+The project's own guides define its technology, test commands, release process, and required environments.
 
-1. Identify the skill-discovery directory documented by your harness.
-2. Create a `feature-development-skill` directory there.
-3. Copy `SKILL.md`, `LICENSE`, `bin/`, `workflow/`, and `subagent-roles/` into that directory.
-4. Copy `README.md` and `examples/` if you want the setup guide and walkthrough available there.
-5. Reload skill discovery as your harness requires.
+Skip this skill for a quick explanation, a small isolated fix, or work that does not need planning and review gates.
+It adds deliberate coordination overhead. It is not an unattended system that ships changes without human approval.
 
-Do not copy `.git/`, `.venv/`, runtime records, or `IMPLEMENTATION-PLAN.md`.
-The role files are prompt sources, not preinstalled native agents.
-The coordinator provisions or composes them during preflight.
+## How the workflow works
 
-Set the absolute installed path when your harness does not supply the skill root:
+**Spec-driven development** means agreeing on what the feature must do before agents write its implementation.
+The reviewed specification and task checklist remain the reference for implementation, tests, and review.
 
-```bash
-export FEATDEV_SKILL_ROOT="/absolute/path/to/feature-development-skill"
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --help
-```
+| Stage | What happens |
+|---|---|
+| Set up | The Coordinator reads project instructions, checks the agent harness, and asks you to select models and thinking levels. |
+| Specify and plan | OpenSpec artifacts define the feature. A lane plan assigns tasks, dependencies, owners, and risk flags. |
+| Review and approve | Separate Oracle agents review each change's artifacts, then the repository plan. You approve both before implementation. |
+| Implement | Fresh implementation agents complete scoped tasks in isolated Git worktrees. Independent lanes can progress without sharing a working directory. |
+| Review and integrate | Separate reviewers check the current implementation and relevant tests. UI work adds rendered-evidence review and human checkpoints. Passing lanes merge into the feature branch. |
+| Prepare the PR | Workers prepare release artifacts and evidence under project rules. You complete required inspections and separately approve opening the PR. |
+| Follow through | The Coordinator monitors PR checks and bot findings, routes fixes through review, and syncs and archives completed OpenSpec changes. You decide whether to merge. |
+
+A **lane** groups related tasks in one isolated worktree. Lanes are an ownership boundary, not a requirement to parallelize everything.
+An **Oracle** is a specialist agent for planning review, mediation, and explicitly authorized corrections.
+The Coordinator manages the workflow; it does not patch implementation or approve its own work.
+
+### Implementation stays in isolated worktrees
+
+Each implementation lane gets its own Git branch and worktree: a separate working directory for that lane's changes.
+Implementation agents edit files, run focused checks, update task checkboxes, and commit inside that worktree.
+Tasks in the same lane reuse its worktree, with only one writer at a time.
+Independent lanes can run in parallel when their file ownership permits it.
+
+The Coordinator keeps the feature checkout separate.
+It merges reviewed lane commits into the feature branch only after the required reviews and human checkpoints pass.
+Workers do not apply implementation patches directly to that checkout.
+Release-preparation authors also use a separate worktree after lane integration.
+
+### What you get
+
+- Committed specifications, task completion marks, and reviewed implementation.
+- Local records of task ownership, agent outcomes, reviews, approvals, and release evidence.
+- A progress dashboard showing task and lane state, reviews, and blockers.
+- A recovery path that resumes incomplete work instead of restarting completed tasks.
+
+The Python helper records decisions and checks their bindings. It does not launch agents, perform reviews, or grant approval.
+The coding-agent harness launches the agents. No helper command opens or merges a PR.
 
 ## Use
 
-1. Open the consuming repository's feature checkout in your harness.
-2. Ask the agent to use this skill.
-3. Answer the model-selection and approval questions.
+1. Open your project's feature checkout in your coding-agent harness.
+2. Ask the agent to use `feature-development-skill` with a feature request or an existing OpenSpec change.
+3. Answer its questions about requirements, models, and approvals.
+4. Review the plan before authorizing implementation.
 
-Example requests:
+You do not need to launch each agent manually or memorize the helper commands.
+The Coordinator starts at [SKILL.md](SKILL.md) and follows the phase guides.
+It stops at required human decisions; a passing test is not your approval.
 
-> Use feature-development-skill to plan and implement the active OpenSpec change.
+### Example: build a feature across several layers
 
-> Use feature-development-skill to resume this change from its recorded coordination state.
+> Use feature-development-skill to add saved searches.
+> Users should be able to name, reopen, and delete their saved searches.
+> Clarify ownership and access rules with me before implementation.
+> Define the OpenSpec requirements and acceptance criteria.
+> Propose tasks and lanes for the relevant storage, API, and UI changes.
+> Complete the required planning reviews.
+> Ask for my approval before implementation.
 
-The coordinator starts at [SKILL.md](SKILL.md).
-The helper records workflow events; it does not launch agents or grant approval.
-No helper command opens or merges a PR.
+This is a good fit because one feature spans several parts of the project.
+The Coordinator discovers the existing architecture and assigns the required implementation, test, and UI reviews.
+It does not assume a framework or database.
 
-## Files and runtime records
+### Example: build a backend-only feature
 
-| Location | Purpose |
-|---|---|
-| [SKILL.md](SKILL.md) | Skill metadata and workflow entry point |
-| [bin/featdev.py](bin/featdev.py) | Standard-library helper and self-check |
-| [workflow/](workflow/) | Phase instructions and shared handoff contract |
-| [subagent-roles/](subagent-roles/) | Harness-independent role prompts |
-| [examples/](examples/) | Human-readable walkthrough |
-| `.agents/workflow/plan-graph.json` in the consuming repository | Gitignored repository graph: changes → lanes → tasks |
-| `.agents/workflow/coordination.json` in the consuming repository | Shared runtime records: changes → lanes → tasks |
-| `.agents/workflow/<change>/` in the consuming repository | OpenSpec artifact-review ledger, briefs, reports, and evidence |
-| `.agents/workflow/plan-graph-review.json` in the consuming repository | Separate repository graph-review ledger |
-| `.agents/workflow/plan-approval.json` in the consuming repository | Human plan-approval record: approver, HEAD, graph and artifact digests |
-| `.agents/workflow/` in the consuming repository | Repo-level capability map and model choices |
+> Use feature-development-skill to add a CSV export for reports.
+> Agree on permissions, exported fields, and size limits with me in the spec.
+> Follow this repository's test and release rules.
+> Complete the required planning reviews.
+> Ask for my approval before implementation.
 
-Treat the installed skill as read-only.
-Run workflow commands from the consuming feature checkout, except worker commands assigned to a lane worktree.
-The helper locally excludes `.agents/workflow/` from Git when it creates records.
-Keep the graph, coordination file, and approval record together in the same checkout for recovery.
-None is committed; back them up outside Git.
-Planning reviews each change's OpenSpec artifacts first, then the whole repository graph.
-One Coordinator writes the shared coordination file across all changes.
-Use `--change <change>` for change-specific commands when the graph contains multiple changes.
-See [recovery](workflow/recovery.md#repository-object-migration) for retained per-change records.
-Do not publish them as part of the skill.
+UI review is not required when the approved plan has no UI work.
+Review duties follow the plan's risk and UI flags, not a fixed application template.
 
-## Validate this repository
+### Example: implement an existing specification
 
-Run these commands from the skill repository:
+> Use feature-development-skill for the existing OpenSpec change saved-searches.
+> Read its proposal, design, specs, and tasks.
+> Resolve any gaps in the specification.
+> Complete the planning reviews.
+> Ask for my approval before implementation.
 
-```bash
-python3 -m py_compile bin/featdev.py
-python3 bin/featdev.py --self-check
-python3 -m unittest discover -s tests
-git diff --check
-```
+The Coordinator reuses the change rather than creating a duplicate.
 
-The self-check uses temporary Git repositories and an isolated Git configuration.
-It checks helper behavior, workflow documentation, and local Markdown link targets.
-It does not launch real subagents or perform human approvals.
+### Example: resume interrupted work
 
-The official reference validator needs Python 3.11 or later.
-Install its development-only dependencies in a separate environment:
+> Use feature-development-skill to resume saved-searches.
+> Reconcile the local records and surviving worktrees.
+> Show completed tasks, pending reviews, and blockers.
+> Continue from the first incomplete operation without restarting completed work.
 
-```bash
-python3.11 -m venv .venv
-.venv/bin/python -m pip install -r requirements-dev.txt
-.venv/bin/skills-ref validate "$PWD"
-```
+Resume from the same feature checkout with its local workflow records intact.
+Git alone cannot reconstruct lost reviews, approvals, or the local lane plan.
 
-`requirements-dev.txt` pins the upstream reference validator to a Git revision.
-Normal skill use does not require that package or a virtual environment.
-GitHub Actions runs validation on Python 3.9 and 3.11.
-Only the Python 3.11 job installs the reference validator.
+### Monitor progress
 
-## License
+> Show the progress dashboard for saved-searches.
+> Summarize anything waiting for my decision.
 
-[MIT](LICENSE).
+The [dashboard and status commands](workflow/helper-commands.md#status-and-task-status) show progress from local records.
+The dashboard is a monitor, not proof of approval.
+For the command-level lifecycle, see the [worked example](examples/minimal-workflow.md).
+
+Licensed under [MIT](LICENSE).
