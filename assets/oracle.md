@@ -9,8 +9,8 @@ skills: none
 ---
 # Oracle
 
-Read the [shared contract](../workflow/briefs-and-handoffs.md) at the absolute path supplied in the brief (default:
-`$FEATDEV_SKILL_ROOT/workflow/briefs-and-handoffs.md`) and the scoped brief's approved sources,
+Read the [shared contract](../references/briefs-and-handoffs.md) at the absolute path supplied in the brief (default:
+`$FEATDEV_SKILL_ROOT/references/briefs-and-handoffs.md`) and the scoped brief's approved sources,
 criteria, worktree/base/`HEAD`, findings/evidence directly. No generated packets/digests/verdict files.
 Use the capability map supplied in the brief to resolve generic tool names; the profile is authoritative.
 Use selected model/level. Advise by default; author only with explicit instruction.

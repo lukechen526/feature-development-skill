@@ -38,9 +38,9 @@ Commands record real events; they do not launch agents, perform reviews, or gran
 Never use sample text as a review report or human approval.
 Do not paste the entire walkthrough as an unattended script: stop at every agent handoff and human decision.
 
-Read [the skill](../SKILL.md) and [the handoff contract](../workflow/briefs-and-handoffs.md) first.
+Read [the skill](../SKILL.md) and [the handoff contract](briefs-and-handoffs.md) first.
 Stop after any failed command or unmet gate.
-This walkthrough instantiates the [canonical helper commands](../workflow/helper-commands.md).
+This walkthrough instantiates the [canonical helper commands](helper-commands.md).
 
 ## 1. Prepare the consuming repository
 
@@ -63,7 +63,7 @@ openspec list --json
 mkdir -p "$STORE/briefs" "$STORE/reviews" "$STORE/reports" "$STORE/evidence"
 ```
 
-Complete [preflight and role setup](../workflow/preflight-and-roles.md) before any launch.
+Complete [preflight and role setup](preflight-and-roles.md) before any launch.
 Write the repo-level capability map and human-approved model selection.
 The Coordinator reads the selected role profiles for each actual harness launch.
 Helper dispatch records take the role and task, not separate model or thinking overrides.
@@ -79,7 +79,7 @@ The Coordinator writes the task checklist. No graph is required for this review.
 ```bash
 printf '%s\n' '- [ ] 1.1 Implement message.greeting() returning hello.' > "$TASKS"
 PLAN_HEAD="$(git rev-parse HEAD)"
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" plan-dispatch   --scope change --role oracle     --report "$STORE/reviews/artifacts-oracle-r1.md"
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" plan-dispatch   --scope change --role oracle     --report "$STORE/reviews/artifacts-oracle-r1.md"
 ```
 
 Write `$STORE/briefs/artifacts-oracle-r1.md` using operation `openspec_review`.
@@ -88,11 +88,11 @@ Exclude the repo graph. Launch a fresh read-only Oracle through the preflighted 
 Read its actual report. Only after a real `PASS`, record:
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" plan-review   --scope change --role oracle PASS --head "$PLAN_HEAD" --report "$STORE/reviews/artifacts-oracle-r1.md"
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" plan-review   --scope change --role oracle PASS --head "$PLAN_HEAD" --report "$STORE/reviews/artifacts-oracle-r1.md"
 ```
 
 For multiple included changes, repeat artifact review for each before proceeding.
-For `MORE WORK`, use the bounded correction procedure in [the plan phase](../workflow/plan.md).
+For `MORE WORK`, use the bounded correction procedure in [the plan phase](plan.md).
 
 ### Author and review the repo graph
 
@@ -124,10 +124,10 @@ cat > "$PLAN" <<'JSON'
   }
 }
 JSON
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" plan-validate "$PLAN"
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" plan-graph "$PLAN" --format md
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-validate "$PLAN"
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-graph "$PLAN" --format md
 mkdir -p "$FEATURE_CHECKOUT/.agents/workflow/reviews" "$FEATURE_CHECKOUT/.agents/workflow/briefs"
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" plan-dispatch   --scope graph --role oracle     --report "$FEATURE_CHECKOUT/.agents/workflow/reviews/plan-graph-oracle-r1.md"
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-dispatch   --scope graph --role oracle     --report "$FEATURE_CHECKOUT/.agents/workflow/reviews/plan-graph-oracle-r1.md"
 ```
 
 Write `.agents/workflow/briefs/plan-graph-oracle-r1.md` using operation `plan_graph_review`.
@@ -135,7 +135,7 @@ Supply the whole repo graph, every included change's artifact verdict, and the r
 Launch a separate fresh Oracle. Read the actual report. Only after a real graph `PASS`, record:
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" plan-review   --scope graph --role oracle PASS --head "$PLAN_HEAD"   --report "$FEATURE_CHECKOUT/.agents/workflow/reviews/plan-graph-oracle-r1.md"
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-review   --scope graph --role oracle PASS --head "$PLAN_HEAD"   --report "$FEATURE_CHECKOUT/.agents/workflow/reviews/plan-graph-oracle-r1.md"
 ```
 
 The artifact ledger is `$STORE/plan-reviews.json`.
@@ -150,7 +150,7 @@ Never stage a repo-level runtime object.
 ```bash
 git add "openspec/changes/$CHANGE"
 git commit -m "docs: add approved greeting artifacts"
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" plan-approve --approver human
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-approve --approver human
 ```
 
 `plan-approve` writes `.agents/workflow/plan-approval.json` with the approver, current HEAD,
@@ -160,8 +160,8 @@ missing/stale graph `PASS`.
 ## 3. Dispatch the implementer
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" lane-open message
-WORKTREE="$(python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" status --json | \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" lane-open message
+WORKTREE="$(python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" status --json | \
   python3 -c 'import json, sys; print(json.load(sys.stdin)["lanes"]["message"]["worktree"])')"
 IMPLEMENTER_KEY="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
 ```
@@ -172,7 +172,7 @@ Include task `1.1`, the criterion, focused check, lane worktree, base, `HEAD`, r
 Require the live report at `$STORE/reports/message-report.md`.
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" dispatch message implementer \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" dispatch message implementer \
     --task 1.1 --key "$IMPLEMENTER_KEY"
 ```
 
@@ -203,9 +203,9 @@ Only after success, the coordinator records:
 
 ```bash
 cd "$FEATURE_CHECKOUT"
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" dispatch-done message implementer \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" dispatch-done message implementer \
   --key "$IMPLEMENTER_KEY" --worker-run-id "$IMPLEMENTER_RUN_ID" --result ok
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" sync
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" sync
 LANE_HEAD="$(git -C "$WORKTREE" rev-parse HEAD)"
 ```
 
@@ -217,7 +217,7 @@ Name the exact lane range and `$STORE/reviews/message-code-reviewer-r1.md`.
 
 ```bash
 CODE_KEY="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" dispatch message code-reviewer \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" dispatch message code-reviewer \
     --task 1.1 --key "$CODE_KEY"
 ```
 
@@ -227,18 +227,18 @@ Verify its receipt and read the report.
 After an actual independent `PASS`, record:
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" dispatch-done message code-reviewer \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" dispatch-done message code-reviewer \
   --key "$CODE_KEY" --worker-run-id "$CODE_RUN_ID" --result ok
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" lane-review message code-reviewer PASS \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" lane-review message code-reviewer PASS \
   --commit "$LANE_HEAD" --report "$STORE/reviews/message-code-reviewer-r1.md"
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" sync
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" lane-merge message
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" lane-close message
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" sync
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" sync
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" lane-merge message
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" lane-close message
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" sync
 ```
 
 For `MORE WORK`, record that verdict instead of merging.
-Follow [lane correction and escalation](../workflow/lane.md).
+Follow [lane correction and escalation](lane.md).
 This lane has no UI or sensitive flag, so no per-lane human checkpoint is required.
 
 ## 5. Finish on the feature branch
@@ -259,7 +259,7 @@ Prepared HEAD: $(git rev-parse HEAD)
 Preparation: the fixture policy requires no version or generated-file changes.
 Input: message.py
 EOF
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" finish-record classify \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" finish-record classify \
   --classification "$CLASSIFICATION" --artifact "$STORE/evidence/preparation.md" \
   --input message.py --check greeting --inspection output
 ```
@@ -269,7 +269,7 @@ Run and record the selected check on committed integrated `HEAD`:
 ```bash
 python3 -B -c 'import message; assert message.greeting() == "hello"; print("release check: PASS")' \
   > "$STORE/evidence/greeting.txt" 2>&1 && \
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" finish-record capture \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" finish-record capture \
   --check greeting --artifact "$STORE/evidence/greeting.txt" --input message.py
 ```
 
@@ -280,24 +280,24 @@ python3 -B -c 'import message; print(message.greeting())'
 ```
 
 Expected output: `hello`.
-The human records the real decision in `$STORE/evidence/human-output.md` using [the inspection format](../workflow/finish.md).
+The human records the real decision in `$STORE/evidence/human-output.md` using [the inspection format](finish.md).
 The record must name checkpoint `output`.
 No example record substitutes for that decision.
 
 After the human records acceptance:
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" finish-record inspect \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" finish-record inspect \
   --check output --artifact "$STORE/evidence/human-output.md"
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" finish-record pr-check
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change "$CHANGE" status --json
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" finish-record pr-check
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" status --json
 ```
 
 Ask separately for approval to open the PR.
 Follow the repository's PR policy after that approval.
-Monitor automated PR checks and bot code-review comments using [post-PR follow-up](../workflow/finish.md#post-pr-follow-up).
+Monitor automated PR checks and bot code-review comments using [post-PR follow-up](finish.md#post-pr-follow-up).
 Route actionable findings through implementation and independent review, then recheck the updated PR.
-Sync and archive the completed OpenSpec change before human merge using [the finish sequence](../workflow/finish.md#openspec-sync-and-archive).
+Sync and archive the completed OpenSpec change before human merge using [the finish sequence](finish.md#openspec-sync-and-archive).
 Recheck the archival commit on the PR. The human retains the later PR merge decision.
 
 ## Monitor or resume this example
@@ -307,7 +307,7 @@ Ask the Coordinator for progress while workers run:
 > Show the hello-message dashboard.
 > Summarize completed work, pending reviews, and blockers.
 
-Use the [status and dashboard commands](../workflow/helper-commands.md#status-and-task-status) from the feature checkout.
+Use the [status and dashboard commands](helper-commands.md#status-and-task-status) from the feature checkout.
 A live dashboard is optional; run its server in a separate terminal.
 The dashboard shows recorded progress. It never supplies a review verdict or human approval.
 
@@ -319,7 +319,7 @@ Ask:
 > Continue from the first incomplete operation.
 > Do not repeat completed tasks or recreate approval from chat history.
 
-The Coordinator follows [recovery](../workflow/recovery.md) before further affected operations.
+The Coordinator follows [recovery](recovery.md) before further affected operations.
 Do not restart the walkthrough at step 1 merely because a new session begins.
 
 ## Expected records
@@ -343,4 +343,4 @@ Local records remain in the same coordinator store.
 | `.agents/workflow/hello-message/evidence/` | Preparation receipt, release-check output, and human inspection record |
 
 `pr-check` must pass without `restage` on this normal path.
-For interrupted work or changed inputs, follow [recovery](../workflow/recovery.md).
+For interrupted work or changed inputs, follow [recovery](recovery.md).

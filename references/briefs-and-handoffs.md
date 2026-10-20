@@ -83,24 +83,24 @@ Missing inputs block; never invent evidence. Plain instructions, not review pack
 ## Implementation
 
 ```text
-Role: Implementer | lane: <id> | tasks: <ids>
+Role: Implementer | lane: <id> | task: <id>
 Role source: <absolute path to the role file> | profile: <id or sha256>
 Capability map: <absolute path to capability-map.md> | sha256: <hash>
 Worktree: <absolute path> | base: <SHA> | starting HEAD: <SHA>
 Sources: <role brief; repository rules; plan; relevant spec/design sections>
 Scope: <owned files/seams; dependencies; explicit exclusions>
-Acceptance: <criterion ID: observable result, for every assigned task>
+Acceptance: <criterion ID: observable result, for the assigned task>
 Checks: <criterion ID: command; execution owner; required evidence>
 Deliver: <report path; evidence directory/revision; required receipt fields>
 ```
 
-Require all assigned tasks, committed work/ticks, clean tree. Specify behavior, not speculative machinery.
+Require completion of the assigned task, committed work and tick, and a clean tree. Specify behavior, not speculative machinery.
 
 ## Long-process Runner
 
 ```text
 Role: Runner | lane: <id> | task: <id>
-Role source: <absolute path to subagent-roles/runner.md> | profile: <id or sha256>
+Role source: <absolute path to assets/runner.md> | profile: <id or sha256>
 Capability map: <absolute path to capability-map.md> | sha256: <hash>
 Worktree: <absolute path> | HEAD: <SHA>
 Command or poll target: <exact command / URL / device>

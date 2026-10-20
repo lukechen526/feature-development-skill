@@ -5136,16 +5136,16 @@ def _check_local_links(paths: list[Path]) -> None:
 def _check_docs(root: Path) -> None:
     """Lint the core docs and helper for portable role/harness references."""
     skill_files = [root / "SKILL.md"]
-    skill_files.extend(sorted((root / "workflow").glob("*.md")))
-    role_files = sorted((root / "subagent-roles").glob("*.md"))
+    skill_files.extend(sorted((root / "references").glob("*.md")))
+    role_files = sorted((root / "assets").glob("*.md"))
     skill_files.extend(role_files)
-    all_docs = skill_files + list(root.glob("README.md")) + sorted((root / "examples").glob("*.md"))
+    all_docs = skill_files + list(root.glob("README.md"))
     _check_local_links(all_docs)
     for path in all_docs:
         for retired in ("openspec/plan-graph.json", ".agents/workflow/plan-reviews.json"):
             if retired in path.read_text(encoding="utf-8"):
                 raise AssertionError(f"doc lint: {path} uses retired path {retired}")
-    helper = root / "bin" / "featdev.py"
+    helper = root / "scripts" / "featdev.py"
     banned = [
         r"\bpi\b", r"\bcodex\b", r"\borca\b", r"\bherdr\b", r"\bcaveman\b",
         r"\bponytail\b", r"multi-lane", r"ORCA_WORKTREE_ID", r"spawn_agent",
@@ -5183,15 +5183,15 @@ def _check_docs(root: Path) -> None:
     ):
         if required not in docs_text:
             raise AssertionError(f"doc lint: docs must mention {required!r}")
-    command_text = (root / "workflow" / "helper-commands.md").read_text(encoding="utf-8")
+    command_text = (root / "references" / "helper-commands.md").read_text(encoding="utf-8")
     for required in ("plan-dispatch", "plan-review", "human-defer", "sync", "task-status"):
         if required not in command_text:
             raise AssertionError(f"doc lint: helper-commands.md must mention {required!r}")
-    if "Role: Runner" not in (root / "workflow" / "briefs-and-handoffs.md").read_text(encoding="utf-8"):
+    if "Role: Runner" not in (root / "references" / "briefs-and-handoffs.md").read_text(encoding="utf-8"):
         raise AssertionError("doc lint: briefs must include the Runner template")
     for role_file in role_files:
         text = role_file.read_text(encoding="utf-8")
-        for required in ("role_id:", "workflow/briefs-and-handoffs.md", "FEATDEV_SKILL_ROOT"):
+        for required in ("role_id:", "references/briefs-and-handoffs.md", "FEATDEV_SKILL_ROOT"):
             if required not in text:
                 raise AssertionError(f"doc lint: {role_file} is missing {required!r}")
     expected_roles = {
@@ -5203,16 +5203,16 @@ def _check_docs(root: Path) -> None:
         "runner.md": "runner",
     }
     for filename, role_id in expected_roles.items():
-        path = root / "subagent-roles" / filename
+        path = root / "assets" / filename
         if not path.is_file():
             raise AssertionError(f"doc lint: missing role file {filename}")
         if f"role_id: {role_id}" not in path.read_text(encoding="utf-8").splitlines():
             raise AssertionError(f"doc lint: {filename} must declare role_id: {role_id}")
-    if (root / "subagent-roles" / "reviewer.md").exists():
+    if (root / "assets" / "reviewer.md").exists():
         raise AssertionError("doc lint: the combined reviewer role file must be removed")
-    if "Mutation testing" not in (root / "subagent-roles" / "test-reviewer.md").read_text(encoding="utf-8"):
+    if "Mutation testing" not in (root / "assets" / "test-reviewer.md").read_text(encoding="utf-8"):
         raise AssertionError("doc lint: test-reviewer must own mutation testing")
-    if "combined code/test" not in (root / "subagent-roles" / "code-reviewer.md").read_text(encoding="utf-8"):
+    if "combined code/test" not in (root / "assets" / "code-reviewer.md").read_text(encoding="utf-8"):
         raise AssertionError("doc lint: code-reviewer must document the ordinary combined duty")
     table_commands = set(re.findall(r"^\|\s*`([a-z][a-z-]+)", command_text, flags=re.MULTILINE))
     parser = _parser()
@@ -5381,7 +5381,7 @@ def _self_check() -> int:
 
         # Documentation cannot silently restore the retired capture-before-version order:
         # classification/version (step 2) must precede the release-gate/capture step (step 3).
-        finish_guidance = (Path(__file__).resolve().parent.parent / "workflow/finish.md").read_text()
+        finish_guidance = (Path(__file__).resolve().parent.parent / "references/finish.md").read_text()
         assert "Release classification and version" in finish_guidance
         classification_at = finish_guidance.index("Release classification and version")
         gate_at = finish_guidance.index("Execute the repository's release gate")
@@ -5389,10 +5389,10 @@ def _self_check() -> int:
         assert "capture only after" not in finish_guidance.lower().replace("classification and version are complete", "")
         assert "no workflow CLI command" not in finish_guidance
         assert "The release gate (step 1)" not in finish_guidance
-        role_directory = Path(__file__).resolve().parent.parent / "subagent-roles"
+        role_directory = Path(__file__).resolve().parent.parent / "assets"
         for role_file in role_directory.glob("*.md"):
             role_text = role_file.read_text()
-            assert "workflow/briefs-and-handoffs.md" in role_text
+            assert "references/briefs-and-handoffs.md" in role_text
             assert "FEATDEV_SKILL_ROOT" in role_text
 
         # Normal dispatches, cleanup, and release recording work without application-specific files.

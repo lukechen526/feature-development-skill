@@ -10,6 +10,7 @@ human changes it.
 
 Discover applicable [repository agent instructions](briefs-and-handoffs.md#repository-instructions) before planning or dispatch.
 Record their paths for scoped briefs. No particular instruction filename is required.
+Verify `openspec --version` when establishing OpenSpec CLI availability.
 
 Do not assume a provider, harness, or agent registry. Inspect the live tool surface and record what it
 actually supports. Do not infer a capability from a tool name, a package manifest, or a previous run.
@@ -32,7 +33,7 @@ actually supports. Do not infer a capability from a tool name, a package manifes
 | Structured output | Can the child return a typed receipt? |
 
 Resolve the skill root once, in this order: `FEATDEV_SKILL_ROOT`; the loaded skill's base directory; a
-verified project or user skill directory. Require `bin/featdev.py`, `workflow/`, and `subagent-roles/`.
+verified project or user skill directory. Require `scripts/featdev.py`, `references/`, and `assets/`.
 Record the absolute path and pass it to every command and brief.
 
 Choose the first mechanism that satisfies fresh launch, a settable working directory, and role prompt
@@ -121,12 +122,12 @@ The following role IDs identify dispatchable subagents.
 
 | Role ID | Role file | Review duty |
 |---|---|---|
-| `implementer` | [subagent-roles/implementer.md](../subagent-roles/implementer.md) | Implementation, tests, fixes |
-| `code-reviewer` | [subagent-roles/code-reviewer.md](../subagent-roles/code-reviewer.md) | Implementation/task completeness; ordinary lanes also own the combined code/test review |
-| `test-reviewer` | [subagent-roles/test-reviewer.md](../subagent-roles/test-reviewer.md) | Test adequacy/coverage/quality and mutation testing; high-risk lanes |
-| `ui-reviewer` | [subagent-roles/ui-reviewer.md](../subagent-roles/ui-reviewer.md) | Supplied rendered-UI evidence |
-| `oracle` | [subagent-roles/oracle.md](../subagent-roles/oracle.md) | Plan review, mediation, authorized fixes, combined review |
-| `runner` | [subagent-roles/runner.md](../subagent-roles/runner.md) | Long checks and polling; observations only, no verdict |
+| `implementer` | [assets/implementer.md](../assets/implementer.md) | Implementation, tests, fixes |
+| `code-reviewer` | [assets/code-reviewer.md](../assets/code-reviewer.md) | Implementation/task completeness; ordinary lanes also own the combined code/test review |
+| `test-reviewer` | [assets/test-reviewer.md](../assets/test-reviewer.md) | Test adequacy/coverage/quality and mutation testing; high-risk lanes |
+| `ui-reviewer` | [assets/ui-reviewer.md](../assets/ui-reviewer.md) | Supplied rendered-UI evidence |
+| `oracle` | [assets/oracle.md](../assets/oracle.md) | Plan review, mediation, authorized fixes, combined review |
+| `runner` | [assets/runner.md](../assets/runner.md) | Long checks and polling; observations only, no verdict |
 
 The same role ID is used in the role file's `role_id`, `model-selection.json`, the positional role in
 `dispatch <lane> <role>` and `lane-review <lane> <role> <verdict>`.
@@ -196,7 +197,7 @@ When writing it, copy in the preflight's `harness`, `skill_root`, `capability_ma
   },
   "profiles": {
     "implementer": {
-      "role_file": "<absolute path to subagent-roles/implementer.md>",
+      "role_file": "<absolute path to assets/implementer.md>",
       "prompt_sha256": "<hash>",
       "mechanism": "native-agent | composed-prompt | one-shot-orchestration | external-cli",
       "working_directory": "<absolute lane worktree>",
@@ -225,7 +226,7 @@ silently substituted.
 
 A role needs a launch profile before it can be dispatched. Do not assume the files are installed.
 
-1. **Read the canonical role files** in this skill: `subagent-roles/*.md`, each with `name`, `role_id`,
+1. **Read the canonical role files** in this skill: `assets/*.md`, each with `name`, `role_id`,
    `description`, a requested capability list, and a prompt body.
 2. **Normalize the role file into a profile.** Preserve the prompt body verbatim. Treat the role's tool
    list as requested capabilities and map each to the harness's actual tools; a capability the harness

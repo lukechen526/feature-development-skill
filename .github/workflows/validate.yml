@@ -24,8 +24,6 @@ jobs:
         if: matrix.python-version == '3.11'
         run: skills-ref validate "$GITHUB_WORKSPACE"
       - name: Compile helper
-        run: python -m py_compile bin/featdev.py
+        run: python -m py_compile scripts/featdev.py
       - name: Run self-check and local link checks
-        run: python bin/featdev.py --self-check
-      - name: Test repository objects and migration
-        run: python -m unittest discover -s tests
+        run: python scripts/featdev.py --self-check

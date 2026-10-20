@@ -126,8 +126,8 @@ Git alone cannot reconstruct lost reviews, approvals, or the local lane plan.
 > Show the progress dashboard for saved-searches.
 > Summarize anything waiting for my decision.
 
-The [dashboard and status commands](workflow/helper-commands.md#status-and-task-status) show progress from local records.
+The [dashboard and status commands](references/helper-commands.md#status-and-task-status) show progress from local records.
 The dashboard is a monitor, not proof of approval.
-For the command-level lifecycle, see the [worked example](examples/minimal-workflow.md).
+For the command-level lifecycle, see the [worked example](references/minimal-workflow.md).
 
 Licensed under [MIT](LICENSE).

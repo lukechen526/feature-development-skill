@@ -68,7 +68,7 @@ Once a shared object exists, legacy files never replace its entries.
 
 1. Pause dispatches before migration.
 2. Back up the existing plans, coordination records, and approval record together.
-3. Run `python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" migrate-repo` from the feature checkout.
+3. Run `python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" migrate-repo` from the feature checkout.
 4. Inspect the imported change, lane, task, review, dispatch, and approval records.
 5. Obtain current OpenSpec artifact passes for each affected change.
 6. Obtain a separate Oracle repo graph pass after every included change's artifact review passes.

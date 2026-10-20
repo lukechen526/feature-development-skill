@@ -1,6 +1,6 @@
 # Helper command reference
 
-This is the canonical command reference for `bin/featdev.py`.
+This is the canonical command reference for `scripts/featdev.py`.
 The [planning](plan.md), [lane](lane.md), [finish](finish.md), and [recovery](recovery.md) guides own workflow order and authority.
 Commands record events and validate bindings. They never launch agents, perform reviews, grant consent, or open/merge PRs.
 
@@ -56,11 +56,11 @@ Finish records live in `changes.<change>.finish_dispatches`, separately from lan
 Every included lane must already be integrated. Completed lanes stay closed.
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> dispatch --scope finish implementer \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> dispatch --scope finish implementer \
   --task release-preparation --worktree <separate-worktree> --key <key>
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> dispatch-done --scope finish implementer \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> dispatch-done --scope finish implementer \
   --key <key> --worker-run-id <worker-id> --result ok
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> dispatch --scope finish runner \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> dispatch --scope finish runner \
   --task pr-monitoring --key <key>
 ```
 
@@ -73,9 +73,9 @@ Record completion with the exact key. A changed feature HEAD or scope requires a
 ## Change artifact review
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> plan-dispatch   --scope change --role oracle     --report .agents/workflow/<change>/reviews/artifacts-oracle-r<round>.md
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> plan-dispatch   --scope change --role oracle     --report .agents/workflow/<change>/reviews/artifacts-oracle-r<round>.md
 
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> plan-review   --scope change --role oracle <PASS|MORE WORK> --head <feature-head-sha>   --report .agents/workflow/<change>/reviews/artifacts-oracle-r<round>.md
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> plan-review   --scope change --role oracle <PASS|MORE WORK> --head <feature-head-sha>   --report .agents/workflow/<change>/reviews/artifacts-oracle-r<round>.md
 ```
 
 Record intent before launching the actual Oracle. Record its verdict only after reading the actual report.
@@ -87,7 +87,7 @@ After two `MORE WORK` verdicts, the Coordinator may authorize a bounded Oracle a
 The brief identifies the exact graph or artifact paths, report, and exclusions. Coordination is never writable by the Oracle.
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" plan-dispatch --scope graph --access write --role oracle \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-dispatch --scope graph --access write --role oracle \
   --task graph-correction --key <author-key> --report <correction-report>
 ```
 
@@ -100,8 +100,8 @@ Artifact correction uses `--scope change --change <change>` instead.
 ## Repo graph review
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" plan-dispatch   --scope graph --role oracle     --report .agents/workflow/reviews/plan-graph-oracle-r<round>.md
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" plan-review   --scope graph --role oracle <PASS|MORE WORK> --head <feature-head-sha>   --report .agents/workflow/reviews/plan-graph-oracle-r<round>.md
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-dispatch   --scope graph --role oracle     --report .agents/workflow/reviews/plan-graph-oracle-r<round>.md
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-review   --scope graph --role oracle <PASS|MORE WORK> --head <feature-head-sha>   --report .agents/workflow/reviews/plan-graph-oracle-r<round>.md
 ```
 
 Every included change needs a current artifact `PASS` first. Launch a separate Oracle between intent and verdict commands.
@@ -110,7 +110,7 @@ This scope covers the entire local graph; `--change` is refused. See [Oracle sta
 ## Plan approval
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" plan-approve [--approver <label>]
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-approve [--approver <label>]
 ```
 
 Run after the human approves the artifacts and the current repo graph PASS, and after committing the OpenSpec artifacts.
@@ -121,8 +121,8 @@ It records consent; it never grants approval. `status` shows whether the record 
 ## Plan validation and rendering
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py"   plan-validate .agents/workflow/plan-graph.json
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py"   plan-graph .agents/workflow/plan-graph.json --format md
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py"   plan-validate .agents/workflow/plan-graph.json
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py"   plan-graph .agents/workflow/plan-graph.json --format md
 ```
 
 The default covers all graph entries. Global `--change <change>` selects one entry.
@@ -131,13 +131,13 @@ With several changes, `--tasks <tasks.md>` also requires `--change`.
 ## lane-open
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> lane-open <lane-id>
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> lane-open <lane-id>
 ```
 
 ## dispatch
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" \
   --change <change> dispatch <lane-id> <role> \
     --task <task-id> [--key <key>] \
   [--access <read-only|write>] [--acceptance <path>] [--evidence <path>]
@@ -152,7 +152,7 @@ Combined Oracle intents snapshot the supplied acceptance and evidence paths/hash
 ## dispatch-done
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" \
   --change <change> dispatch-done <lane-id> <role> --key <dispatch-key> \
   [--worker-run-id <worker-run-id>] [--tokens <n>] [--cost <x>] [--result <ok|failed>]
 ```
@@ -163,7 +163,7 @@ A new task or correction requires a new key; retries of the same intent retain i
 ## lane-review
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" \
   --change <change> lane-review <lane-id> <role> <PASS|MORE WORK> \
   --commit <head-sha> --report <absolute-report-path> \
   [--evidence-revision <rev>] [--evidence <path>]
@@ -177,7 +177,7 @@ An ordinary lane uses `code-reviewer` for implementation and test adequacy. High
 ## human-gate
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" \
   --change <change> human-gate <lane-id> \
   --state <waiting|approved|rejected|revoked> --commit <head-sha> --evidence-revision <rev> [--evidence <path>]
 ```
@@ -185,7 +185,7 @@ python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
 ## human-defer
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" \
   --change <change> human-defer <lane-id> \
   --commit <head-sha> --evidence-revision <rev> \
   --rationale "<bounded, reversible, low-risk; excluded sensitive effects>" \
@@ -196,8 +196,38 @@ python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
 
 ## oracle-stand-in
 
+Obtain the human's explicit authorization before recording a grant.
+The Coordinator records that actual decision in a JSON file under the change's ignored evidence directory.
+This template defines the format; it does not grant authority. Replace every placeholder with the authorized value.
+
+```json
+{
+  "id": "<unique-grant-id>",
+  "scope": ["<lane-id>"],
+  "granted_by": "human",
+  "granted_at": "<actual-grant-timestamp>",
+  "plan_sha256": "<selected-change-plan-digest>"
+}
+```
+
+- `id`: a non-empty identifier unique to this human grant.
+- `scope`: a non-empty list of authorized lane IDs in the selected change. Use `["all"]` only if the human explicitly grants that scope.
+- `granted_by`: the literal `human`; an agent cannot originate the authorization.
+- `granted_at`: the actual authorization timestamp; use an ISO-8601 timestamp.
+- `plan_sha256`: copy the top-level `plan_sha256` from this command after the plan is approved:
+
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> status --json
+```
+
+Do not use `plan_approval.plan_sha256` or a lane's `lane_plan_sha256`; they bind different inputs.
+The selected-change plan must match the plan at lane opening. Reconcile a changed plan before obtaining a renewed grant.
+A grant is consumed once for one lane checkpoint, even when its scope contains `all`.
+Use separate files for the grant, the human acceptance checklist, and the independent Oracle's actual stand-in report.
+Record the checkpoint only after the Oracle returns `PASS`:
+
+```bash
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" \
   --change <change> human-gate <lane-id> \
   --state approved --commit <head-sha> --evidence-revision <rev> \
   --approved-by oracle --authorization <grant.json> --stand-in-report <report.md> \
@@ -209,7 +239,7 @@ This is the authorized form of `human-gate`, not a separate command. A grant nev
 ## human-override
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> lane-merge <lane-id> \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> lane-merge <lane-id> \
   --human-override --override-reason "<the human decision>"
 ```
 
@@ -218,14 +248,14 @@ This is an explicit-human-decision form of `lane-merge`. It waives only review d
 ## lane-merge-and-lane-close
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> lane-merge <lane-id>
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> lane-close <lane-id>
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> lane-merge <lane-id>
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> lane-close <lane-id>
 ```
 
 ## Combined Oracle review
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> lane-review <lane> code-reviewer PASS \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> lane-review <lane> code-reviewer PASS \
   --combined --commit <candidate-sha> --report <report-path> \
   --oracle-provenance <real-reviewer-id> --feature-base <feature-base> --review-base <whole-change-base> \
   --acceptance <acceptance-path> --evidence <evidence-path> --evidence-revision <revision>
@@ -238,7 +268,7 @@ This implementation review does not replace either planning review stage.
 ## lane-mediate
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> lane-mediate <lane> \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> lane-mediate <lane> \
   --report <oracle-mediation-report> [--role <reviewer-role>]
 ```
 
@@ -248,12 +278,12 @@ See [correction and escalation](lane.md#escalation).
 ## Status and task status
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> sync
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> task-status <lane> <task> \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> sync
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> task-status <lane> <task> \
   --status <pending|in_progress|done|blocked> [--reason <reason>]
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> status [--json]
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> dashboard [--output <path>]
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> dashboard --serve
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> status [--json]
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> dashboard [--output <path>]
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> dashboard --serve
 ```
 
 Sync and task-status writes belong to the Coordinator. A `done` claim never replaces a committed task tick.
@@ -264,14 +294,14 @@ Status JSON and dashboards are per-change views of the shared objects, not indep
 Use the order and human gates in [finish](finish.md). Repository guides define labels, checks, inputs, and checkpoints.
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> finish-record classify \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> finish-record classify \
   --classification <label> [--version <label>] --artifact <preparation-receipt> --input <tracked-path> \
   --check <selected-check> [--inspection <checkpoint>]
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> finish-record capture \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> finish-record capture \
   --check <selected-check> --artifact <check-receipt> --input <tracked-path>
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> finish-record inspect \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> finish-record inspect \
   --check <checkpoint> --artifact <human-inspection-record>
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> finish-record pr-check
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> finish-record pr-check
 ```
 
 Repeat `--input`, `--check`, and `--inspection` where the corresponding action accepts multiple values.
@@ -279,7 +309,7 @@ Each capture/inspection action selects exactly one `--check`. Use `pr-check` to 
 Preparation changes require restaging, followed by renewed evidence and inspections:
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --change <change> finish-record restage \
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> finish-record restage \
   --artifact <preparation-receipt> --input <tracked-path> [--classification <label>]
 ```
 
@@ -289,7 +319,7 @@ No finish action grants PR-opening or PR-merge consent.
 ## Migration
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" migrate-repo
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" migrate-repo
 ```
 
 This imports legacy plans and ledgers without deleting their sources or committing the local objects.
@@ -298,7 +328,7 @@ Follow the backup, review, and approval steps in [recovery](recovery.md#reposito
 ## Developer self-check
 
 ```bash
-python3 "$FEATDEV_SKILL_ROOT/bin/featdev.py" --self-check
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --self-check
 ```
 
 The self-check uses isolated repositories. It does not launch real agents or perform human approvals.
