@@ -4,10 +4,8 @@ All roles read this contract. Approved sources and repository rules override bri
 
 ## Context
 
-Use fresh scoped briefs from Coordinator's [briefs-and-handoffs.md](briefs-and-handoffs.md); never fork/copy Coordinator history.
-Preserve role/tasks, criteria, dependencies, owned seams, exclusions, reviewer remit, sources,
-change, lane or finish scope, worktree/base/`HEAD`, profile, contract, deadline, check owner,
-report/evidence paths/revision, receipt fields.
+Use fresh scoped briefs; never fork or copy Coordinator history.
+Preserve role and tasks, criteria, dependencies, owned seams, exclusions, reviewer remit, sources, scope, worktree and HEADs, profile, contract, deadline, check owner, and report/evidence paths.
 
 Every lane brief names `Change`, `Lane`, `Task/round`, `Worktree`, `Base`, `HEAD`, `Profile`, `Contract`,
 and `Deadline`. A finish brief names `Change`, `Scope: finish`, `Task`, `Worktree`, `Integrated HEAD`,
@@ -75,38 +73,26 @@ The Coordinator writes the brief before dispatch and passes its absolute path, t
 capability map's absolute path. The worker writes the report at the named path, updating it after every
 commit and check. A later session must find every artifact by pattern, without asking the Coordinator.
 Missing directory: create it, do not relocate it.
-Every brief identifies the OpenSpec change, lane or finish scope, task or review round, worktree, base
-or integrated HEAD, profile, contract, and deadline.
 The plan and coordination entries use `changes.<change>.lanes.<lane>.tasks.<task>`.
 Workers normally read the shared plan without editing it. Only a bounded Oracle planning correction may write it.
 Only the Coordinator writes coordination. During Oracle graph authorship, the Coordinator pauses graph mutations.
-Finish briefs replace lane identity with finish scope, change, integrated HEAD, and explicit owned paths.
-Finish briefs use `.agents/workflow/finish/briefs/finish-<role>-<task>.md`; reports use
-`.agents/workflow/finish/reports/finish-<role>-<task>.md`.
 Preparation authors receive a separate worktree; read-only finish workers may use the feature checkout.
 
 Model selection and role profiles are repo-level. Never place the file or a profile under a lane
 worktree or `.agents/workflow/<change>/`, and never put a lane worktree or another per-dispatch path
 in a profile. The absolute worktree belongs only in the brief and coordination.
 
-Lane evidence binds a candidate lane revision: `.agents/workflow/<change>/evidence/<lane>/<revision>/`.
-Finish evidence binds the integrated release revision: `.agents/workflow/finish/evidence/<revision>/`.
-Never reuse candidate evidence as final release evidence. Planning report files live under the matching
-`reviews/` directory (per-change artifact reviews under the change, graph reviews at repo level) and
-include the cycle and round so a later cycle cannot overwrite them.
+Lane evidence binds a candidate lane revision and finish evidence the integrated release revision; their paths are in the table above. Never reuse candidate evidence as final release evidence. Planning report files live under the matching `reviews/` directory and include the cycle and round so a later cycle cannot overwrite them.
 
-`plan-approve` records approval at `.agents/workflow/plan-approval.json`; `status` reports whether it is
-current, stale, or missing. `lane-open` refuses unless it is current. `lane-merge` does not enforce it. The Coordinator verifies a
-current approval for the approved plan before opening a lane and before merging one.
+`plan-approve` records approval at `.agents/workflow/plan-approval.json`; `status` reports whether it is current, stale, or missing. The Coordinator verifies current approval before opening a lane and before merging one ([lane records](lane.md#records-and-progress)).
 
 `FEATDEV_LANE_WORKTREE_ROOT` must be an absolute path. A relative value resolves against the
 Coordinator's current working directory, so never rely on a relative setting.
 
 PR-opening consent is recorded in `.agents/workflow/finish/pr-follow-up.md` with the human, timestamp,
 exact integrated HEAD, and included changes. It is separate from release classification and later
-PR-merge consent. A finish review is recorded at
-`.agents/workflow/finish/reviews/finish-<role>-<head>.md` with the verdict, exact HEAD,
-inputs/evidence revision, limitations, and reviewer identity.
+PR-merge consent. A finish review is recorded at the path in the table above using the format in
+[finish](finish.md#finish-review-record).
 
 Back up the entire `.agents/workflow/` tree before migration, cleanup, or any destructive repair. The
 repo-level objects and per-change records are local and gitignored; Git cannot reconstruct them.
@@ -116,49 +102,38 @@ repo-level objects and per-change records are local and gitignored; Git cannot r
 The helper records and validates bindings, but the Coordinator must verify the following. A recorded
 binding is not evidence that the check was done.
 
-- Plan approval: verify a current `.agents/workflow/plan-approval.json` before opening a lane and before
-  merge. `lane-open` rejects a stale or missing record. `lane-merge` does not.
-- Review rounds: `lane-review` refuses a round after the second unless `lane-mediate` covers it; there
-  is no cap after mediation. Require exactly one further Oracle-authored pass, then a human decision on
-  any remaining work.
 - Override: record the exact waived duties in the reason and merge record; the helper stores skipped
   gates only as a generic reviews entry.
-- Oracle independence: for an Oracle-authored fix or an Oracle stand-in, verify independence and record
-  the actual reviewer or stand-in ID in the report or brief; there is no helper flag for it.
 - Human deferral: `human-defer` stores the rationale plus fixed `bounded`/`reversible` values and a
   fixed `excluded_effects` list; it does not validate the rationale. Require the rationale to enumerate
   each excluded effect; the fixed fields are not evidence.
-- Single writer: a new dispatch key bypasses the open same-role guard. It is never authorization for a
-  second writer; ensure the prior worker is stopped or released before replacement.
 - Merge evidence: for ordinary role reviews, merge revalidates only UI evidence paths and digests.
   Other role evidence and report hashes are the Coordinator's check.
 - Close: `lane-close` accepts a lane whose ticks are complete. Verify a recorded merge before closing.
-- Doc-defined records: plan approval, finish reviews, PR-opening consent, and PR follow-up are
-  documentation-defined decisions; the helper records their bindings but not the judgment. `pr-check`
-  does not validate finish reviews, PR-opening consent, or the PR follow-up record. The Coordinator
-  verifies each record's current HEAD, inputs, and approval scope before relying on it.
+- Doc-defined records: finish reviews, PR-opening consent, and PR follow-up are documentation-defined
+  decisions; the helper records their bindings but not the judgment, and `pr-check` does not validate them.
+  The Coordinator verifies each record's current HEAD, inputs, and approval scope before relying on it.
+
+## Role rules
+
+These bind every role; each role file adds only its own remit.
+
+- Read the brief and approved sources directly. Never consume generated review packets, digests, or pre-written verdicts.
+- Never edit outside authorized paths. Only the Coordinator writes `coordination.json` and the review ledgers.
+- Reviewers are read-only. Review the full lane diff, expanding only for a named dependency or requirement. Exclude unrelated cleanup, hypothetical hardening, and style.
+- Bind every verdict to the current `HEAD` and evidence revision. Missing or stale evidence never passes; an ancestor `PASS` never carries forward.
+- The environment is cooperative. Do not report tampering or forgery unless the brief names a concrete non-adversarial trigger (crash, reuse, stale state, honest mistake) and a user-visible consequence.
+- Material finding: stable ID | P0/P1/P2 | location | trigger | violated requirement | minimal fix | observable closure check. Consolidate one root cause per report.
+- Optional handoff-compression tooling may shorten the handoff text only; it never replaces evidence, paths, or exact SHAs. Missing token/cost telemetry is `unknown`, never inferred.
 
 ## Output
 
 Send outcome (`PASS`/`MORE WORK`/`fixed`/`disputed`), exact SHA, task/finding IDs,
-decisions, check status, report/evidence paths/revision, uncertainty, harness receipts.
-Reviewers and Runners return verdict/status, exact SHA, finding IDs or exit status, report path, and
-evidence revision — never only a path. Keep the report authoritative and add no machine footer.
-Full reports/logs stay in files. Missing token/cost telemetry = `unknown`, never inferred.
+decisions, check status, report/evidence paths/revision, uncertainty, and harness receipts. Never reply with only a path.
+The report file stays authoritative and carries no machine-readable footer. Full reports and logs stay in files.
+One-line handoffs are allowed; reports retain evidence limitations.
 
-Material finding: stable ID | P0/P1/P2 | location | trigger | violated requirement/criterion |
-minimal fix | observable closure check. Consolidate one root cause.
-One-line handoffs allowed; reports retain evidence/limitations.
-
-Optional handoff-compression tooling may shorten the handoff text only; it never replaces evidence,
-paths, or exact SHAs.
-Never change selected models, roles, rules, or evidence.
-Read exact paths; return decisive output. Avoid duplicate reports/status dumps and unbounded logs.
-
-
-Coordinator only: send filled template, never catalog. Apply this file's handoff-context rules.
-Use exact task IDs, absolute paths, full SHAs, runnable commands; reference approved sections, never copy.
-Missing inputs block; never invent evidence. Plain instructions, not review packages/approval records.
+Coordinator only: send the filled template, never the catalog. Use exact task IDs, absolute paths, full SHAs, and runnable commands; reference approved sections instead of copying them. Missing inputs block; never invent evidence. Send plain instructions, not review packages or approval records.
 
 ## Implementation
 
@@ -180,11 +155,7 @@ Require completion of the assigned task, committed work and tick, and a clean tr
 ## Finish-scoped briefs
 
 Finish scope replaces lane identity with `Scope: finish`, the included changes, the exact integrated HEAD,
-and explicit owned paths. Use these templates for preparation authors, reviewers, and Runners.
-Finish briefs use `.agents/workflow/finish/briefs/finish-<role>-<task>.md`; reports use
-`.agents/workflow/finish/reports/finish-<role>-<task>.md`; reviews use
-`.agents/workflow/finish/reviews/finish-<role>-<head>.md`; evidence uses
-`.agents/workflow/finish/evidence/<revision>/`.
+and explicit owned paths. Use these templates for preparation authors, reviewers, and Runners; their paths are in the table above.
 
 Preparation author:
 
@@ -276,12 +247,7 @@ Prior findings: <none, or report path + IDs + closure checks>
 Deliver: <report path; PASS or MORE WORK; exact HEAD; finding IDs; evidence revision; limitations>
 ```
 
-The review role line is `code-reviewer`, `test-reviewer`, or `ui-reviewer`; never `oracle`. Ordinary
-lanes dispatch `code-reviewer` for the code/test review; high-risk lanes dispatch separate
-`code-reviewer` and `test-reviewer` reviews.
-
-For an Oracle-authored fix or an Oracle stand-in, the Coordinator verifies independence and records the
-actual reviewer or stand-in ID in the report or brief; no helper flag records it.
+The review role line is `code-reviewer`, `test-reviewer`, or `ui-reviewer`; never `oracle`. Required reviews follow the lane's risk and UI flags ([lane](lane.md#start-conditions-and-required-reviewers)).
 
 Correction/impact: include previous reviewed SHA, correction range, full lane range.
 Preserve full-lane access; investigate relevant dependencies only.
@@ -300,10 +266,8 @@ Verify: <affected commands and evidence to refresh>
 Deliver: <report path; new SHA; fixed/disputed per ID with evidence>
 ```
 
-Wait for complete first-pass batch. Resolve disagreements before dependent edits.
-After two review rounds, `lane-review` refuses a third round without `lane-mediate`; there is no cap
-after mediation. Require exactly one further Oracle-authored pass, then send unresolved work to the
-human. A new dispatch key never authorizes a second writer.
+Wait for the complete first-pass batch. Resolve disagreements before dependent edits.
+Round limits and escalation are defined in [lane](lane.md#escalation); a new dispatch key never authorizes a second writer.
 
 ## Oracle consultation
 
@@ -321,14 +285,8 @@ Deliver: <report path; decision and rationale; minimal correction; closure check
 
 OpenSpec artifact review: identify one change; supply proposal/design/spec/tasks, not the repo graph.
 Repo graph review: supply the whole local graph and every included change's current artifact verdict and sources.
-Run graph review only after every included change passes artifact review. Use separate fresh Oracle contexts and report paths.
-Use the canonical artifact-review and repo graph brief paths from [Set locations](#set-locations-no-ad-hoc-paths).
-Every `plan-review` command includes the verdict, `--head`, and `--report`.
-A correction follow-up records `plan-dispatch --scope graph --role oracle --task plan --key <new-key> --report <new-report>`;
-the artifact form uses `--scope change --change <change>` with the same fields.
-Record the intent before launching the Oracle, and record the verdict only after reading the actual report.
+Use separate fresh Oracle contexts and the canonical brief and report paths from [Set locations](#set-locations-no-ad-hoc-paths).
+Every `plan-review` command includes the verdict, `--head`, and `--report`; record the intent before launching the Oracle, and the verdict only after reading the actual report. Command forms are in [planning corrections](helper-commands.md#oracle-planning-corrections).
 Implementation review: supply the selected change/lane contract digest alongside commit and evidence bindings.
 Consultation never authorizes edits or resets rounds.
 Write-access Oracle fix after a recorded mediation: implementation template; record `dispatch --access write`.
-For a standard Oracle-authored fix or an Oracle stand-in, verify independence and record the actual
-reviewer/stand-in ID in the report or brief; no helper flag records it.

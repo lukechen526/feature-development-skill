@@ -8,32 +8,17 @@ Finish is repository-level: one record covers the whole PR, which may include on
 Do not pass `--change`; `finish-record` reads the repository graph and requires every lane of every graph change to be merged.
 The graph for this feature checkout must contain exactly the changes included in the PR; unrelated changes must not be in this graph.
 Prepare release artifacts once, then record finish once against the final integrated HEAD.
-The finish record names the included changes and is validated against all of them before PR-opening consent.
 Finish records live in the repo-level `.agents/workflow/finish.json`.
 A lane merge is not the later PR merge from the feature branch into the target branch.
 
-The finish sequence is deliberately thin: every repository-specific gate, command,
-runtime, record format, and evidence rule lives in the repository's own guides
-(testing reference, governance docs, workflow tooling guides). This file only fixes
-the order of decisions and the ownership of consent.
+The finish sequence is deliberately thin: repository-specific gates, commands, runtimes, record formats, and evidence rules live in the repository's own guides ([Authority](#authority)). This file fixes only the order of decisions and the ownership of consent.
 
 ## Records and locations
 
-Use these canonical paths; do not relocate them.
-
-| Record | Path |
-|---|---|
-| Finish record | `.agents/workflow/finish.json` |
-| PR scope and consent | `.agents/workflow/finish/pr-follow-up.md` |
-| Finish brief | `.agents/workflow/finish/briefs/finish-<role>-<task>.md` |
-| Finish report | `.agents/workflow/finish/reports/finish-<role>-<task>.md` |
-| Finish review | `.agents/workflow/finish/reviews/finish-<role>-<head>.md` |
-| Finish evidence | `.agents/workflow/finish/evidence/<revision>/` |
+All record paths are canonical in [Set locations](briefs-and-handoffs.md#set-locations-no-ad-hoc-paths); finish adds only `.agents/workflow/finish.json` and the `.agents/workflow/finish/` tree for the PR. Do not relocate them.
 
 Create `.agents/workflow/finish/pr-follow-up.md` when finish starts and list every change included in the PR.
-Model selection and every role, model, and thinking profile stay repo-level in
-`.agents/workflow/model-selection.json`. No lane worktree or per-dispatch path carries
-its own profile; the worktree is execution metadata in the brief and coordination.
+Model selection and every role, model, and thinking profile stay repo-level in `.agents/workflow/model-selection.json`; the worktree is execution metadata in the brief and coordination, never a profile field.
 
 ## Sequence
 
@@ -43,8 +28,7 @@ its own profile; the worktree is execution metadata in the brief and coordinatio
 2. **Release classification and version.** Use [finish-scoped workers](#finish-scoped-workers) for preparation. Obtain the human's release
    classification first, then apply the version change the repository's versioning policy
    requires; regenerate generated files as the repository specifies and commit.
-   Never hand-edit generated files. Classification and PR approval are separate
-   decisions; classification never consumes PR consent.
+   Never hand-edit generated files.
 
 3. **Execute the repository's release gate.** Consult the repository's testing
    guides and run every gate, check, capture, and validation they require for this
@@ -54,14 +38,7 @@ its own profile; the worktree is execution metadata in the brief and coordinatio
    commit, on a dirty tree, or before a post-capture version change cannot close
    the gate; restage and recapture per the guides' rules.
 
-4. **Independent review.** Ensure the independent reviews the repository's guides
-   require for the final evidence are current at the integrated HEAD, and that
-   every recorded review binds the exact revision and inputs it judged. Record each
-   finish review at `.agents/workflow/finish/reviews/finish-<role>-<head>.md`
-   with its verdict, exact integrated HEAD, inputs and evidence revision, limitations, and
-   reviewer identity (see [finish review record](#finish-review-record)). Human
-   approvals require fresh binding whenever presented inputs change.
-   `pr-check` does not validate these reviews; the Coordinator verifies them.
+4. **Independent review.** Ensure the independent reviews the repository's guides require for the final evidence are current at the integrated HEAD. Record each finish review per [Finish review record](#finish-review-record). Human approvals require fresh binding whenever presented inputs change.
 
 5. **Human gates.** Execute and record every human gate the repository's guides
    require before a PR may be opened — including, where the guides require it,
@@ -69,12 +46,12 @@ its own profile; the worktree is execution metadata in the brief and coordinatio
    Only the human may record acceptance; no agent verdict or preauthorization
    substitutes. Never infer consent from silence or green automation.
 
-6. **PR opening.** Keep `.agents/workflow/finish/pr-follow-up.md` listing every included change.
-   Ask the human for explicit approval to open the PR as a separate decision. Record that
+6. **PR opening.** Ask the human for explicit approval to open the PR as a separate decision. Record that
    consent in `pr-follow-up.md` — the decision, timestamp, exact integrated HEAD, and included
-   changes — before opening the PR. PR-opening consent is separate from release classification
-   and from the later PR-merge consent. It is given once. Later pushes, including the archival commit and fix pushes, need no new consent.
-   Opening the PR starts post-PR follow-up; it does not complete the workflow.
+   changes — before opening the PR. PR-opening consent is separate from release classification,
+   lane integration approval, and the later PR-merge consent. It is given once; later pushes,
+   including the archival commit and fix pushes, need no new consent, but a HEAD change before
+   opening does. Opening the PR starts post-PR follow-up; it does not complete the workflow.
 
 7. **Post-PR follow-up.** Monitor PR-triggered automated checks and bot review comments using the sequence below.
    Resolve actionable findings through the normal implementation and independent-review process.
@@ -94,12 +71,9 @@ Each brief names `Scope: finish`, the included changes, Task/round, Worktree, In
 (absolute path to `references/briefs-and-handoffs.md`), Deadline, owned paths, check owner,
 report, and evidence locations. Pin every path absolutely.
 Preparation authors work in a separate worktree in the same repository at the integrated feature HEAD.
-Profiles are repo-level; the brief and coordination carry the worktree as execution metadata only.
 The Coordinator retains the feature checkout and all coordination writes. Keep one writer per worktree.
-Obtain release classification before authoring version/generated changes. Repository guides define the allowed preparation.
-Record the worker's exact key and outcome. A reviewer or Runner reply states the verdict or status,
-exact SHA, finding IDs, report path, and evidence revision; the report retains the full evidence and
-limitations, and no machine-generated footer substitutes for those fields. Review its output under repository rules before integrating its commit into the feature branch.
+Repository guides define the allowed preparation.
+Record the worker's exact key and outcome; the report retains the full evidence and limitations, and no machine-generated footer substitutes for those fields.
 Integrate preparation before final captures and required human inspections. Do not use task ticks or `lane-merge` for preparation-only work.
 Read-only checks, release reviews, and PR polling use the same finish scope and role profiles.
 New implementation scope still returns to approved corrective tasks and lanes, not unrestricted finish authoring.
@@ -110,8 +84,7 @@ Record each finish review at `.agents/workflow/finish/reviews/finish-<role>-<hea
 The record states the verdict (`PASS` or `MORE WORK`), the exact integrated HEAD it judged,
 the inputs and evidence revision it used, its limitations, and the reviewer identity.
 A review is current only for the HEAD and evidence revision it names; a changed integrated or
-archival commit needs a fresh review. Record the actual reviewer identity and evidence revision
-in the report; the Coordinator verifies independence rather than relying on a helper flag.
+archival commit needs a fresh review. The Coordinator verifies reviewer independence rather than relying on a helper flag.
 `pr-check` does not read or validate finish reviews, so the Coordinator verifies the repo-level
 finish review is current before requesting PR-opening consent.
 
@@ -197,39 +170,18 @@ Opening the PR alone is never reported as completion of this follow-up.
 
 ## Generic artifact records
 
-The helper records artifact bindings. It does not know application paths, version formats, or runtime names.
-Repository guides define the release classification, preparation commands, checks, and inspection checkpoints.
+The helper records artifact bindings; it does not know application paths, version formats, or runtime names. Flag semantics live in [Finish records](helper-commands.md#finish-records).
 
-1. Obtain the human's release classification after all lane merges into the feature branch.
+1. Obtain the human's release classification after all lane merges.
 2. Apply required version changes and regenerate required artifacts.
 3. Commit the release preparation on the feature branch.
-4. Write a preparation receipt with the human classification, exact HEAD, the commands run,
-   their results, the artifact paths, and the actual input paths.
-5. Record the preparation receipt with every affected tracked input path.
+4. Write a preparation receipt: the human classification, exact HEAD, commands run, their results, artifact paths, and actual input paths.
+5. Record it with `finish-record classify`, declaring every selected check (`--check`) and every required direct human inspection (`--inspection`). Every `--input` is a preparation input and at least one is required, even for a release with no preparation; a deferred `ui` checkpoint requires at least one declared integrated inspection.
+6. Run each selected release check on committed integrated HEAD; write a check receipt (command, result, HEAD, actual inputs) and record it with `finish-record capture`.
+7. Ask the human to perform each declared inspection; record it with `finish-record inspect`.
+8. Run `finish-record pr-check` before requesting PR-opening consent. It requires the declared check set and captured evidence to match exactly, and validates no finish review, PR-opening consent, or PR follow-up record.
 
-   Use `finish-record classify --classification <label> --artifact <receipt> --input <path> ...`.
-   At least one `--input` is required. `classify` treats every `--input` as a preparation input;
-   there is no separate check-input field. A release with no preparation still needs a tracked
-   release input (for example `message.py`), and changing that input requires restage.
-   Add optional `--version <label>` when the repository uses a version.
-   The version is descriptive; repository tooling validates it.
-   Declare every selected release check with `--check <id>`. `classify` records only the declared
-   set and runs or validates no check; `pr-check` compares that set against the captured evidence.
-   Add `--inspection <checkpoint-id>` for each required direct human inspection.
-   A deferred `ui` checkpoint requires at least one declared integrated inspection.
-
-6. Run the selected release checks on committed integrated HEAD.
-7. Write a check receipt with the exact command, result, HEAD, and actual inputs, then record it with
-   `finish-record capture --check <id> --artifact <receipt> --input <path> ...`.
-   Declare every selected check at classify; when a set is declared, a check outside it is refused.
-8. Ask the human to perform each declared inspection.
-9. Record each human inspection with `finish-record inspect --check <checkpoint-id> --artifact <record>`.
-10. Run `finish-record pr-check` before requesting approval to open the PR. It requires the declared
-    check set and the captured evidence to match exactly. It does not validate the repo-level finish
-    review, PR-opening consent, or PR follow-up record; the Coordinator verifies the finish review and
-    `.agents/workflow/finish/pr-follow-up.md` before requesting PR-opening consent.
-
-Each human inspection artifact contains these unique fields:
+Each human inspection artifact contains:
 
 ```text
 inspector: human
@@ -237,17 +189,8 @@ checkpoint: <checkpoint-id>
 verdict: accept
 ```
 
-A human can record `reject` instead. A rejection blocks PR readiness.
-A changed integrated HEAD requires fresh human inspection.
+A human can record `reject` instead, which blocks PR readiness.
 
-The normal path must not require restage: classify after the preparation commit, then capture.
-A preparation artifact or its declared inputs must not change after capture.
-If they do, use `finish-record restage` with the new preparation receipt and input paths. Restage reuses
-the stored classification; pass `--classification` only to re-classify. Omitting `--version` clears the
-stored expected version, so pass `--version` when the repository uses one. Restage clears final evidence
-and human inspections, preserves selected check requirements, and preserves inspection checkpoint names
-unless new `--inspection` values replace them. Use `--check` to replace the declared check set.
-Recapture affected release evidence before requesting PR-opening approval.
+The normal path must not require restage: classify after the preparation commit, then capture. If a preparation artifact or declared input changes after capture, restage with the new receipt and inputs, recapture affected evidence, and refresh human inspections for the new HEAD.
 
-Use separate files for lane candidate evidence and integrated release evidence.
-Neither `pr-check` nor any artifact record grants approval to open or merge a PR.
+Use separate files for lane candidate evidence and integrated release evidence. Neither `pr-check` nor any artifact record grants approval to open or merge a PR.

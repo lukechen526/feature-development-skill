@@ -4,7 +4,7 @@
 
 This [Agent Skill](https://agentskills.io/specification) helps your coding agent take a feature from an idea to a reviewed pull request.
 
-It uses OpenSpec to define the expected behavior, design, acceptance criteria, and tasks before implementation starts. A Coordinator assigns scoped work to implementation agents and separate review agents. Implementation happens in isolated Git worktrees. You approve the plan, make release decisions, and retain the final PR merge decision.
+It uses OpenSpec to define the expected behavior, design, acceptance criteria, and tasks before implementation starts. A Coordinator assigns scoped work to implementation agents and separate review agents in isolated Git worktrees.
 
 Install the skill in your coding agent. Run it inside the project you want to change, not inside this skill repository.
 
@@ -21,39 +21,32 @@ Use this skill when a feature needs more coordination than a single edit session
 It works for backend, frontend, CLI, and other Git-based projects.
 The project's own guides define its technology, test commands, release process, and required environments.
 
-Skip this skill for a quick explanation, a small isolated fix, or work that does not need planning and review gates.
-It adds deliberate coordination overhead. It is not an unattended system that ships changes without human approval.
+Skip this skill for a quick explanation, a small isolated fix, or work that needs no planning and review gates.
+It adds deliberate coordination overhead and is not an unattended system.
 
 ## How the workflow works
 
-**Spec-driven development** means agreeing on what the feature must do before agents write its implementation.
-The reviewed specification and task checklist remain the reference for implementation, tests, and review.
+**Spec-driven development** means agreeing on what the feature must do before agents write its implementation; the reviewed specification and task checklist stay the reference for implementation, tests, and review.
 
-| Stage | What happens |
-|---|---|
-| Set up | The Coordinator reads project instructions, checks the agent harness, and asks you to select models and thinking levels. Model and thinking profiles are repo-level, not per lane or worktree. |
-| Specify and plan | OpenSpec artifacts define the feature. A lane plan assigns tasks, dependencies, owners, and risk flags. |
-| Review and approve | Separate Oracle agents review each change's artifacts, then the repository plan. You approve both before implementation. |
-| Implement | Fresh implementation agents complete scoped tasks in isolated Git worktrees. Independent lanes can progress without sharing a working directory. |
-| Review and integrate | Separate reviewers check the current implementation and relevant tests. UI work adds rendered-evidence review and human checkpoints. Passing lanes merge into the feature branch. |
-| Prepare the PR | You set the release classification. One repo-level finish record covers every OpenSpec change in the PR. Workers prepare version and generated artifacts in a separate worktree, and the Coordinator captures evidence on the committed HEAD. You complete required inspections, then record consent to open the PR separately from merge consent. |
-| Follow through | The Coordinator records the PR URL, findings, and your consent in `pr-follow-up.md`, routes fixes through review, and syncs and archives completed OpenSpec changes. Only you merge the PR. |
+Four gated phases:
 
-A **lane** groups related tasks in one isolated worktree. Lanes are an ownership boundary, not a requirement to parallelize everything.
-An **Oracle** is a specialist agent for planning review, mediation, and explicitly authorized corrections.
-The Coordinator manages the workflow; it does not patch implementation or approve its own work.
+1. **Plan** — OpenSpec artifacts plus a lane plan; two separate Oracle reviews; then your approval.
+2. **Lanes** — one task per fresh implementer in an isolated Git worktree; independent review; gated merge into the feature branch.
+3. **Finish** — you set the release classification; one repository-level finish record covers the whole PR under the repository's own evidence, review, and inspection rules.
+4. **Follow-up** — PR consent, findings, and archive recorded and rechecked.
+
+You approve the plan, set the release classification, consent to opening the PR, and decide the merge.
+A passing test is not your approval.
+
+A **lane** groups related tasks in one worktree: an ownership boundary, not a demand to parallelize everything. An **Oracle** is a specialist agent for planning review, mediation, and explicitly authorized corrections. The Coordinator manages the workflow; it does not patch implementation or approve its own work.
+
+Phase detail and gates: [SKILL.md](SKILL.md).
 
 ### Implementation stays in isolated worktrees
 
-Each implementation lane gets its own Git branch and worktree: a separate working directory for that lane's changes.
-Implementation agents edit files, run focused checks, update task checkboxes, and commit inside that worktree.
-Tasks in the same lane reuse its worktree, with only one writer at a time.
-Independent lanes can run in parallel when their file ownership permits it.
+Each lane gets its own Git branch and worktree. Implementers edit files, run focused checks, tick tasks, and commit there: one writer at a time, and independent lanes can run in parallel when their file ownership permits.
 
-The Coordinator keeps the feature checkout separate.
-It merges reviewed lane commits into the feature branch only after the required reviews and human checkpoints pass.
-Workers do not apply implementation patches directly to that checkout.
-Release-preparation authors also use a separate worktree after lane integration.
+The Coordinator keeps the feature checkout separate and merges reviewed lane commits only after the required reviews and human checkpoints pass. Workers never patch it directly; release preparation also uses a separate worktree.
 
 ### What you get
 
@@ -62,8 +55,7 @@ Release-preparation authors also use a separate worktree after lane integration.
 - A progress dashboard showing task and lane state, reviews, and blockers.
 - A recovery path that resumes incomplete work instead of restarting completed tasks.
 
-The Python helper records decisions and checks their bindings. It does not launch agents, perform reviews, or grant approval.
-The coding-agent harness launches the agents. No helper command opens or merges a PR.
+The Python helper records decisions and checks their bindings. It never launches agents, performs reviews, grants approval, or opens and merges PRs. The coding-agent harness launches the agents.
 
 ## Use
 
@@ -73,8 +65,7 @@ The coding-agent harness launches the agents. No helper command opens or merges 
 4. Review the plan before authorizing implementation.
 
 You do not need to launch each agent manually or memorize the helper commands.
-The Coordinator starts at [SKILL.md](SKILL.md) and follows the phase guides.
-It stops at required human decisions; a passing test is not your approval.
+The Coordinator starts at [SKILL.md](SKILL.md) and follows the phase guides, stopping at required human decisions.
 
 ### Example: build a feature across several layers
 
@@ -87,8 +78,7 @@ It stops at required human decisions; a passing test is not your approval.
 > Ask for my approval before implementation.
 
 This is a good fit because one feature spans several parts of the project.
-The Coordinator discovers the existing architecture and assigns the required implementation, test, and UI reviews.
-It does not assume a framework or database.
+The Coordinator discovers the existing architecture and assigns the reviews the plan requires; it assumes no framework or database.
 
 ### Example: build a backend-only feature
 
@@ -98,8 +88,7 @@ It does not assume a framework or database.
 > Complete the required planning reviews.
 > Ask for my approval before implementation.
 
-UI review is not required when the approved plan has no UI work.
-Review duties follow the plan's risk and UI flags, not a fixed application template.
+Review duties follow the plan's risk and UI flags, not a fixed application template; no UI work means no UI review.
 
 ### Example: implement an existing specification
 
@@ -109,8 +98,6 @@ Review duties follow the plan's risk and UI flags, not a fixed application templ
 > Complete the planning reviews.
 > Ask for my approval before implementation.
 
-The Coordinator reuses the change rather than creating a duplicate.
-
 ### Example: resume interrupted work
 
 > Use feature-development-skill to resume saved-searches.
@@ -118,8 +105,7 @@ The Coordinator reuses the change rather than creating a duplicate.
 > Show completed tasks, pending reviews, and blockers.
 > Continue from the first incomplete operation without restarting completed work.
 
-Resume from the same feature checkout with its local workflow records intact.
-Git alone cannot reconstruct lost reviews, approvals, or the local lane plan.
+Resume from the same feature checkout with its local records intact; Git alone cannot reconstruct lost reviews, approvals, or the local lane plan.
 
 ### Monitor progress
 

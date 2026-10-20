@@ -16,13 +16,7 @@ Angle-bracket terms are placeholders. Square brackets mark optional arguments.
 Quote multiword verdicts, such as `"MORE WORK"`.
 Use a command's `--help` for the complete parser flags.
 
-The repo-level `.agents/workflow/plan-graph.json` and `coordination.json` are local and gitignored.
-Artifact reviews use `.agents/workflow/<change>/plan-reviews.json`.
-Repo graph reviews use `.agents/workflow/plan-graph-review.json`.
-Plan approval uses `.agents/workflow/plan-approval.json`.
-No runtime object or review/approval record is committed.
-Planning reports live under the matching reviews directory: artifact reviews under
-`.agents/workflow/<change>/reviews/`, graph reviews under `.agents/workflow/reviews/`.
+The repo-level `.agents/workflow/plan-graph.json`, `coordination.json`, `plan-approval.json`, and `plan-graph-review.json` are local and gitignored; artifact reviews use `.agents/workflow/<change>/plan-reviews.json`. No runtime object or review/approval record is committed. Every path is canonical in [Set locations](briefs-and-handoffs.md#set-locations-no-ad-hoc-paths).
 Back up the entire `.agents/workflow/` tree before migration, cleanup, or destructive repair; Git cannot reconstruct these local objects.
 
 ## Command index
@@ -59,11 +53,7 @@ Finish records (classification, preparation, evidence, inspections) and finish d
 Every lane of every change in the repository graph must already be integrated. Completed lanes stay closed.
 `--worktree` is accepted only with `--scope finish`.
 
-Every finish brief names `Scope: finish`, the included changes, Task or round, Worktree (absolute), Integrated HEAD,
-Profile, Contract (absolute path to [references/briefs-and-handoffs.md](briefs-and-handoffs.md)), and Deadline.
-Finish briefs use `.agents/workflow/finish/briefs/finish-<role>-<task>.md`; reports use
-`.agents/workflow/finish/reports/finish-<role>-<task>.md`; evidence uses
-`.agents/workflow/finish/evidence/<revision>/`.
+Every finish brief follows the [contract's field list](briefs-and-handoffs.md#context) with `Scope: finish` and the included changes; brief, report, evidence, and review paths are in [Set locations](briefs-and-handoffs.md#set-locations-no-ad-hoc-paths).
 
 ```bash
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" dispatch --scope finish implementer \
@@ -79,11 +69,7 @@ feature HEAD. The helper refuses a dirty tracked tree, an author worktree at any
 worktree from another repository, and a second active writer in the same worktree.
 Read-only workers default to the feature checkout; preparation reviewers may inspect a separate
 candidate descending from that HEAD.
-Profile selection is repo-level: `.agents/workflow/model-selection.json` and its model, thinking, and
-role profiles are the only source. Never place the file or a profile under a lane worktree, and never
-put a lane worktree or another per-dispatch path in a profile. The worktree is execution metadata in
-the brief and coordination. The helper records role, task, and execution metadata; it never reads the
-model-selection file or a role profile.
+Profile selection is repo-level and applies as described under [dispatch](#dispatch). The helper records role, task, and execution metadata; it never reads the model-selection file or a role profile.
 Record completion with the exact key. A changed feature HEAD or scope requires a new intent.
 `status` shows open finish intents and their current/stale bindings. Recovery must establish worker ownership before retry.
 
@@ -174,8 +160,7 @@ artifact digests in `.agents/workflow/plan-approval.json`.
 It refuses uncommitted `openspec/changes` content, a missing/stale graph `PASS`, or a missing/stale artifact `PASS`.
 It records the human decision; it never grants approval. `status` shows whether the record is current, stale, or missing.
 
-`lane-open` refuses unless plan approval is current. `lane-merge` does not enforce it; the Coordinator checks it before merge.
-Before opening a lane and before every merge, run `status` and confirm the record is current for the approved plan.
+`lane-open` refuses unless plan approval is current. `lane-merge` does not enforce it; the Coordinator checks it before merge ([lane records](lane.md#records-and-progress)).
 
 ## Plan validation and rendering
 
@@ -198,9 +183,7 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> lane-open <la
 ```
 
 `lane-open` refuses unless `.agents/workflow/plan-approval.json` is current for the approved plan.
-Set `FEATDEV_LANE_WORKTREE_ROOT` to an absolute path when overriding the default worktree root.
-A relative value resolves against the current working directory and can silently place new lanes
-elsewhere, so leave the variable unset or set an absolute path.
+Set `FEATDEV_LANE_WORKTREE_ROOT` only to an absolute path; a relative value can silently place new lanes elsewhere ([worktree rules](lane.md#worktrees-and-readiness)).
 
 ## dispatch
 
@@ -213,11 +196,9 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" \
 
 Use role IDs `implementer`, `code-reviewer`, `test-reviewer`, `ui-reviewer`, `oracle`, or `runner`.
 The `coordinator` profile belongs to the current session and is not dispatchable.
-Every brief names Change, Lane (or `Scope: finish` plus the included changes), Task or round, Worktree (absolute), Base, HEAD,
-Profile, Contract (absolute path to [references/briefs-and-handoffs.md](briefs-and-handoffs.md)), and Deadline.
+Every brief follows the [contract's field list](briefs-and-handoffs.md#context) and names the contract's absolute path.
 The Coordinator resolves model and thinking settings from the selected repo-level role profile for the
-actual harness launch. Model selection and role profiles live only in `.agents/workflow/model-selection.json`;
-never place a lane worktree or another per-dispatch path in a profile.
+actual harness launch; profiles live only in `.agents/workflow/model-selection.json`, and never contain a lane worktree or any other per-dispatch path.
 The helper records role, task, and dispatch metadata; it never reads the repo-level model-selection file.
 `dispatch` refuses an open same-role intent unless you pass a new `--key`. A new key bypasses that
 guard and is not authorization for a second writer. The Coordinator must ensure one writer per
@@ -247,16 +228,12 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" \
 
 Only `--commit` and `--report` are generally required. UI lanes require current evidence for the `ui-reviewer` `PASS`.
 Only direct current-HEAD verdicts satisfy gates; earlier verdicts are history.
-For a standard lane review, the default evidence revision is `r<round>`. The same commit retains its
-round; a new commit advances it.
+For a standard lane review, the default evidence revision is `r<round>`. The same commit retains its round; a new commit advances the evidence revision.
 Standard review uses `code-reviewer`; an ordinary lane combines implementation and test-adequacy
 duties, while a high-risk lane adds `test-reviewer` for test adequacy.
-For an Oracle-authored fix or an Oracle stand-in, the Coordinator verifies the Oracle's independence
-and records the actual reviewer or stand-in worker ID in the report or brief; no helper flag records it.
+For an Oracle-authored fix or an Oracle stand-in, the Coordinator verifies independence and records the actual reviewer or stand-in worker ID in the report or brief; no helper flag records it.
 The helper refuses a round after the second for a role unless a current `lane-mediate` record covers
-that role; there is no cap after mediation. The workflow allows exactly one further Oracle-authored
-pass, followed by an independent current-HEAD review and the required human checkpoint. If work
-remains, stop for a human decision.
+that role; there is no cap after mediation. Stop for a human decision if work remains.
 
 ## human-gate
 
@@ -267,12 +244,8 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" \
 ```
 
 The state binds the current lane HEAD and evidence revision; a changed HEAD needs a fresh decision.
-UI lanes require current evidence for the checkpoint.
 Only the human records an interactive approval. The Oracle stand-in form requires a recorded human
 grant; see [oracle-stand-in](#oracle-stand-in).
-Oracle stand-in independence has no helper flag: the Coordinator verifies the stand-in is independent
-of the implementation and affected reviews, and records its worker ID in the grant, acceptance
-checklist, or stand-in report.
 
 ## human-defer
 
@@ -286,10 +259,7 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" \
 
 Only a UI lane with ordinary risk and no sensitive flag is eligible.
 `--evidence` is required for a UI lane: the deferred human gate must bind current rendered evidence.
-The helper stores the supplied rationale plus fixed `bounded`, `reversible`, and `excluded_effects`
-values; it does not validate the rationale. The rationale must enumerate the bounded impact, the
-reversible path, and each excluded sensitive effect: safety, privacy, sharing, data integrity, and
-content correctness. The fixed flags are not evidence.
+The helper stores the supplied rationale plus fixed `bounded`, `reversible`, and `excluded_effects` values; it does not validate the rationale. The rationale must enumerate the bounded impact, the reversible path, and each excluded sensitive effect named in the command above. The fixed flags are not evidence.
 Deferral is not approval and waives no independent review.
 
 ## oracle-stand-in
@@ -309,21 +279,19 @@ This template defines the format; it does not grant authority. Replace every pla
 ```
 
 - `id`: a non-empty identifier unique to this human grant.
-- `scope`: a non-empty list of authorized lane IDs in the selected change. `all` is not allowed.
+- `scope`: a non-empty list of authorized lane IDs in the selected change; `all` is refused.
 - `granted_by`: the literal `human`; an agent cannot originate the authorization.
-- `granted_at`: the actual authorization timestamp; use an ISO-8601 timestamp.
-- `plan_sha256`: copy the top-level `plan_sha256` from this command after the plan is approved:
+- `granted_at`: the actual authorization timestamp, in ISO-8601.
+- `plan_sha256`: copy the top-level `plan_sha256` from after the plan is approved, never `plan_approval.plan_sha256` or a lane's `lane_plan_sha256`, which bind different inputs:
 
 ```bash
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> status --json
 ```
 
-Do not use `plan_approval.plan_sha256` or a lane's `lane_plan_sha256`; they bind different inputs.
-The selected-change plan must match the plan at lane opening. Reconcile a changed plan before obtaining a renewed grant.
+The selected-change plan must match the plan at lane opening; reconcile a changed plan before obtaining a renewed grant.
 A grant is consumed once for one lane checkpoint.
-Use separate files for the grant, the human acceptance checklist, and the independent Oracle's actual stand-in report.
-The Coordinator records the independent stand-in's worker ID in the grant, the checklist, or the
-stand-in report. The helper has no stand-in provenance flag and does not verify independence.
+Use separate files for the grant, the human acceptance checklist, and the independent Oracle's stand-in report.
+The Coordinator records the stand-in's worker ID in one of those files and verifies its independence; the helper has no provenance flag.
 Record the checkpoint only after the Oracle returns `PASS`:
 
 ```bash
@@ -371,11 +339,7 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> lane-mediate 
 ```
 
 Mediation records an Oracle decision. It does not author a fix or grant human approval.
-A lane review beyond the second round is refused for a role unless a current mediation covers that role;
-after mediation the helper imposes no further round cap. The workflow permits exactly one further
-Oracle-authored pass, then an independent current-HEAD review and the required human checkpoint. If
-unresolved work remains, stop for a human decision.
-See [correction and escalation](lane.md#escalation).
+See [lane-review](#lane-review) for the round limit, and [correction and escalation](lane.md#escalation) for the workflow rule.
 
 ## Status and task status
 
@@ -395,15 +359,8 @@ Status JSON and dashboards are per-change views of the shared objects, not indep
 
 Use the order and human gates in [finish](finish.md). Repository guides define labels, checks, inputs, and checkpoints.
 Finish is repository-level and covers every change in the repository graph; do not pass `--change`.
-Finish records and finish dispatch intents both live in `.agents/workflow/finish.json`.
-Finish briefs use `.agents/workflow/finish/briefs/finish-<role>-<task>.md`; reports use
-`.agents/workflow/finish/reports/finish-<role>-<task>.md`; evidence uses
-`.agents/workflow/finish/evidence/<revision>/`.
-Finish reviews are recorded at `.agents/workflow/finish/reviews/finish-<role>-<head>.md` with the
-verdict, exact integrated HEAD, inputs and evidence revision, limitations, and reviewer identity.
-PR scope and opening consent are recorded at `.agents/workflow/finish/pr-follow-up.md` with the
-human, timestamp, exact integrated HEAD, and included changes. That consent is separate from release
-classification and from PR-merge consent.
+Finish records and finish dispatch intents both live in `.agents/workflow/finish.json`; finish briefs, reports, reviews, evidence, and `pr-follow-up.md` use the canonical paths in [Set locations](briefs-and-handoffs.md#set-locations-no-ad-hoc-paths).
+PR-opening consent is recorded in `pr-follow-up.md` with the human, timestamp, exact integrated HEAD, and included changes; it is separate from release classification and from PR-merge consent.
 `pr-check` does not validate plan approval, finish reviews, PR-opening consent, or the PR follow-up
 record; the Coordinator verifies each before relying on it.
 
@@ -424,11 +381,8 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" finish-record pr-check
 
 `classify` requires the human release classification, a preparation artifact, and at least one
 `--input`. Every `--input` at classify is a tracked preparation input; there is no separate
-check-input field. Changing any of them requires restage and recapture. A release with no preparation
-still needs a tracked release input, for example `message.py`, and changing that input also requires restage.
-Declare every selected release check with `--check`. The workflow requires the selected set at
-classify, although the parser permits omission; the helper records only the declared set and runs no
-check. When a set is declared, `capture` refuses a check that was not declared.
+check-input field. A release with no preparation still needs a tracked release input, for example `message.py`.
+The workflow requires the selected check set at classify, although the parser permits omission; the helper records only the declared set and runs no check. When a set is declared, `capture` refuses a check that was not declared.
 `--inspection` declares each required direct human inspection; a deferred `ui` checkpoint requires at
 least one declared integrated inspection.
 `capture` and `inspect` each take exactly one `--check`. `classify` and `restage` accept repeated
@@ -436,7 +390,7 @@ least one declared integrated inspection.
 `pr-check` requires captured evidence for every selected check, matches a declared check set against
 it, and refuses a missing or rejected inspection.
 
-Preparation changes require restaging, followed by renewed evidence and inspections:
+Changing a preparation artifact or any declared input requires restage, followed by renewed evidence and inspections:
 
 ```bash
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" finish-record restage \

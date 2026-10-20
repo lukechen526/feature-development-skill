@@ -28,7 +28,7 @@ The Coordinator records every subagent update before proceeding:
 5. Read status and report the current result or blocker.
 
 Sync reads lane-ref ticks for in-flight progress and feature-branch ticks for integrated completion.
-Readiness and status compute eligibility from feature-branch ticks, for same-lane and cross-lane dependencies alike. A same-lane task ticked only in the lane worktree remains displayed blocked until that tick is integrated; implementation may continue while the display catches up.
+Readiness and status compute eligibility from feature-branch ticks for same-lane and cross-lane dependencies alike. A tick present only in the lane worktree stays displayed blocked until integrated; implementation may continue while the display catches up.
 Only feature-branch ticks satisfy cross-lane prerequisites.
 A completed task is never redispatched as pending merely because its tick is not yet merged.
 Use task-status for a blocker that sync cannot infer. It does not replace committed completion.
@@ -37,19 +37,15 @@ Status and dashboards are derived per-change views, not approval records. Chat h
 ## Worktrees and readiness
 
 Open the lane with [lane-open](helper-commands.md#lane-open) before its first implementation dispatch.
-`lane-open` refuses unless `.agents/workflow/plan-approval.json` is current for the approved plan.
 The default worktree is `~/.agents/worktrees/<repo>/<branch>/<change>/<lane>/`, with ref `featdev/<change>-<lane>`.
-`<repo>` is the URL-escaped resolved full feature-checkout path, not its folder name.
-For example, `/clients/alice/app` becomes `%2Fclients%2Falice%2Fapp`, including the escaped leading separator.
-The escaped path must fit the filesystem limit for one directory name.
+`<repo>` is the URL-escaped resolved full feature-checkout path, not its folder name, so `/clients/alice/app` becomes `%2Fclients%2Falice%2Fapp`. The escaped path must fit the filesystem limit for one directory name.
 `FEATDEV_LANE_WORKTREE_ROOT` overrides that root and must be an absolute path. The helper resolves a relative value against the current directory, which can silently place new lanes elsewhere; set an absolute path or leave it unset.
 A recorded worktree remains authoritative for that lane's lifetime, including recovery and cleanup.
 Optional environment-specific worktree registration is best-effort; the workflow does not depend on it.
 
 Allow one writer per lane worktree. Parallel lanes must have disjoint writes or explicit sequencing.
 `dispatch` refuses an open same-role intent without a new `--key`, but a new key bypasses that guard. A new key is not authorization for a second writer: the Coordinator completes or transfers the current writer's dispatch before starting another writer in that worktree.
-Implementation, corrections, checks, task edits, and commits run in the named lane worktree, never the feature checkout.
-The feature checkout receives implementation through lane integration only.
+Implementation, corrections, checks, task edits, and commits run in the named lane worktree, never the feature checkout; the feature checkout receives implementation through lane integration only.
 Every brief names Change, Lane (or `Scope: finish`), Task or round, Worktree (absolute), Base, HEAD, Profile, Contract (absolute path to [briefs-and-handoffs.md](briefs-and-handoffs.md)), and Deadline.
 
 For wrong-tree work:
@@ -62,7 +58,7 @@ For wrong-tree work:
 ## Implementation
 
 Use the [implementation brief](briefs-and-handoffs.md#implementation). The Coordinator never patches implementation or approves its own work.
-`model-selection.json` and its model/thinking/role profiles stay repo-level. The selected profile controls the actual harness model and thinking settings; the helper records role, task, and execution metadata.
+The selected repo-level profile controls the actual harness model and thinking settings; the helper records role, task, and execution metadata.
 
 ### One fresh Implementer per task
 
@@ -81,7 +77,6 @@ Corrections may continue the same task's session only when its brief and ownersh
 Task edits change checkbox state only. Never alter task IDs, wording, notes, nested bullets, or another lane/change's tasks.
 The Coordinator verifies the result, closes that exact dispatch, and runs sync before dispatching the next task.
 A new task, correction dispatch, or replacement session needs a new key. Only a retry of the same recorded intent retains its key.
-A new key bypasses the open same-role guard but is not authorization for a second writer; complete or transfer the open dispatch first.
 
 ### Deadlines and recovery
 
@@ -98,7 +93,6 @@ Extend work only with concrete progress. Reset or discard actions require the ap
 
 Start review only after every assigned task is implemented and its checkbox is committed.
 The Coordinator verifies clean worktrees, current HEAD, required evidence, and the full scoped lane diff before dispatch.
-This is a procedural check, not an approval or a generated review package.
 
 | Lane flags or mode | Required independent review |
 |---|---|
@@ -111,7 +105,7 @@ Every assigned acceptance criterion and completed task needs review coverage.
 Reviewers stay read-only. They report findings to the Coordinator; the Implementer or a write-access Oracle, dispatched after mediation, makes corrections.
 The UI reviewer ingests supplied screenshots, manifests, and metadata. It never builds, launches, or captures the application.
 
-Oracle-authored fixes and Oracle stand-ins have no provenance flag: the Coordinator verifies the Oracle is independent of the authored work and records the reviewer or stand-in worker ID in the review report or brief.
+Oracle-authored fixes and Oracle stand-ins have no provenance flag: the Coordinator verifies reviewer independence for an authored fix and stand-in independence for a checkpoint, then records the ID in the report, brief, grant, or checklist.
 
 Only direct verdicts for the current lane HEAD satisfy review gates.
 Earlier verdicts remain superseded history. An unchanged role still performs an independent impact check after a new commit.
@@ -162,8 +156,7 @@ Other independent ready lanes may continue while one lane waits for a human.
 An explicit [human-defer](helper-commands.md#human-defer) can move an eligible checkpoint to integrated inspection:
 
 - The lane has UI work, ordinary risk, and no sensitive flag.
-- The helper stores the supplied rationale plus fixed `bounded`, `reversible`, and `excluded_effects` flags; it does not validate the rationale's content.
-- The rationale must enumerate the bounded impact, the reversible path, and each excluded sensitive effect: safety, privacy, sharing, data integrity, and content correctness. The fixed flags are not evidence.
+- The rationale must cover the bounded impact, the reversible path, and each excluded effect named in the [human-defer command](helper-commands.md#human-defer); the helper stores it without validating it, and its fixed flags are not evidence.
 - The deferral binds current lane HEAD, evidence revision, and required UI evidence.
 
 Deferral is not approval and does not waive any independent review.
@@ -184,7 +177,7 @@ Review rounds persist across commits; a new commit does not reset the count.
 7. Complete the required human checkpoint before integration.
 
 The helper refuses a review record that would be round three or later for a role unless a current [lane-mediate](helper-commands.md#lane-mediate) record covers that role. It imposes no round cap after mediation.
-The workflow allows exactly one further Oracle-authored pass after mediation, followed by an independent current-HEAD review and the required human checkpoint. If unresolved work remains, stop for a human decision; never silently extend the loop.
+The workflow allows exactly one further Oracle-authored pass after mediation. If unresolved work remains after that pass, stop for a human decision; never silently extend the loop.
 Every correction retains the plan-required checks, reviewer independence, evidence bindings, and human gates.
 
 A focused technical consultation is read-only unless edit authority is explicitly granted.
@@ -241,7 +234,7 @@ Final hands-on release inspections remain human-only, as specified in [finish](f
 ## Merge and close
 
 Normal integration requires current independent reviewer passes, current UI evidence where `ui: true`, and the bound human checkpoint.
-Before merge, the Coordinator verifies `.agents/workflow/plan-approval.json` is current for the approved plan and that the recorded reviewer evidence is sound; lane-merge does not enforce plan approval.
+Before merge, verify plan approval is current ([Records and progress](#records-and-progress)) and that the recorded reviewer evidence is sound; `lane-merge` enforces neither.
 The [merge command reference](helper-commands.md#lane-merge-and-lane-close) contains syntax, not authority to waive those gates.
 
 The helper validates:
@@ -263,7 +256,4 @@ Retry integration only after those gates pass. Never resolve implementation conf
 Interrupted bookkeeping after an already successful merge follows [recovery](recovery.md); it never grants approval to unreviewed resolutions.
 Close only after integration is recorded. `lane-close` also accepts a lane whose ticks are complete without a merge record, so the Coordinator verifies the recorded merge (phase `merged` or a matching merge record) before closing. The recorded worktree remains authoritative for cleanup.
 
-After every change included in the PR has integrated, follow [finish](finish.md).
-Version/generated changes, release evidence, final inspections, and PR follow-up belong there.
-PR-opening consent is recorded in `.agents/workflow/finish/pr-follow-up.md` with the human, timestamp, HEAD, and included changes; it is separate from release classification and lane merge consent. It is given once; later pushes need no new consent. `pr-check` does not validate this consent; the Coordinator verifies it.
-Approval to open a PR never authorizes the later human PR merge.
+After every change included in the PR has integrated, follow [finish](finish.md), including PR-opening consent, which is separate from release classification and from lane merge consent. Approval to open a PR never authorizes the later human PR merge.

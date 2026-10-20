@@ -28,27 +28,19 @@ and its gates before starting the next. Do not batch, reorder, or skip phase gat
    Obtain human approval, commit the approved artifacts, and record approval with
    [plan-approve](references/helper-commands.md#plan-approval) in
    `.agents/workflow/plan-approval.json` before implementation.
-3. **[Lanes](references/lane.md).** Opening a lane needs a current plan approval;
-   `lane-open` refuses without one. Before merging a lane, the Coordinator must
-   confirm `status` reports `plan_approval.state` as `current`; `lane-merge` does
-   not enforce it. Dispatch isolated, scoped implementation per task.
-   Obtain independent reviews of the current lane `HEAD`, correct findings within
-   the documented review limits, and integrate only through the lane gates.
+3. **[Lanes](references/lane.md).** Opening a lane needs a current plan approval.
+   Dispatch isolated, scoped implementation per task, obtain independent reviews of
+   the current lane `HEAD`, correct findings within the documented review limits, and
+   integrate only through the lane gates. Verify current approval before merge;
+   `lane-merge` does not enforce it.
 4. **[Finish](references/finish.md).** Start after every lane of every change in the
    repository graph integrates. Finish is repository-level: one record at
-   `.agents/workflow/finish.json` covers the PR, which may include one or more
-   OpenSpec changes. Obtain human release classification, commit release preparation,
-   and complete required evidence, reviews, and human inspections. Before PR consent,
-   the Coordinator verifies the finish review record at
-   `.agents/workflow/finish/reviews/finish-<role>-<head>.md` binds its verdict,
-   exact HEAD, inputs/evidence revision, limitations, and reviewer identity;
-   `pr-check` does not validate it. Obtain separate consent to open the PR,
-   recorded in `.agents/workflow/finish/pr-follow-up.md` (human decision,
-   timestamp, HEAD, included changes) and distinct from merge consent; only the
-   human merges. This consent is needed once: after it is recorded, later pushes
-   to the PR need no new consent. Resolve post-PR findings through corrections, independent review,
-   and renewed checks. Sync and archive included OpenSpec changes, recheck the PR,
-   and hand off to the human for PR merge.
+   `.agents/workflow/finish.json` covers the PR. Obtain human release classification,
+   commit release preparation, and complete required evidence, reviews, and human
+   inspections. Obtain separate, one-time consent to open the PR, recorded in
+   `.agents/workflow/finish/pr-follow-up.md` and distinct from merge consent. Resolve
+   post-PR findings through corrections, independent review, and renewed checks, then
+   sync and archive included OpenSpec changes and hand off for the human's PR merge.
 
 Before every dispatch, read [briefs and handoffs](references/briefs-and-handoffs.md)
 and send the relevant filled template. Use [the helper](scripts/featdev.py) through
@@ -60,19 +52,17 @@ installed skill directory.
 
 Use [recovery](references/recovery.md) after interruption, uncertain worker
 ownership, missing/stale/inconsistent records, or partially completed operations.
-Pause affected mutations. Pause all Coordinator writes when shared records are
-unreliable. Reconcile records, Git facts, and worker ownership before resuming the
-owning phase's first incomplete operation. Stop for the human if reconciliation
-fails. Recovery never recreates consent or restarts completed work. It is an
-exception path, not a fifth stage.
+Pause affected mutations, reconcile records, Git facts, and worker ownership, then
+resume the owning phase's first incomplete operation or stop for the human. Recovery
+is an exception path, not a fifth stage: it never recreates consent or restarts
+completed work.
 
 ## Non-negotiables
 
-- Implementation requires human-approved committed planning artifacts and recorded approval. `lane-open` refuses without current approval.
+- Implementation requires human-approved committed planning artifacts and recorded approval.
 - Model, thinking, and role-profile selection is repo-level only in
   `.agents/workflow/model-selection.json`. Never create a per-lane or per-worktree
-  profile, and never put a lane worktree or per-dispatch path in a profile; the
-  worktree is execution metadata in the brief and coordination.
+  profile, and never put a lane worktree or per-dispatch path in one.
 - Keep implementation isolated and scoped. Required reviews must be independent
   and bind the exact current lane `HEAD`, subject only to documented exceptions.
 - The Coordinator dispatches, records, and gates; it never patches implementation.
@@ -83,6 +73,6 @@ exception path, not a fifth stage.
   including [Human Override and Oracle stand-in](references/lane.md#human-override).
 - Missing or stale records block affected work. Chat never replaces those records.
   Stop and report missing required helpers or unmet human gates; never invent substitutes.
-- PR-opening consent is a separate human decision recorded in
-  `.agents/workflow/finish/pr-follow-up.md`; it is not merge consent. It is given
-  once; later pushes need no new consent. Only the human merges the PR.
+- PR-opening consent is a separate, one-time human decision recorded in
+  `.agents/workflow/finish/pr-follow-up.md`; it is not merge consent, and only the
+  human merges the PR.

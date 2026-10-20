@@ -4,9 +4,7 @@ This walkthrough follows a feature from an OpenSpec requirement through implemen
 It shows what the Coordinator records and where real agents and the human must act.
 For realistic feature requests and when to use the skill, start with the [README](../README.md#when-to-use-it).
 
-The feature is deliberately tiny so the workflow stays readable.
-A real one-function change would rarely justify this much coordination.
-Normally, use the skill for features with several tasks, dependencies, or explicit review and approval requirements.
+The feature is deliberately tiny: a real one-function change would rarely justify this coordination.
 
 ## Request and acceptance criteria
 
@@ -23,23 +21,16 @@ Example request:
 | Implementation matches the approved task | A separate code reviewer checks the current lane commit and test adequacy. |
 | The integrated output is acceptable | The human inspects the output under this fixture's release rules. |
 
-The Coordinator obtains two separate planning verdicts: one for OpenSpec artifacts and one for the lane graph.
-The human then approves the plan. Only after that does an Implementer write code in an isolated worktree.
-The greeting lane has its own branch and working directory, separate from the Coordinator's feature checkout.
-The Implementer runs checks and commits there. The Coordinator integrates that commit only after independent review passes.
-The greeting lane is ordinary risk with no UI or sensitive flag, so it requires one `code-reviewer` pass covering code and test adequacy. A high-risk lane would add `test-reviewer`.
-The fixture's final human output inspection is a release rule, not an automatic requirement for every CLI project.
+The Coordinator obtains two separate planning verdicts, for the artifacts and for the lane graph, then the human approves the plan; only after that does an Implementer write code in an isolated worktree.
+The greeting lane is ordinary risk with no UI or sensitive flag, so one `code-reviewer` pass covers code and test adequacy; a high-risk lane would add `test-reviewer`.
+The fixture's final human output inspection is a release rule, not a requirement for every CLI project.
 The human separately decides whether to open the PR and later whether to merge it.
 
-The helper records events and checks bindings.
-It refuses `lane-open` without current plan approval, but does not enforce approval at `lane-merge`. It does not perform reviews or grant consent.
-The Coordinator verifies every human gate and every record this walkthrough says to check.
+The checklist's gate lines mark where the Coordinator must verify; the helper checks bindings, not judgment.
 
 ## Before running commands
 
-This recipe uses one lane and one task in a disposable consuming repository.
-It is not a live harness validation result.
-Commands record real events; they do not launch agents, perform reviews, or grant consent.
+This recipe uses one lane and one task in a disposable consuming repository, and is not a live harness validation result.
 Never use sample text as a review report or human approval.
 Do not paste the entire walkthrough as an unattended script: stop at every agent handoff and human decision.
 
@@ -47,12 +38,10 @@ These fences assume one shell session.
 If you run a fence in a new shell, re-export `FEATDEV_SKILL_ROOT` and re-assign every variable that fence uses; child sessions never inherit the Coordinator shell.
 A fence that changes directory must return to the feature checkout as shown.
 
-This example uses a disposable repository.
-Before you modify or repair an existing workflow store, back up the entire `.agents/workflow/` tree outside the checkout; Git cannot reconstruct these local, gitignored objects.
-
 Read [the skill](../SKILL.md) and [the handoff contract](briefs-and-handoffs.md) first.
 Stop after any failed command or unmet gate.
 This walkthrough instantiates the [canonical helper commands](helper-commands.md).
+Every brief below uses the [brief template](briefs-and-handoffs.md) fields `Change`, `Lane`/`Scope`, `Task/round`, `Worktree`, `Base`/`HEAD`, `Profile` (from the repo-level selection), `Contract: <absolute path to references/briefs-and-handoffs.md>`, and `Deadline`; only this fixture's values are listed.
 
 ## 1. Prepare the consuming repository
 
@@ -84,19 +73,13 @@ mkdir -p "$STORE/briefs" "$STORE/reviews" "$STORE/reports" \
   "$FEATURE_CHECKOUT/.agents/workflow/reviews"
 ```
 
-Resolve `FEATDEV_SKILL_ROOT` through [preflight](preflight-and-roles.md); do not hardcode the installation path.
-Replace `CLASSIFICATION` and each run ID only with the value the human or the actual harness launch returns.
-Do not fabricate a run ID.
+Replace `CLASSIFICATION` and each run ID only with the value the human or the actual launch returns; never fabricate one.
+Resolve the skill root per [preflight](preflight-and-roles.md).
 
-Complete [preflight and role setup](preflight-and-roles.md) before any launch.
-Write the repo-level capability map and human-approved model selection.
+Complete [preflight and role setup](preflight-and-roles.md) before any launch; the repo-level capability map and human-approved `model-selection.json` must already exist.
 The Coordinator reads the selected role profiles for each actual harness launch.
 Helper dispatch records take the role and task, not separate model or thinking overrides.
 Do not substitute defaults or create a per-change selection file.
-
-`model-selection.json` and its model, thinking, and role profiles are repo-level only.
-Never place the file or a profile under a lane worktree or `.agents/workflow/hello-message/`, and never put a worktree or another per-dispatch path in a profile.
-The absolute worktree is execution metadata in the brief and coordination.
 
 ## 2. Review change artifacts, then the repo graph
 
@@ -126,16 +109,9 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" plan-dispatc
   --report "$STORE/reviews/artifacts-oracle-c1-r1.md"
 ```
 
-Write `$STORE/briefs/artifacts-oracle-c1-r1.md` using operation `openspec_review`.
-Name `Change: hello-message`, `Scope: change artifacts`, `Lane: not applicable (planning review)`,
-`Task/round: artifacts c1-r1`,
-`Worktree: $FEATURE_CHECKOUT` (read-only), `Base`/`HEAD: $PLAN_HEAD`,
-`Profile: oracle` from the repo-level selection,
-`Contract: <absolute path to references/briefs-and-handoffs.md>`, and `Deadline`.
-List only this change's proposal, design, delta specs, tasks, reviewed source artifacts, role source, and capability map.
-Exclude the repo graph.
-End the brief with `Deliver: $STORE/reviews/artifacts-oracle-c1-r1.md`.
-The Oracle writes its actual report there before any `plan-review` command.
+Write `$STORE/briefs/artifacts-oracle-c1-r1.md` using operation `openspec_review`: `Change: hello-message`, `Scope: change artifacts`, `Lane: not applicable (planning review)`, `Task/round: artifacts c1-r1`, `Worktree: $FEATURE_CHECKOUT` (read-only), `Base`/`HEAD: $PLAN_HEAD`.
+Sources: this change's proposal, design, delta specs, tasks, reviewed source artifacts, role source, and capability map; exclude the repo graph.
+End with `Deliver: $STORE/reviews/artifacts-oracle-c1-r1.md`; the Oracle writes its report there before the verdict command.
 Launch a fresh read-only Oracle through the preflighted harness.
 Read its actual report. Only after a real `PASS`, record:
 
@@ -147,8 +123,7 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" plan-review 
 
 Every `plan-review` command includes the verdict, `--head`, and `--report`.
 For multiple included changes, repeat artifact review for each before proceeding.
-For `MORE WORK`, use the bounded correction procedure in [the plan phase](plan.md).
-Record the correction intent with a new key and a new report, for example:
+For `MORE WORK`, use the bounded correction procedure in [the plan phase](plan.md) with a new key and report, for example:
 
 ```bash
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" plan-dispatch \
@@ -157,17 +132,12 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" plan-dispatc
   --report "$STORE/reviews/artifacts-oracle-c1-r2.md"
 ```
 
-After two `MORE WORK` verdicts, a further review requires Oracle mediation.
-Require exactly one further Oracle-authored pass and then a human decision on any remaining work; there is no cap after mediation.
-The repo graph form replaces `--scope change --change "$CHANGE"` with `--scope graph` and uses a report under `.agents/workflow/reviews/`.
+A third planning review in the same cycle needs `--mediation` or escalation to the human ([plan corrections](plan.md#corrections-and-approval)).
 
 ### Author and review the repo graph
 
-This fixture starts without a graph. Do not overwrite an existing `.agents/workflow/plan-graph.json`.
-If `$PLAN` already exists, add only `changes.hello-message` and preserve every other change and key.
-If it already defines `hello-message`, stop and reconcile rather than overwrite it.
-If the existing graph contains other changes, each needs a current artifact `PASS` before graph review; the helper validates every graph entry.
-The graph is local and ignored, just like coordination.
+This fixture starts without a graph. Do not overwrite an existing `.agents/workflow/plan-graph.json`: preserve other changes and keys, and stop to reconcile if it already defines `hello-message`.
+Any other change in the graph needs a current artifact `PASS` before graph review; the helper validates every graph entry.
 
 ```bash
 if [ -f "$PLAN" ]; then
@@ -228,15 +198,9 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-dispatch \
   --report "$FEATURE_CHECKOUT/.agents/workflow/reviews/plan-graph-oracle-c1-r1.md"
 ```
 
-Write `$FEATURE_CHECKOUT/.agents/workflow/briefs/plan-graph-oracle-c1-r1.md` using operation `plan_graph_review`.
-Name `Change: hello-message` (the included change), `Scope: repo graph`,
-`Lane: not applicable (planning review)`, `Task/round: graph c1-r1`,
-`Worktree: $FEATURE_CHECKOUT` (read-only), `Base`/`HEAD: $PLAN_HEAD`,
-`Profile: oracle` from the repo-level selection,
-`Contract: <absolute path to references/briefs-and-handoffs.md>`, and `Deadline`.
+Write `$FEATURE_CHECKOUT/.agents/workflow/briefs/plan-graph-oracle-c1-r1.md` using operation `plan_graph_review`: `Change: hello-message` (the included change), `Scope: repo graph`, `Lane: not applicable (planning review)`, `Task/round: graph c1-r1`, `Worktree: $FEATURE_CHECKOUT` (read-only), `Base`/`HEAD: $PLAN_HEAD`.
 Supply the whole repo graph, every included change's artifact verdict, and the reviewed source artifacts.
-End the brief with `Deliver: $FEATURE_CHECKOUT/.agents/workflow/reviews/plan-graph-oracle-c1-r1.md`.
-The Oracle writes its actual report there before any `plan-review` command.
+End with `Deliver: $FEATURE_CHECKOUT/.agents/workflow/reviews/plan-graph-oracle-c1-r1.md`; the Oracle writes its report there before the verdict command.
 Launch a separate fresh Oracle. Read the actual report. Only after a real graph `PASS`, record:
 
 ```bash
@@ -260,15 +224,8 @@ git commit -m "docs: add approved greeting artifacts"
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-approve --approver human
 ```
 
-`plan-approve` writes `.agents/workflow/plan-approval.json` with the approver, current HEAD,
-graph digest, and per-change artifact digests.
-The record is local and gitignored; never commit it.
-It refuses uncommitted artifact changes, a missing or stale artifact `PASS`, or a missing or stale graph `PASS`.
-`status` reports the record as `current`, `stale`, or `missing`.
-
-`lane-open` refuses unless plan approval is current. `lane-merge` does not enforce it.
-Before opening this lane and again before merging it, the Coordinator must run `status` and confirm
-`plan_approval.state` is `current` for the approved plan.
+`plan-approve` records the human approval; the record is local and gitignored, so never commit it.
+`status` reports it as `current`, `stale`, or `missing`; the `status` checks in sections 3 and 4 verify both the lane-open and the merge gate.
 
 ## 3. Dispatch the implementer
 
@@ -294,40 +251,28 @@ LANE_START="$(git -C "$WORKTREE" rev-parse HEAD)"
 IMPLEMENTER_KEY="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
 ```
 
-If you set `FEATDEV_LANE_WORKTREE_ROOT`, use an absolute path.
-A relative value resolves against the Coordinator's current directory and can silently place the worktree elsewhere.
+If you set `FEATDEV_LANE_WORKTREE_ROOT`, use an absolute path; a relative value resolves against the Coordinator's current directory and can silently place the worktree elsewhere.
 
-Write `$STORE/briefs/message-implementer-1.1.md` using the implementation template.
-Name `Change: hello-message`, `Lane: message`, `Task/round: 1.1`, `Worktree: $WORKTREE`,
-`Base: $LANE_BASE`, `HEAD: $LANE_START`, `Profile: implementer` from the repo-level selection,
-`Contract: <absolute path to references/briefs-and-handoffs.md>`, and `Deadline`.
-Fill every path and command with its resolved value.
-Include the criterion, focused check, lane worktree, base, `HEAD`, role source, profile, and capability map.
-End the brief with `Deliver: $STORE/reports/message-report.md`.
-Require the live report at that path.
+Write `$STORE/briefs/message-implementer-1.1.md` using the implementation template: `Lane: message`, `Task/round: 1.1`, `Worktree: $WORKTREE`, `Base: $LANE_BASE`, `HEAD: $LANE_START`.
+Fill every path and command with its resolved value, and include the criterion, focused check, role source, and capability map.
+End with `Deliver: $STORE/reports/message-report.md`; require that live report.
 
 ```bash
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" dispatch message implementer \
     --task 1.1 --key "$IMPLEMENTER_KEY"
 ```
 
-Launch a fresh implementer in `$WORKTREE` through the selected harness.
-Set `IMPLEMENTER_RUN_ID` to the exact run ID the launch returns.
+Launch a fresh implementer in `$WORKTREE` through the selected harness; set `IMPLEMENTER_RUN_ID` to the exact run ID the launch returns.
 The implementer authors `message.py`; the Coordinator never writes that implementation.
 
-A new dispatch `--key` bypasses the helper's open same-role guard, but it is not authorization for a second writer.
-Ensure the prior worker is stopped or released before replacement, and keep one writer per worktree.
-
 The implementer runs these commands in its lane worktree after implementation.
-The brief must supply resolved variables; do not assume child sessions inherit the Coordinator shell.
 
 ```bash
 cd "$WORKTREE"
 python3 -B -c 'import message; assert message.greeting() == "hello"; print("focused check: PASS")'
 ```
 
-The implementer changes only task `1.1` from `[ ]` to `[x]` in the lane's `$TASKS`.
-All other task IDs, checkbox states, and definitions remain unchanged.
+The implementer changes only task `1.1` in the lane's `$TASKS`, from `[ ]` to `[x]`; all other task IDs, checkbox states, and definitions remain unchanged.
 
 ```bash
 git add message.py "openspec/changes/$CHANGE/tasks.md"
@@ -335,9 +280,7 @@ git commit -m "feat: add greeting and complete task"
 git status --short
 ```
 
-The implementer updates its live report and returns the commit and actual check results.
-The Coordinator verifies the report, committed tick, and clean lane worktree.
-Only after success, the Coordinator records the dispatch outcome and syncs:
+The implementer updates its live report and returns the commit and actual check results; after verifying the report, committed tick, and clean worktree, record the outcome and sync:
 
 ```bash
 cd "$FEATURE_CHECKOUT"
@@ -349,15 +292,8 @@ LANE_HEAD="$(git -C "$WORKTREE" rev-parse HEAD)"
 
 ## 4. Review and integrate the lane
 
-Write `$STORE/briefs/message-code-reviewer-r1.md` using the review template.
-Name `Change: hello-message`, `Lane: message`, `Task/round: review 1`, `Worktree: $WORKTREE`,
-`Base: $LANE_BASE`, `HEAD: $LANE_HEAD`, review range `$LANE_BASE..$LANE_HEAD`,
-`Profile: code-reviewer` from the repo-level selection,
-`Contract: <absolute path to references/briefs-and-handoffs.md>`, and `Deadline`.
-Require a code and test-adequacy review at `LANE_HEAD`.
-Name the exact lane range and `Deliver: $STORE/reviews/message-code-reviewer-r1.md`.
-This ordinary lane uses one `code-reviewer` for code and test adequacy.
-A high-risk lane would add a separate `test-reviewer`.
+Write `$STORE/briefs/message-code-reviewer-r1.md` using the review template: `Lane: message`, `Task/round: review 1`, `Worktree: $WORKTREE` (read-only), `Base: $LANE_BASE`, `HEAD: $LANE_HEAD`, review range `$LANE_BASE..$LANE_HEAD`.
+Require a code and test-adequacy review at `LANE_HEAD`, name the exact lane range, and end with `Deliver: $STORE/reviews/message-code-reviewer-r1.md`.
 
 ```bash
 CODE_KEY="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
@@ -365,11 +301,7 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" dispatch mes
     --task 1.1 --key "$CODE_KEY"
 ```
 
-Launch a different fresh reviewer in the lane worktree.
-Set `CODE_RUN_ID` to the actual run ID returned by the launch.
-Verify its receipt and read the report.
-The reviewer reply states the verdict or status, exact SHA, finding IDs, report path, and evidence revision.
-It carries no machine-generated footer.
+Launch a different fresh reviewer in the lane worktree; set `CODE_RUN_ID` from that launch, verify its receipt, and read the report.
 After an actual independent `PASS`, record:
 
 ```bash
@@ -380,9 +312,7 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" lane-review 
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" sync
 ```
 
-For ordinary role evidence, merge revalidates only the `ui-reviewer` evidence path and digest.
-It does not revalidate the other role evidence or report hashes.
-Before merging, the Coordinator verifies this code-review report's hash and evidence and confirms plan approval is still current:
+Merge revalidates only the `ui-reviewer` evidence path and digest; the Coordinator verifies this code-review report's hash and evidence and confirms plan approval is still current before merging:
 
 ```bash
 if ! python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" status --json | \
@@ -413,14 +343,9 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" lane-close m
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" sync
 ```
 
-`lane-close` also accepts a lane whose ticks are complete without a recorded merge.
-The Coordinator verifies the recorded merge before closing; the phase check above is that verification.
+`lane-close` also accepts a lane whose ticks are complete without a recorded merge; the phase check above is the Coordinator's verification of the recorded merge.
 
-For `MORE WORK`, record that verdict instead of merging.
-Follow [lane correction and escalation](lane.md).
-After two review rounds, a further round requires Oracle mediation; there is no cap after mediation.
-Require exactly one further Oracle-authored pass, an independent current-HEAD review, and then a human decision on any remaining work.
-For a standard Oracle-authored fix or an Oracle stand-in, verify independence and record the actual reviewer or stand-in ID in the report or brief; there is no helper flag for it.
+For `MORE WORK`, record that verdict instead of merging and follow [lane correction and escalation](lane.md).
 
 ## 5. Finish on the feature branch
 
@@ -429,13 +354,9 @@ HEAD="$(git rev-parse HEAD)"
 ```
 
 Confirm every lane of every change in the repository graph is merged and closed, with a clean feature-branch `HEAD`.
-Finish is repository-level: one `.agents/workflow/finish.json` record covers this PR, even when the graph contains more than one OpenSpec change.
-Do not pass `--change` to any `finish-record` command.
-Obtain the human's release classification after the lane merge.
-Set `CLASSIFICATION` to the exact chosen label.
-Follow the repository's preparation policy before recording it.
-For this fixture, no version or generated-file edits are required; integrated `HEAD` is already committed.
-If a real repository requires preparation changes, commit them before the helper's `classify` command.
+Finish is repository-level: one `.agents/workflow/finish.json` record covers this PR, and no `finish-record` command takes `--change`.
+Obtain the human's release classification after the lane merge and set `CLASSIFICATION` to the exact label, following the repository's preparation policy.
+This fixture needs no version or generated-file edits, so the integrated `HEAD` is already prepared; a real repository commits preparation before `classify`.
 
 The Coordinator writes a factual preparation receipt under the finish evidence revision.
 It records the actual commands, results, and paths:
@@ -456,15 +377,9 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" finish-record classify \
   --input message.py --check greeting --inspection output
 ```
 
-`classify` requires at least one `--input` and treats every input as a preparation input.
-There is no separate check-input field.
-This fixture has no preparation changes, so `message.py` is the tracked release input.
-Changing `message.py` after this record requires `finish-record restage` with the new receipt and inputs.
-Declare every selected check with `--check`; `classify` records the declared set and runs no check.
-This fixture uses no version. In a versioned repository, pass `--version <label>` here; omitting `--version` on a later `restage` clears the expected version.
+`message.py` is this fixture's tracked release input, and the fixture uses no version. Changing it after this record requires `finish-record restage` with the new receipt and inputs ([finish records](finish.md#generic-artifact-records)).
 
-Run and record the selected check on committed integrated `HEAD`.
-The check receipt includes the exact command, result, `HEAD`, and inputs:
+Run and record the selected check on committed integrated `HEAD`, with a receipt naming the exact command, result, `HEAD`, and inputs:
 
 ```bash
 mkdir -p "$FINISH_STORE/evidence/r1"
@@ -490,20 +405,13 @@ else
 fi
 ```
 
-A check outside the declared set is refused.
 A failed check blocks the next steps.
 
 ### Finish review
 
 Before asking for PR-opening consent, obtain an independent finish-scoped code review at the exact integrated `HEAD`.
-Write `$FINISH_STORE/briefs/finish-code-reviewer-release-review.md` using the finish reviewer template.
-Name `Included changes: hello-message`, `Scope: finish`, `Task: release-review`,
-`Worktree: $FEATURE_CHECKOUT` (read-only), `Owned paths: read-only`, `Integrated HEAD: $HEAD`,
-`Profile: code-reviewer` from the repo-level selection,
-`Contract: <absolute path to references/briefs-and-handoffs.md>`, and `Deadline`.
-List the release inputs and the `r1` evidence as evidence inputs.
-End the brief with `Deliver: $FINISH_STORE/reports/finish-code-reviewer-release-review.md` and
-`Review: $FINISH_STORE/reviews/finish-code-reviewer-$HEAD.md`.
+Write `$FINISH_STORE/briefs/finish-code-reviewer-release-review.md` using the finish reviewer template: `Included changes: hello-message`, `Scope: finish`, `Task: release-review`, `Worktree: $FEATURE_CHECKOUT` (read-only), `Owned paths: read-only`, `Integrated HEAD: $HEAD`.
+List the release inputs and the `r1` evidence as evidence inputs, and end with `Deliver: $FINISH_STORE/reports/finish-code-reviewer-release-review.md` and `Review: $FINISH_STORE/reviews/finish-code-reviewer-$HEAD.md`.
 
 ```bash
 FINISH_REVIEW_KEY="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
@@ -511,16 +419,9 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" dispatch --scope finish code-re
   --task release-review --key "$FINISH_REVIEW_KEY"
 ```
 
-Launch a fresh read-only reviewer on the feature checkout.
-Set `FINISH_REVIEW_RUN_ID` to the actual run ID returned by the launch.
-The reviewer writes its report and a finish review record at `$FINISH_STORE/reviews/finish-code-reviewer-$HEAD.md`
-using the [finish review record](finish.md#finish-review-record) format.
-That record states the verdict (`PASS` or `MORE WORK`), the exact integrated HEAD, the inputs and evidence revision,
-any limitations, and the actual reviewer identity.
-The reviewer reply also states the verdict or status, exact SHA, finding IDs, report path, and evidence revision; it carries no machine footer.
-Only a current `PASS` at this HEAD and revision permits consent.
-The Coordinator verifies the finish review record's exact HEAD, evidence revision, and reviewer independence rather than relying on a helper check.
-A `MORE WORK` verdict blocks consent; resolve findings and re-review at the new HEAD.
+Launch a fresh read-only reviewer on the feature checkout and set `FINISH_REVIEW_RUN_ID` from that launch.
+It writes its report and the [finish review record](finish.md#finish-review-record) at `$FINISH_STORE/reviews/finish-code-reviewer-$HEAD.md`.
+Only a current `PASS` at this HEAD and evidence revision permits consent; a `MORE WORK` verdict blocks it, so resolve the findings and re-review at the new HEAD.
 
 ```bash
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" dispatch-done --scope finish code-reviewer \
@@ -549,18 +450,13 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" finish-record pr-check
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" status --json
 ```
 
-`pr-check` validates only the declared check set, the captured evidence, and the declared human inspections.
-It does not validate plan approval, this finish review, PR-opening consent, or `pr-follow-up.md`.
-The Coordinator verifies each of those records has the current HEAD, inputs, evidence revision, and approval scope before relying on it.
+`pr-check` validates only the declared checks, captured evidence, and declared inspections; it does not validate plan approval, the finish review, PR-opening consent, or `pr-follow-up.md`. The Coordinator verifies each of those records before relying on it.
 The finish review must be current at the same HEAD and evidence revision before PR-opening consent is requested.
 
 ### PR opening and follow-up
 
-Create `$FINISH_STORE/pr-follow-up.md` when finish starts, at the latest before asking for consent, and list every change included in the PR.
-Start the file with the included changes; fill the consent block only after the explicit answer, and the PR URL only after opening.
-Ask the human separately for permission to open the PR; release classification and PR-merge consent do not imply it.
-Only after an explicit `yes`, record the consent and then open the PR.
-The consent record names the human, timestamp, exact integrated HEAD, and included changes:
+Create `$FINISH_STORE/pr-follow-up.md` when finish starts, listing every included change. Ask the human separately for permission to open the PR: release classification and PR-merge consent do not imply it.
+Only after an explicit `yes`, record the consent and open the PR. The record names the human, timestamp, exact integrated HEAD, and included changes:
 
 ```markdown
 # PR follow-up: hello-message
@@ -587,13 +483,7 @@ HEAD: <current feature HEAD>
 - <item, or none>
 ```
 
-PR-opening consent is separate from release classification and from the later human PR-merge decision.
-PR-opening consent names the exact HEAD at which the PR opens; a HEAD that changes before opening needs renewed consent.
-Opening the PR starts post-PR follow-up; it does not complete the workflow.
-Monitor automated PR checks and bot code-review comments using [post-PR follow-up](finish.md#post-pr-follow-up).
-Route actionable findings through implementation and independent review, then recheck the updated PR.
-Record the PR URL, current HEAD, and each bot finding's disposition in `pr-follow-up.md`.
-Pending checks are not successful checks, and a failing required check blocks merge readiness.
+Opening the PR starts post-PR follow-up; it does not complete the workflow. Record the PR URL, current HEAD, and each bot finding's disposition in `pr-follow-up.md`, and follow [post-PR follow-up](finish.md#post-pr-follow-up) for monitoring and corrections.
 
 ### Archive and refresh
 
@@ -616,10 +506,7 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" finish-record capture \
 This is not `restage`: `message.py` did not change.
 If it did, restage first, then recapture.
 
-Refresh the finish review at the new HEAD.
-Use the same brief fields with `Integrated HEAD: $HEAD` and the `r2` evidence revision.
-Repeat the finish review dispatch with a new key, launch a fresh reviewer, and set `FINISH_REVIEW_RUN_ID` from that launch.
-Record the new `$FINISH_STORE/reviews/finish-code-reviewer-$HEAD.md` after an actual `PASS`, then complete the dispatch with the same `dispatch-done` form shown above:
+Refresh the finish review at the new HEAD with the same brief fields, `Integrated HEAD: $HEAD`, and the `r2` evidence: dispatch with a new key, launch a fresh reviewer, set `FINISH_REVIEW_RUN_ID` from that launch, record the new `$FINISH_STORE/reviews/finish-code-reviewer-$HEAD.md` after an actual `PASS`, and close it with the same `dispatch-done` form shown above:
 
 ```bash
 FINISH_REVIEW_KEY="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
@@ -641,9 +528,7 @@ Re-run `finish-record pr-check`:
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" finish-record pr-check
 ```
 
-Then recheck the updated PR: current required checks, current bot comments, and updated dispositions in `pr-follow-up.md`.
-Record the archival HEAD and the updated bot dispositions there.
-Only then present the current checks, review dispositions, and mergeability for the human's PR merge decision.
+Then recheck the updated PR and record the archival HEAD and updated dispositions in `pr-follow-up.md` before presenting checks, review dispositions, and mergeability for the human's PR-merge decision.
 
 ## Monitor or resume this example
 
@@ -652,47 +537,33 @@ Ask the Coordinator for progress while workers run:
 > Show the hello-message dashboard.
 > Summarize completed work, pending reviews, and blockers.
 
-Use the [status and dashboard commands](helper-commands.md#status-and-task-status) from the feature checkout.
-A live dashboard is optional; run its server in a separate terminal.
-The dashboard shows recorded progress. It never supplies a review verdict or human approval.
+Use the [status and dashboard commands](helper-commands.md#status-and-task-status) from the feature checkout; a live dashboard is optional and never supplies a verdict or approval.
 
-After an interruption, keep the same feature checkout and its local workflow records.
-Ask:
+After an interruption, keep the same feature checkout and its local records, and ask:
 
 > Resume hello-message with feature-development-skill.
 > Reconcile records and worker ownership.
 > Continue from the first incomplete operation.
 > Do not repeat completed tasks or recreate approval from chat history.
 
-The Coordinator follows [recovery](recovery.md) before further affected operations.
-Do not restart the walkthrough at step 1 merely because a new session begins.
+The Coordinator follows [recovery](recovery.md) before further affected operations; do not restart the walkthrough merely because a new session begins.
 
 ## Expected records
 
-These paths describe the state after finish and PR opening, before OpenSpec sync and archive.
-After archive, refresh the affected evidence and finish review for the archival HEAD, for example under `.agents/workflow/finish/evidence/r2/`.
-The completed task file then lives in its verified archive directory instead of the active change directory.
-Local records remain in the same coordinator store.
+These paths describe the state after finish and PR opening, before sync and archive. After archive, affected evidence moves to `r2` and the completed task file lives in its verified archive directory; local records stay in the same coordinator store.
 
 | Location | Expected result |
 |---|---|
-| `.agents/workflow/capability-map.md` | Actual harness capabilities |
-| `.agents/workflow/preflight.json` | Harness/mechanism record; the repo-level selection copies its harness block |
-| `.agents/workflow/model-selection.json` | Human-approved repo-level role profiles; no lane worktree or per-dispatch path |
 | `.agents/workflow/hello-message/plan-reviews.json` | Current Oracle verdict for OpenSpec artifacts only |
-| `.agents/workflow/plan-graph-review.json` | Separate Oracle verdict for the whole repo graph |
-| `.agents/workflow/plan-graph.json` | Local repo-level change/lane/task graph; never committed |
-| `.agents/workflow/plan-approval.json` | Human plan approval bound to committed artifacts and the reviewed graph; the Coordinator verifies it is current before lane-open and merge |
 | `.agents/workflow/briefs/plan-graph-oracle-c1-r1.md` | Repo graph Oracle brief |
 | `.agents/workflow/reviews/plan-graph-oracle-c1-r1.md` | Repo graph Oracle actual report |
 | `.agents/workflow/hello-message/briefs/` | Artifact-review, implementation, and lane-review briefs |
 | `.agents/workflow/hello-message/reports/` | Implementer live report |
 | `.agents/workflow/hello-message/reviews/` | Artifact Oracle report and lane code-review report |
-| `.agents/workflow/finish.json` | Repo-level finish classification, preparation, checks, evidence, inspections, and dispatches for the PR |
 | `.agents/workflow/finish/evidence/r1/` | Preparation receipt, check receipt, and human output inspection |
-| `.agents/workflow/finish/pr-follow-up.md` | PR scope, human PR-opening consent, URL/HEAD, and bot dispositions |
-| `.agents/workflow/coordination.json` | Completed dispatches, reviews, merge, finish, and lane tasks under `changes.hello-message` |
 | `openspec/changes/hello-message/tasks.md` | Task `1.1` committed and checked on the feature branch |
+
+The repo-level objects (`preflight.json`, `capability-map.md`, `model-selection.json`, `plan-graph.json`, `plan-graph-review.json`, `plan-approval.json`, `coordination.json`, `finish.json`) and `finish/pr-follow-up.md` follow [Set locations](briefs-and-handoffs.md#set-locations-no-ad-hoc-paths).
 
 `pr-check` must pass without `restage` on this normal path.
 Archive refresh re-captures evidence but does not change preparation inputs.

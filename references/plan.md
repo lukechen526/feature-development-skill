@@ -44,13 +44,7 @@ Its remit is requirements, proposal/design/spec consistency, scope, task complet
 This review does not include the repo-level graph or any legacy per-change graph.
 It can run before `plan-graph.json` exists.
 
-Record intent before the actual launch:
-
-See the [helper command reference](helper-commands.md#change-artifact-review).
-
-After reading the actual report, record its verdict:
-
-See the [helper command reference](helper-commands.md#change-artifact-review).
+Record intent before the actual launch, and record the verdict only after reading the actual report: see the [helper command reference](helper-commands.md#change-artifact-review).
 
 Each change has its own ledger: `.agents/workflow/<change>/plan-reviews.json`.
 The helper binds the verdict to the OpenSpec artifact digest and review HEAD, not to the graph.
@@ -71,23 +65,12 @@ Each change contains one or more lanes. Each lane contains one or more tasks.
     "example-change": {
       "lanes": {
         "store": {
-          "risk": "high",
-          "ui": false,
-          "sensitive": false,
-          "depends_on": [],
-          "tasks": {
-            "1.1": {"deps": []},
-            "1.2": {"deps": ["1.1"]}
-          }
+          "risk": "high", "ui": false, "sensitive": false, "depends_on": [],
+          "tasks": {"1.1": {"deps": []}, "1.2": {"deps": ["1.1"]}}
         },
         "ui": {
-          "risk": "ordinary",
-          "ui": true,
-          "sensitive": false,
-          "depends_on": ["store"],
-          "tasks": {
-            "2.1": {"deps": ["1.2"]}
-          }
+          "risk": "ordinary", "ui": true, "sensitive": false, "depends_on": ["store"],
+          "tasks": {"2.1": {"deps": ["1.2"]}}
         }
       }
     }
@@ -121,13 +104,10 @@ Declared flags drive gates:
 
 ### Structural validation
 
-See the [helper command reference](helper-commands.md#plan-validation-and-rendering).
-
-The default validates or renders all changes. `--change <change>` is accepted before the subcommand and selects one entry.
-Use `--change` with `--tasks` when the graph has multiple changes.
 Validation checks nested shape, task-ID bijection, references, and dependency cycles.
 Lane cycle checks include edges implied by cross-lane task dependencies; otherwise an acyclic task graph can deadlock integration.
 Oracle judgment—not structural validation—assesses boundaries, ownership, risk, and coverage.
+Run it with the [helper command reference](helper-commands.md#plan-validation-and-rendering).
 
 ### Oracle stage 2: the repo-level graph
 
@@ -137,11 +117,7 @@ Its remit is whole-repository planning: change-to-lane/task mapping, cohesive ow
 dependencies, risk/UI flags, review duties, and complete coverage of the reviewed artifacts.
 It uses the reviewed OpenSpec artifacts as inputs; it does not silently revise their approved requirements.
 
-Graph review has no `--change` selector:
-
-See the [helper command reference](helper-commands.md#repo-graph-review).
-
-Record intent before the actual Oracle launch, then record the actual verdict using the linked commands.
+Graph review has no `--change` selector: see the [helper command reference](helper-commands.md#repo-graph-review).
 The repo-level ledger is `.agents/workflow/plan-graph-review.json`, separate from every change's artifact ledger.
 The helper requires current artifact passes for every graph entry at dispatch and verdict recording.
 The graph verdict binds the whole graph and the reviewed artifact digests.
@@ -166,37 +142,19 @@ The authorization identifies the exact graph or OpenSpec artifact paths and the 
 Only this bounded planning exception permits an Oracle to write the local graph directly.
 Pause Coordinator graph writes and other graph authors until the Oracle stops or releases ownership.
 The Oracle never writes coordination or approval ledgers. The Coordinator records the outcome.
-Read the completed report before recording a fresh read-only follow-up with a new key and a new report.
-The follow-up plan-dispatch uses `--task plan` (or omits `--task`), never the author's correction task.
-Export `FEATDEV_SKILL_ROOT` to the resolved absolute skill path before running these commands:
+Read the completed report before recording a fresh read-only follow-up with a new key and a new report; it uses `--task plan` (or omits `--task`), never the author's correction task. See [planning correction commands](helper-commands.md#oracle-planning-corrections).
 
-```bash
-python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-dispatch \
-  --scope graph --role oracle --task plan --key <new-key> \
-  --report .agents/workflow/reviews/plan-graph-oracle-c<cycle>-r<round>.md
-python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> plan-dispatch \
-  --scope change --role oracle --task plan --key <new-key> \
-  --report .agents/workflow/<change>/reviews/artifacts-oracle-c<cycle>-r<round>.md
-```
-
-That intent closes the author record; a different Oracle performs the independent review.
-Record the new verdict with `plan-review`, including the verdict, `--head <sha>`, and `--report <new-report>`.
-The author cannot approve its own correction. See [planning correction commands](helper-commands.md#oracle-planning-corrections).
+That intent closes the author record; a different Oracle performs the independent review with `plan-review`.
+The author cannot approve its own correction.
 A stale intent requires a fresh unique `--key`; never reuse a dispatch ID for different inputs.
 
 After both stages pass, obtain explicit human approval of the artifacts and local graph.
-Commit the OpenSpec artifacts first, then record the approval with `plan-approve`.
-The record names the approver, current HEAD, graph digest, and per-change artifact digests.
-It requires a current artifact PASS for every included change and a current graph PASS.
-It refuses uncommitted `openspec/changes` content, a missing/stale graph PASS, or a missing/stale artifact PASS.
+Commit the OpenSpec artifacts first, then record the approval with `plan-approve` ([approval command](helper-commands.md#plan-approval)).
 Committing a contract-changing artifact edit after its review does not satisfy the artifact requirement:
 the changed digest invalidates the earlier PASS and requires a fresh artifact review.
-Never stage `plan-graph.json`, `coordination.json`, or their review/approval records.
-The helper records the decision; it never grants human approval or commits these files.
+Never stage `plan-graph.json`, `coordination.json`, or their review/approval records; the helper records the decision but never grants human approval or commits these files.
 
-`status` reports the plan-approval state as current, stale, or missing (JSON: `plan_approval.state`).
-Before opening any lane and before every lane merge, the Coordinator must run `status` and confirm `plan_approval.state` is `current`.
-`lane-open` refuses unless the approval record is current. `lane-merge` does not check it; the Coordinator verifies it before every merge.
+Plan-approval state and its enforcement are defined once in [lane records](lane.md#records-and-progress).
 
 Plan amendments require affected artifact review, then repo graph review, then human approval recorded with `plan-approve` before renewed implementation.
 Lane review and human-gate bindings include the lane contract digest; material lane edits require fresh verdicts.

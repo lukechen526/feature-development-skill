@@ -24,7 +24,7 @@ An evidence refresh already prescribed by the phase guide does not require resta
 1. Pause the affected lane or phase.
 2. Pause all coordinator writes if the shared local objects are unreliable.
 3. Identify the interrupted phase, change, lane, and last confirmed operation.
-4. Read the retained local plan, `.agents/workflow/plan-approval.json`, repo-level `.agents/workflow/plan-graph-review.json`, coordination records, and the affected change's `.agents/workflow/<change>/plan-reviews.json`, briefs, reports, reviews (including finish reviews), evidence, and `pr-follow-up.md`.
+4. Read the retained local records: `.agents/workflow/plan-graph.json`, `coordination.json`, `plan-approval.json`, `plan-graph-review.json`, the change's `plan-reviews.json`, briefs, reports, reviews (including finish reviews), evidence, and `pr-follow-up.md`.
 5. Compare those records with committed OpenSpec artifacts, task ticks, and surviving worktrees/refs.
 6. Establish the actual status and ownership of every affected worker.
 7. Repair the interrupted operation or renew only the affected missing evidence and decisions.
@@ -57,7 +57,7 @@ Do not replay completed phases, redispatch completed tasks, or repeat a successf
 - Confirm operation results before retrying; never double-dispatch, double-merge, or double-remove.
 
 The local graph, coordination file, plan-approval record, review ledgers, reports, evidence, and PR follow-up are not reconstructible from Git alone. Preserve them together.
-Back up the entire `.agents/workflow/` tree before recovery, migration, cleanup, or any destructive repair. It includes `preflight.json`, `plan-graph.json`, `coordination.json`, `plan-approval.json`, `finish.json`, each change's `plan-reviews.json`, `plan-graph-review.json`, `model-selection.json`, the capability map, briefs, reports, reviews (including finish reviews), evidence, and `finish/pr-follow-up.md`.
+Back up the entire `.agents/workflow/` tree before recovery, migration, cleanup, or any destructive repair; it holds every repo-level object, ledger, brief, report, review, and evidence set listed in [Set locations](briefs-and-handoffs.md#set-locations-no-ad-hoc-paths).
 Use the conditional sections below only when their specific legacy-record condition applies.
 
 ## Repository-object migration
@@ -98,9 +98,7 @@ Do not overwrite newer progress with an older backup without reconciliation.
 
 Legacy input paths are `openspec/changes/<change>/plan/graph-plan.json` and
 `.agents/workflow/<change>/coordination.json`. New work never creates them.
-Git retains historical OpenSpec artifacts and ticks, but cannot reconstruct a lost local graph, imported review ledger, report, or evidence set.
-Lost local objects require a backup or renewed planning/review/approval—not inferred consent.
-Lost review ledgers, reports, or evidence require re-review or re-capture; a surviving graph or coordination entry is not a substitute.
+Git retains historical OpenSpec artifacts and ticks, but a lost local record requires a backup or renewed planning, review, approval, or re-capture—never inferred consent. A surviving graph or coordination entry is no substitute for a lost ledger, report, or evidence set.
 
 ## Finish records
 
@@ -109,21 +107,16 @@ Normal changes to release inputs follow restaging in [finish.md](finish.md), wit
 
 Existing finish records without a preparation artifact require `finish-record restage`.
 Restage reuses the stored classification; supply the new preparation receipt and its committed input
-paths. Pass `--check` to replace the declared check set. Omitting `--version` clears the stored
-expected version; pass `--version` when the repository uses one. Repeat release checks and required human
-inspections. Use `checkpoint:` in new human inspection artifacts. See [finish.md](finish.md) for the record format.
+paths and repeat release checks and required human inspections. Use `checkpoint:` in new human inspection artifacts. See [finish.md](finish.md) for the record format and [Finish records](helper-commands.md#finish-records) for restage flags.
 
-Preserve lane reports and evidence under the change's absolute reports and evidence directories:
-`.agents/workflow/<change>/reports/` and `.agents/workflow/<change>/evidence/`. Finish reports and
-evidence live under `.agents/workflow/finish/reports/` and `.agents/workflow/finish/evidence/`.
+Preserve lane reports and evidence under the change's absolute reports and evidence directories; finish reports and evidence live under the `.agents/workflow/finish/` tree. Their canonical paths are in [Set locations](briefs-and-handoffs.md#set-locations-no-ad-hoc-paths).
 Recovery checks for finish also cover the repo-level finish review at
 `.agents/workflow/finish/reviews/finish-<role>-<head>.md`, with its verdict, exact integrated HEAD,
 inputs/evidence revision, limitations, and reviewer identity, and
 `.agents/workflow/finish/pr-follow-up.md` with its PR URL, current HEAD, finding dispositions,
 outstanding items, and PR-opening consent naming the human, timestamp, HEAD, and included changes.
 PR-opening consent is separate from release classification and lane merge consent.
-`pr-check` does not validate finish reviews, PR-opening consent, or PR follow-up; the Coordinator
-verifies each and requires fresh review, re-capture, or renewed human consent when one is missing or stale.
+`pr-check` does not validate finish reviews, PR-opening consent, or PR follow-up, so a missing or stale record needs fresh review, re-capture, or renewed human consent.
 
 Block on missing/stale plan approval or review binding, a missing finish review or PR-opening consent
 needed for the next action, unknown worker, unapproved changed plan, failed required check,

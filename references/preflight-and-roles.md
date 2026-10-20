@@ -2,9 +2,7 @@
 
 Command syntax: [helper command reference](helper-commands.md).
 
-The human chooses the model and thinking for every role. There is no fixed default table in this skill.
-The selection is asked once per repository, recorded at repo level, and reused by every change until the
-human changes it.
+The human chooses the model and thinking for every role; there is no fixed default table. The selection is asked once per repository and reused by every change until the human changes it.
 
 ## Step 0 — capability preflight (once per repo/harness)
 
@@ -13,7 +11,7 @@ Record their paths for scoped briefs. No particular instruction filename is requ
 Verify `openspec --version` when establishing OpenSpec CLI availability.
 
 Do not assume a provider, harness, or agent registry. Inspect the live tool surface and record what it
-actually supports. Do not infer a capability from a tool name, a package manifest, or a previous run.
+actually supports; never infer a capability from a tool name, a package manifest, or a previous run.
 
 | Capability | Determine |
 |---|---|
@@ -43,8 +41,7 @@ shells:
 export FEATDEV_SKILL_ROOT="<resolved absolute skill root>"
 ```
 
-Pass the same absolute path to every command and brief. Invoke the helper as
-`"$FEATDEV_SKILL_ROOT"/scripts/featdev.py`; never rely on a relative root or an unexpanded variable.
+Invoke the helper as `"$FEATDEV_SKILL_ROOT"/scripts/featdev.py`; never rely on a relative root or an unexpanded variable.
 
 Choose the first mechanism that satisfies all three hard gates: fresh-context launch, a settable working
 directory, and role prompt injection:
@@ -66,11 +63,7 @@ Step 0 writes two required repo-level records:
   absolute skill root, the absolute featdev path, the capability map path and SHA-256, and the selected
   mechanism.
 
-`preflight.json` is not optional. Step 1 copies its `harness` block; it does not re-inspect the harness.
 A different harness or mechanism requires a new preflight that rewrites both records.
-
-Do not create or write `model-selection.json` in Step 0. Step 1 writes its core fields once for the
-repository after the human answers, and Step 1b adds the role profiles.
 
 The repo-level records are local and gitignored. Back up the entire `.agents/workflow/` tree before
 rewriting preflight or selection records; Git cannot reconstruct it.
@@ -109,60 +102,29 @@ Template for `.agents/workflow/preflight.json`:
 }
 ```
 
-A `false` value records that the capability is unavailable; the capability map distinguishes `no`,
-`unsupported`, and `not exposed` in its Supported and Fallback columns. `wait` records `event` or `poll`
-once; it is never a separate boolean.
-
 ### Record the capability map
 
-Before defining roles, write `.agents/workflow/capability-map.md`: a short, one-page mapping from each
-generic capability in the table above to the concrete tool or operation this harness exposes. It is a
-runtime artifact, not part of the skill, so it may name the harness and its tools.
+Before defining roles, write `.agents/workflow/capability-map.md`: a short, one-page mapping from each generic capability in the table above to the concrete tool or operation this harness exposes.
 
-Required columns:
+Give it one row per capability in the Step 0 table, with columns `Harness tool or operation`, `Invocation`, `Supported`, and `Fallback / limitation`.
+`Supported` takes exactly one of `yes`, `no`, `unsupported`, or `not exposed`; for Wait / notify record `event` or `poll`. Never leave a blank. If the harness exposes more than one mechanism, name the mechanism the row applies to.
 
-| Generic capability | Harness tool or operation | Invocation | Supported | Fallback / limitation |
-|---|---|---|---|---|
-| Fresh launch | <tool or operation> | <arguments> | yes | — |
-| Fork | <tool or operation> | <arguments> | yes / no | not used by this workflow; fresh context is required |
-| Working directory | ... | ... | yes | — |
-| Prompt injection | ... | ... | yes | — |
-| Model | ... | ... | yes / no | session default; human acknowledged |
-| Model enumeration | ... | ... | yes / no | human free text |
-| Thinking | ... | ... | yes / no | session default; human acknowledged |
-| Tools | ... | ... | yes / no | prompt-only; report validation |
-| Wait / notify | ... | ... | event / poll | poll bounded by the Coordinator deadline |
-| Status | ... | ... | yes / no | ... |
-| Message / continue | ... | ... | yes / no | fresh dispatch |
-| Parent / supervisor message | ... | ... | yes / no | return a blocked result |
-| Resume | ... | ... | yes / no | fresh dispatch |
-| Stop | ... | ... | yes / no | coordinator deadline |
-| Timeout | ... | ... | yes / no | coordinator deadline |
-| Structured output | ... | ... | yes / no | report file |
-
-Supported takes exactly one of `yes`, `no`, `unsupported`, or `not exposed`; for Wait / notify record
-`event` or `poll`. Every capability in the Step 0 table must have a row. Never leave a blank. If the
-harness exposes more than one mechanism, name the mechanism the row applies to.
-
-Step 1 copies `capability_map`, `capability_map_sha256`, and the `harness` block from `preflight.json`
-into `model-selection.json`; it does not edit them by hand. The Coordinator reads the map before every
-dispatch, and every brief carries its absolute path. A different harness or mechanism invalidates the
-map and requires a new preflight.
+The Coordinator reads the map before every dispatch, and every brief carries its absolute path.
 
 ## Step 1 — ask the human (once per repository)
 
 Before any dispatch, ask the human through the harness's user-question tool (or in chat when no
 question tool exists). Ask one question per role, in this order:
 
-| Role ID | Role | Question |
-|---|---|---|
-| `coordinator` | Coordinator | Which model and thinking level should run the coordinator session? |
-| `implementer` | Implementer | Which model and thinking level should implement tasks and fixes? |
-| `code-reviewer` | Code reviewer | Which model and thinking level should review code? |
-| `test-reviewer` | Test reviewer | Which model and thinking level should review test adequacy? |
-| `ui-reviewer` | Rendered-UI reviewer | Which model and thinking level should review supplied UI evidence? |
-| `oracle` | Oracle | Which model and thinking level should review plans, mediate, and author bounded fixes? |
-| `runner` | Runner | Which model and thinking level should run long checks or polling? |
+| Role ID | Role | Question | Role file | Review duty |
+|---|---|---|---|---|
+| `coordinator` | Coordinator | Which model and thinking level should run the coordinator session? | — (session profile, not dispatchable) | Selects the current coordinator session |
+| `implementer` | Implementer | Which model and thinking level should implement tasks and fixes? | [assets/implementer.md](../assets/implementer.md) | Implementation, tests, fixes |
+| `code-reviewer` | Code reviewer | Which model and thinking level should review code? | [assets/code-reviewer.md](../assets/code-reviewer.md) | Implementation/task completeness; ordinary lanes also own the code/test review |
+| `test-reviewer` | Test reviewer | Which model and thinking level should review test adequacy? | [assets/test-reviewer.md](../assets/test-reviewer.md) | Test adequacy, coverage, quality, mutation testing; high-risk lanes |
+| `ui-reviewer` | Rendered-UI reviewer | Which model and thinking level should review supplied UI evidence? | [assets/ui-reviewer.md](../assets/ui-reviewer.md) | Supplied rendered-UI evidence |
+| `oracle` | Oracle | Which model and thinking level should review plans, mediate, and author bounded fixes? | [assets/oracle.md](../assets/oracle.md) | Plan review, mediation, authorized fixes |
+| `runner` | Runner | Which model and thinking level should run long checks or polling? | [assets/runner.md](../assets/runner.md) | Long checks and polling; observations only, no verdict |
 
 Rules:
 
@@ -170,71 +132,35 @@ Rules:
    option. When model enumeration is unavailable, accept free text and verify each entry against the
    live harness before recording it.
 2. Ask per role; do not invent a default and do not fill an answer yourself.
-3. If the harness cannot select a model or thinking level, say so, record `degraded: true`, record the
-   session default in the corresponding `effective` field, and ask the human to acknowledge the
-   degradation explicitly. Record `acknowledged: true` only after the human answers. When the requested
-   value is supported, record `degraded: false` and the selected value in the corresponding `effective`
-   field.
+3. If the harness cannot select a model or thinking level, say so, require explicit human acknowledgement, and record it as defined below; never silently substitute a value.
 4. The human may answer "same as X" or "you choose"; record that literally with the resolved value.
 5. Never infer a role model from another role, from the coordinator session, or from another repository.
    Explicit per-role answers win.
 
 `effective` records the value the harness actually uses for each of `model` and `thinking`: the selected
 value when supported, the session default when not. `degraded` is true when either selected value could
-not be used. `acknowledged` records the human's explicit acceptance of that degradation. A degraded role
+not be used. `acknowledged` records the human's explicit acceptance of that degradation, recorded only after the human answers; a degraded role
 without acknowledgement blocks dispatch.
 
 ## Canonical roles
 
-The `coordinator` profile selects the current coordinator session, not a dispatchable subagent.
-The following role IDs identify dispatchable subagents.
-
-| Role ID | Role file | Review duty |
-|---|---|---|
-| `implementer` | [assets/implementer.md](../assets/implementer.md) | Implementation, tests, fixes |
-| `code-reviewer` | [assets/code-reviewer.md](../assets/code-reviewer.md) | Implementation/task completeness; ordinary lanes also own the code/test review |
-| `test-reviewer` | [assets/test-reviewer.md](../assets/test-reviewer.md) | Test adequacy/coverage/quality and mutation testing; high-risk lanes |
-| `ui-reviewer` | [assets/ui-reviewer.md](../assets/ui-reviewer.md) | Supplied rendered-UI evidence |
-| `oracle` | [assets/oracle.md](../assets/oracle.md) | Plan review, mediation, authorized fixes |
-| `runner` | [assets/runner.md](../assets/runner.md) | Long checks and polling; observations only, no verdict |
-
-The same role ID is used in the role file's `role_id`, `model-selection.json`, the positional role in
-`dispatch <lane> <role>` and `lane-review <lane> <role> <verdict>`.
-Do not use aliases or alternate spellings.
-Oracle-authored fixes and Oracle stand-ins have no provenance flag: the Coordinator verifies the
-reviewer's independence and records the reviewer or stand-in ID in the report or brief.
-
-Ordinary lanes require the `code-reviewer` review, which covers code and test adequacy. High-risk lanes
-require separate `code-reviewer` and `test-reviewer` reviews. The standard gate requires `ui-reviewer` review only when the plan sets `ui: true`.
-`ui: true` also requires current rendered evidence for the UI `PASS` and the human checkpoint.
-A `ui` or `sensitive` flag requires a human checkpoint, subject to the documented deferral rules.
+The table above defines the role IDs. The same ID is used in the role file's `role_id`, `model-selection.json`, the positional role in `dispatch <lane> <role>` and `lane-review <lane> <role> <verdict>`; do not use aliases or alternate spellings.
+Ordinary lanes require the `code-reviewer` review, which covers code and test adequacy. High-risk lanes require separate `code-reviewer` and `test-reviewer` reviews. The standard gate requires `ui-reviewer` review only when the plan sets `ui: true`, which also requires current rendered evidence for the UI `PASS` and the human checkpoint. A `ui` or `sensitive` flag requires a human checkpoint, subject to the documented deferral rules.
 
 ## Record the selection
 
-Write the answers once for the repository:
-
-```
-<repo>/.agents/workflow/model-selection.json
-```
-
-The shared plan is `.agents/workflow/plan-graph.json`; the shared runtime store is `.agents/workflow/coordination.json`.
-Both are local, gitignored objects that group tasks under lanes and lanes under OpenSpec changes.
-Neither is committed. Planning reviews OpenSpec artifacts per change before a separate repo graph review.
-Model profiles remain repo-level and apply across those changes.
-
-Step 1 writes the core object: `scope`, `asked_at`, `asked_with`, `skill_root`, `capability_map`,
-`capability_map_sha256`, `harness`, and `roles`. Step 1b adds `profiles`. There is no top-level
+Step 1 writes the core object at `.agents/workflow/model-selection.json`; Step 1b adds `profiles`. There is no top-level
 `dispatch_mechanism` or `agent_provisioning` field; the mechanism is recorded once in `preflight.json`
 and per role in `profiles.<role>.mechanism`.
 
-This file is created in Step 1, after the human answers. Step 0 does not create it. Every change reuses
+This file is created in Step 1, after the human answers. Every change reuses
 it; do not copy it into `.agents/workflow/<change>/`. A different selection for one change requires an
 explicit human decision and an update to this repo-level file.
 
-Template for `<repo>/.agents/workflow/model-selection.json` (documentation only; this skill ships
-no such file). It shows the final file: Step 1 writes every field except `profiles`, and Step 1b adds
-`profiles`. Copy `harness`, `skill_root`, `capability_map`, and `capability_map_sha256` from
+Copy `harness`, `skill_root`, `capability_map`, and `capability_map_sha256` from
 `preflight.json`; do not re-inspect or hand-edit them. The profile hash is `prompt_sha256`.
+
+Template for `.agents/workflow/model-selection.json` (documentation only; this skill ships no such file):
 
 ```json
 {
@@ -244,72 +170,9 @@ no such file). It shows the final file: Step 1 writes every field except `profil
   "skill_root": "<absolute path>",
   "capability_map": "<absolute path to .agents/workflow/capability-map.md>",
   "capability_map_sha256": "<hash>",
-  "harness": {
-    "name": "<name>",
-    "version": "<version>",
-    "capabilities": {
-      "fresh_launch": true,
-      "fork": false,
-      "working_directory": true,
-      "prompt_injection": true,
-      "model_select": false,
-      "model_enumeration": false,
-      "thinking_select": false,
-      "tool_scope": false,
-      "wait": "<event|poll>",
-      "status": true,
-      "message": true,
-      "parent_message": true,
-      "resume": true,
-      "stop": true,
-      "timeout": false,
-      "structured_output": false
-    }
-  },
+  "harness": "<copied verbatim from preflight.json: name, version, capabilities>",
   "roles": {
     "coordinator": {
-      "model": "<provider/model>",
-      "thinking": "<level>",
-      "effective": {"model": "<value actually used>", "thinking": "<value actually used>"},
-      "degraded": false,
-      "acknowledged": false
-    },
-    "implementer": {
-      "model": "<provider/model>",
-      "thinking": "<level>",
-      "effective": {"model": "<value actually used>", "thinking": "<value actually used>"},
-      "degraded": false,
-      "acknowledged": false
-    },
-    "code-reviewer": {
-      "model": "<provider/model>",
-      "thinking": "<level>",
-      "effective": {"model": "<value actually used>", "thinking": "<value actually used>"},
-      "degraded": false,
-      "acknowledged": false
-    },
-    "test-reviewer": {
-      "model": "<provider/model>",
-      "thinking": "<level>",
-      "effective": {"model": "<value actually used>", "thinking": "<value actually used>"},
-      "degraded": false,
-      "acknowledged": false
-    },
-    "ui-reviewer": {
-      "model": "<provider/model>",
-      "thinking": "<level>",
-      "effective": {"model": "<value actually used>", "thinking": "<value actually used>"},
-      "degraded": false,
-      "acknowledged": false
-    },
-    "oracle": {
-      "model": "<provider/model>",
-      "thinking": "<level>",
-      "effective": {"model": "<value actually used>", "thinking": "<value actually used>"},
-      "degraded": false,
-      "acknowledged": false
-    },
-    "runner": {
       "model": "<provider/model>",
       "thinking": "<level>",
       "effective": {"model": "<value actually used>", "thinking": "<value actually used>"},
@@ -330,37 +193,23 @@ no such file). It shows the final file: Step 1 writes every field except `profil
 }
 ```
 
-The JSON above is a template, not a runtime object stored in this skill. The actual file is created
-only in the consuming repository at `<repo>/.agents/workflow/model-selection.json`. It is repo-level:
-never place it under a lane worktree or `.agents/workflow/<change>/`.
+Repeat the `roles` entry for every role in the role table and the `profiles` entry for every dispatchable role (`implementer`, `code-reviewer`, `test-reviewer`, `ui-reviewer`, `oracle`, `runner`). `profiles` is a Step 1b addition; Step 1 writes the other fields.
 
-`profiles` is a Step 1b addition. Repeat it for every role defined in Step 1b: `implementer`,
-`code-reviewer`, `test-reviewer`, `ui-reviewer`, `oracle`, and `runner`.
+The file is repo-level and must not contain a lane worktree or any other per-dispatch path; the absolute worktree is supplied in each filled brief and recorded in coordination.
 
-Profiles are repo-level. They must not contain a lane worktree or any other per-dispatch path.
-The absolute worktree is supplied in each filled brief and recorded in coordination.
-
-The Coordinator reads this file before every dispatch. It re-asks only when the repository has no
-selection, the human requests a change, the harness or mechanism changed, or a recorded capability or
-model is no longer available. A different selection for one change is an explicit human-approved update
-to this file, never a separate change-level copy.
-
-Verify each selected model and thinking level against the preflight's live findings. A choice that is
-not selectable is recorded with the session default in `effective` and `acknowledged: true`, never
-silently substituted.
+The Coordinator reads this file before every dispatch. It re-asks only when the repository has no selection, the human requests a change, the harness or mechanism changed, or a recorded capability or model is no longer available.
 
 ## Step 1b — define the roles with native tooling
 
 A role needs a launch profile before it can be dispatched. Step 1b adds `profiles` to the repo-level
-`model-selection.json`; Step 1 already wrote the core fields. Do not assume the files are installed.
+`model-selection.json`; Step 1 already wrote the core fields.
 
 1. **Read the canonical role files** in this skill: `assets/*.md`, each with `name`, `role_id`,
    `description`, a requested capability list, and a prompt body.
 2. **Normalize the role file into a profile.** Preserve the prompt body verbatim. Treat the role's tool
    list as requested capabilities and map each to the harness's actual tools; a capability the harness
-   lacks is recorded as a gap, not silently dropped. Add the absolute contract path to the profile.
-   Keep the lane worktree out of it; that is per-dispatch execution metadata, supplied in the brief
-   and recorded in coordination. The role file's `role_id` is authoritative; do not rename the role.
+   lacks is recorded as a gap, not silently dropped. Add the absolute contract path. The role file's
+   `role_id` is authoritative; do not rename the role.
 3. **Instantiate** using the first mechanism from Step 0:
    - native registry or definition API: create or update the named agent from the role file; set model,
      thinking, and tools only where the preflight says they are supported;
@@ -374,8 +223,6 @@ A role needs a launch profile before it can be dispatched. Step 1b adds `profile
 5. **Verify before dispatching**: the child's first report must state its role ID, profile hash
    (`prompt_sha256`), worktree, `HEAD`, and the absolute contract path. A same-named builtin without
    the role prompt is not acceptable. If verification fails, re-dispatch; never accept the work.
-   Every reviewer or Runner reply states its verdict or status, exact SHA, finding IDs, report path,
-   and evidence revision; a machine footer never replaces the report.
 6. **Record the mechanism and profile** in `model-selection.json` as
    `profiles.<role>.mechanism` and the profile fields. A different mechanism on a later run is a new
    preflight, not a silent fallback.
@@ -416,10 +263,7 @@ Use the harness's exposed native tools, not a nested CLI. The adapter must provi
 spawn, follow-up or message, completion wait, and stop or close. Tool names and parameters vary by
 harness; inspect live schemas. This skill authorizes scoped lane delegation.
 
-Record the dispatch before spawn; the returned agent or session id becomes the worker run id. Every
-brief names the OpenSpec change, lane (or `Scope: finish`), task or review round, absolute worktree,
-base, HEAD, profile id or hash, the absolute contract path (`references/briefs-and-handoffs.md`), and an
-explicit deadline. Pass the role brief path, the filled task brief, and the profile.
+Record the dispatch before spawn; the returned agent or session id becomes the worker run id. Every brief follows the contract's field list and names the absolute contract path. Pass the role brief path, the filled task brief, and the profile.
 
 Require implementation edits, tests, task edits, and commits in the lane worktree. Reports and evidence
 go to the absolute `.agents/workflow/` paths named in the brief; those paths are the only writes outside
