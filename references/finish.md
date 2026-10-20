@@ -73,7 +73,7 @@ its own profile; the worktree is execution metadata in the brief and coordinatio
    Ask the human for explicit approval to open the PR as a separate decision. Record that
    consent in `pr-follow-up.md` — the decision, timestamp, exact integrated HEAD, and included
    changes — before opening the PR. PR-opening consent is separate from release classification
-   and from the later PR-merge consent; consent at an earlier HEAD does not cover a changed HEAD.
+   and from the later PR-merge consent. It is given once. Later pushes, including the archival commit and fix pushes, need no new consent.
    Opening the PR starts post-PR follow-up; it does not complete the workflow.
 
 7. **Post-PR follow-up.** Monitor PR-triggered automated checks and bot review comments using the sequence below.

@@ -924,6 +924,8 @@ def plan_dispatch(
             f"plan: dispatch must bind the current feature HEAD {current_head}; change --head"
         )
     report_path = str(Path(str(report)).expanduser().resolve()) if report is not None else None
+    if access == "write" and report is None:
+        raise StateError("plan: Oracle authorship needs --report for the correction report; pass --report")
     ledger, path = _load_plan_ledger(change, checkout)
     access = _dispatch_access(role, access)
     scoped = [row for row in ledger["reviews"]
@@ -1083,10 +1085,10 @@ def plan_approve(approver: str = "human") -> Path:
     ledger, _ = _load_plan_ledger(None, root)
     reviews = [
         item for item in ledger.get("reviews", [])
-        if isinstance(item, dict) and item.get("scope") == "graph" and item.get("verdict") == "PASS"
+        if isinstance(item, dict) and item.get("scope") == "graph"
     ]
     latest = reviews[-1] if reviews else None
-    if not latest or latest.get("plan_sha256") != plan_sha256:
+    if not latest or latest.get("verdict") != "PASS" or latest.get("plan_sha256") != plan_sha256:
         raise StateError(
             "plan: a current repo graph PASS is required before recording approval; "
             "run plan-review --scope graph first"
@@ -1426,8 +1428,8 @@ def _lane_ref_progress(
         text, relative = _committed_tasks(repository, head, change)
         _check_task_ids_text(plan, text, f"{relative} at lane ref")
         return set(_checked_task_ids_from_text(text)), head
-    except (OSError, PlanError, StateError, ValueError):
-        return set(), None
+    except (OSError, PlanError, StateError, ValueError) as exc:
+        raise StateError(f"state: lane ref {ref} tasks cannot be read: {_one_line(exc)}; reconcile the lane ref") from exc
 
 
 def _require_coordinator_cwd(state: dict[str, Any], command: str) -> None:
@@ -1474,9 +1476,9 @@ def coordination_sync(change: str | None = None, checkout: Path | None = None) -
         tasks: dict[str, Any] = {}
         for task_id in assigned:
             prior = previous.get(task_id) if isinstance(previous.get(task_id), dict) else {}
-            if task_id in done:
+            if task_id in done or prior.get("status") == "done":
                 tasks[task_id] = {"status": "done",
-                                  "commit": state["source_sha"] if task_id in merged_done else head,
+                                  "commit": state["source_sha"] if task_id in merged_done else (head or prior.get("commit")),
                                   "updated_at": prior.get("updated_at")}
                 continue
             if prior.get("status") == "blocked":
@@ -2039,10 +2041,21 @@ def _dispatch_intent(
     return dispatch_key
 
 
+def _refuse_missing_coordination(state: dict[str, Any]) -> None:
+    """Refuse to rebuild a missing coordination record once lane branches exist."""
+    repository = Path(state["feature_checkout"]).resolve()
+    if any(_ref_sha(repository, _lane_ref(state, lane_id)) for lane_id in state.get("lanes", {})):
+        raise StateError(
+            "state: coordination record is missing but lane branches exist; restore coordination.json before continuing"
+        )
+
+
 def _coordination_lane_for(
     state: dict[str, Any], plan: dict[str, Any], lane_id: str
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     coordination = _load_coordination(state, plan)
+    if coordination.get("_available") is False:
+        _refuse_missing_coordination(state)
     lanes = coordination.setdefault("lanes", {})
     if not isinstance(lanes, dict):
         raise StateError("state: coordination lanes are malformed; repair or remove the coordination data")
@@ -2110,7 +2123,12 @@ def dispatch_run(
     path, state, plan = _state_context(change)
     if worktree is not None:
         raise StateError("dispatch: --worktree is only supported with --scope finish")
+    _require_coordinator_cwd(state, "dispatch")
     coordination, runtime = _coordination_lane_for(state, plan, lane_id)
+    if _dispatch_access(role, access) == "write" and role == "oracle" and not _mediation_covers(runtime, role):
+        raise StateError(
+            "dispatch: an Oracle write in a lane needs a recorded lane-mediate; the Coordinator authorizes it after mediation"
+        )
     merged_view = dict(state["lanes"][lane_id])
     merged_view.update(runtime)
     worktree, recorded_ref = _lane_runtime_for_operation(state, lane_id, merged_view)
@@ -2204,6 +2222,7 @@ def dispatch_done(
         _write_finish_record(repository, record)
         return finish_record_path(repository)
     path, state, plan = _state_context(change)
+    _require_coordinator_cwd(state, "dispatch-done")
     coordination, runtime = _coordination_lane_for(state, plan, lane_id)
     merged_view = dict(state["lanes"][lane_id])
     merged_view.update(runtime)
@@ -3091,6 +3110,8 @@ def _record_authorization_approval(
             f"lane: authorization {grant_id!r} scope must be a non-empty list of checkpoint names; fix the grant"
         )
     scope = [item.strip() for item in scope]
+    if "all" in scope:
+        raise StateError(f"lane: authorization {grant_id!r} scope 'all' is not allowed; list lane IDs")
     if grant.get("granted_by") != "human":
         raise StateError(
             f"lane: authorization {grant_id!r} is not human-origin; only the human grants an authorization"
@@ -3108,7 +3129,7 @@ def _record_authorization_approval(
             f"lane: authorization {grant_id!r} was granted for another plan revision; renew it for the "
             "approved plan before it can satisfy this checkpoint"
         )
-    if "all" not in scope and lane_id not in scope:
+    if lane_id not in scope:
         raise StateError(
             f"lane: authorization {grant_id!r} does not cover lane {lane_id!r}; obtain a grant that names "
             "this checkpoint or all checkpoints of the approved plan"
@@ -3210,7 +3231,9 @@ def _validate_authorization_approval(
     scope = grant.get("scope")
     if not isinstance(scope, list) or any(not isinstance(item, str) for item in scope):
         raise StateError(f"lane: authorization {grant_id!r} scope is malformed; fix the grant")
-    if "all" not in scope and lane_id not in scope:
+    if "all" in scope:
+        raise StateError(f"lane: authorization {grant_id!r} scope 'all' is not allowed; list lane IDs")
+    if lane_id not in scope:
         raise StateError(
             f"lane: authorization {grant_id!r} does not cover lane {lane_id!r}; obtain fresh consent for "
             "this checkpoint"
@@ -3668,6 +3691,11 @@ def lane_open(lane_id: str, change: str | None = None) -> Path:
     existing_ref = _ref_sha(repository, expected_ref)
     if phase in {"writing", "reviewing", "revising"} and registered_branch == expected_ref and existing_ref:
         return path
+    approval = _plan_approval_status(state)
+    if approval.get("state") != "current":
+        raise StateError(
+            f"lane: plan approval is {approval.get('state')}; record a current plan-approve before opening lanes"
+        )
     if not _lane_ready_for_open(state, plan, lane_id):
         raise StateError(
             f"lane: lane {lane_id!r} is not ready; {_readiness_reasons(state, plan).get(lane_id, 'merge prerequisites first')}"
@@ -3714,11 +3742,13 @@ def lane_close(lane_id: str, change: str | None = None) -> Path:
     lane = _state_lane(state, lane_id)
     coordination, runtime = _coordination_lane_for(state, plan, lane_id)
     phase = runtime.get("phase", "created")
-    if not lane.get("complete") and phase not in {"merged", "closed"}:
-        raise StateError(f"lane: lane {lane_id!r} is not complete; merge it before closing")
     repository = Path(state["feature_checkout"]).resolve()
     expected_path = _lane_worktree_path(state, lane_id).resolve()
     expected_ref = _lane_ref(state, lane_id)
+    if phase not in {"merged", "closed"}:
+        lane_sha = _ref_sha(repository, expected_ref)
+        if not lane_sha or not _is_ancestor(repository, lane_sha, _git_output(repository, "rev-parse", "HEAD")):
+            raise StateError(f"lane: lane {lane_id!r} is not in the feature branch; merge it before closing")
     recorded_path = runtime.get("worktree")
     recorded_ref = runtime.get("ref")
     if recorded_ref and recorded_ref != expected_ref:
@@ -3744,7 +3774,7 @@ def lane_close(lane_id: str, change: str | None = None) -> Path:
     elif recorded_path.exists():
         raise StateError(f"lane: worktree path exists but is not registered; move it before closing")
     if _ref_sha(repository, recorded_ref):
-        result = _run_git(repository, "branch", "-D", recorded_ref)
+        result = _run_git(repository, "branch", "-d", recorded_ref)
         if result.returncode:
             raise StateError(f"lane: cannot remove ref {recorded_ref}: {_one_line(result.stderr)}; retry after repair")
     runtime["phase"] = "closed"
@@ -4518,6 +4548,8 @@ def finish_record(action: str, classification: str | None = None, version: str |
             )
             if isinstance(value, str) and value.strip()
         ]
+        if not declared_checks and not record.get("declared_checks"):
+            raise StateError("finish: declare every selected release check with --check at classify or restage")
         if declared_checks:
             record["declared_checks"] = sorted(set(declared_checks))
             existing = record.get("required_checks")
@@ -4757,7 +4789,7 @@ def _self_check() -> int:
         # inspect or mutate a caller-selected repository, index, or configuration.
         for key in list(os.environ):
             if key.startswith("GIT_CONFIG") or key in {
-                "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                "FEATDEV_LANE_WORKTREE_ROOT", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
                 "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES",
                 "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_NAMESPACE",
             }:
@@ -4784,17 +4816,43 @@ def _self_check() -> int:
             subprocess.run(["git", "-C", str(repository), "commit", "-q", "-m", message], check=True)
             return git(repository, "rev-parse", "HEAD")
 
-        def make_repository(name: str, change: str, plan: dict[str, Any], tasks: str) -> Path:
+        def approve_plan(repository: Path, change: str) -> None:
+            """Record plan approval through the helper's own digests, ledgers, and plan-approve."""
+            previous = Path.cwd()
+            os.chdir(repository)
+            try:
+                if not (repository / _REPO_PLAN).exists():
+                    migrate_repository(repository)
+                _, _, _, change_digest, _ = _plan_context(change, None, "change")
+                ledger, _ = _load_plan_ledger(change, repository)
+                ledger.setdefault("reviews", []).append(
+                    {"scope": "change", "role": "oracle", "verdict": "PASS", "artifacts_sha256": change_digest}
+                )
+                _write_plan_ledger(change, repository, ledger)
+                _, _, _, graph_digest, _ = _plan_context(None, None, "graph")
+                graph_ledger, _ = _load_plan_ledger(None, repository)
+                graph_ledger.setdefault("reviews", []).append(
+                    {"scope": "graph", "role": "oracle", "verdict": "PASS", "plan_sha256": graph_digest}
+                )
+                _write_plan_ledger(None, repository, graph_ledger)
+                plan_approve()
+            finally:
+                os.chdir(previous)
+
+        def make_repository(name: str, change: str, plan: dict[str, Any], tasks: str,
+                            approve: bool = True) -> Path:
             repository = root / name
             plan_dir = repository / "openspec" / "changes" / change / "plan"
             plan_dir.mkdir(parents=True)
-            repository.joinpath(".gitignore").write_text(".agents/tmp/\\n", encoding="utf-8")
+            repository.joinpath(".gitignore").write_text(".agents/tmp/\n", encoding="utf-8")
             plan_dir.joinpath("graph-plan.json").write_text(json.dumps(plan), encoding="utf-8")
             plan_dir.parent.joinpath("tasks.md").write_text(tasks, encoding="utf-8")
             subprocess.run(["git", "init", "-q", "-b", "main", str(repository)], check=True)
             git(repository, "config", "user.email", "self-check@example.com")
             git(repository, "config", "user.name", "Self Check")
-            commit(repository, "planning checkpoint approved by human")
+            commit(repository, "add planning artifacts")
+            if approve:
+                approve_plan(repository, change)
             return repository
 
         def read_fixture(value: Any) -> dict[str, Any]:
@@ -4985,6 +5043,10 @@ def _self_check() -> int:
         closed_view = json.loads(status("finishcase", True))["lanes"]["one"]
         assert closed_view["complete"] and closed_view["phase"] == "closed"
         assert closed_view["coordinator_status"] == "done"
+        expect_refusal("--change", "finishcase", "finish-record", "classify", "--classification",
+                       "patch-release", "--artifact", str(preparation),
+                       "--input", "release.txt", "--input", "generated.txt",
+                       contains="declare every selected release check")
         assert invoke(*classify_args)[0] == 0
         expect_refusal("--change", "finishcase", "finish-record", "capture", "--check", "b",
                        "--artifact", str(artifact), "--input", "input-b", contains="not declared")
@@ -5079,7 +5141,8 @@ def _self_check() -> int:
                 "lane": "ui", "state": prior_state,
                 "binding": {"commit": ui_head, "evidence_revision": "r1",
                             "evidence_path": str(screen_evidence),
-                            "evidence_sha256": _path_sha256(screen_evidence)},
+                            "evidence_sha256": _path_sha256(screen_evidence),
+                            "lane_plan_sha256": ui_state["lanes"]["ui"].get("lane_plan_sha256")},
             }
             _write_coordination(ui_state, ui_coord, ui_plan)
             expect_refusal("--change", "defercase", "human-defer", "ui", "--commit", ui_head,
@@ -5146,7 +5209,7 @@ def _self_check() -> int:
         preparation.write_text("Human classification: preview. Release preparation validated.\n")
         assert invoke("--change", "defercase", "finish-record", "classify", "--classification", "preview",
                       "--artifact", str(preparation), "--input", "release.txt",
-                      "--inspection", "desktop", "--inspection", "mobile")[0] == 0
+                      "--check", "static:check", "--inspection", "desktop", "--inspection", "mobile")[0] == 0
         assert invoke("--change", "defercase", "finish-record", "capture", "--check", "static:check",
                       "--artifact", str(screen_evidence), "--input", "release.txt")[0] == 0
         expect_refusal("--change", "defercase", "finish-record", "pr-check", contains="inspection missing")
@@ -5287,7 +5350,8 @@ def _self_check() -> int:
             },
         }
         derived_repository = make_repository(
-            "derived-repository", "derived", derived_plan, "- [ ] 1.1 root\n- [ ] 2.1 child\n"
+            "derived-repository", "derived", derived_plan, "- [ ] 1.1 root\n- [ ] 2.1 child\n",
+            approve=False,
         )
         derived_state = state_derive("derived", checkout=derived_repository)
         derived_head = git(derived_repository, "rev-parse", "HEAD")
@@ -5339,12 +5403,40 @@ def _self_check() -> int:
         assert candidate_state["source_sha"] == candidate_head and candidate_head != main_head
         fresh_clone = root / "derived-fresh-clone"
         subprocess.run(["git", "clone", "-q", str(derived_repository), str(fresh_clone)], check=True)
-        # A real clone has no scratch; make that precondition explicit even when a local
-        # Git configuration copies ignored files during a test.
-        import shutil
-        shutil.rmtree(fresh_clone / ".agents", ignore_errors=True)
         assert state_derive("derived", checkout=fresh_clone)["source_sha"] == main_head
         assert not (fresh_clone / ".agents" / "tmp" / "featdev-old-run").exists()
+
+        # Lane opening needs a current plan approval. An Oracle lane write needs a recorded mediation.
+        # A MORE WORK graph verdict after PASS blocks approval. An Oracle write needs --report.
+        gate_repo = make_repository("gatecase", "gatecase", {
+            "schema_version": 1, "change": "gatecase",
+            "lanes": {"one": {"risk": "ordinary", "ui": False,
+                               "sensitive": False, "depends_on": []}},
+            "tasks": {"1.1": {"lane": "one", "deps": []}},
+        }, "- [ ] 1.1 first\n", approve=False)
+        os.chdir(gate_repo)
+        expect_refusal("lane-open", "one", "--change", "gatecase", contains="plan approval is missing")
+        approve_plan(gate_repo, "gatecase")
+        os.chdir(gate_repo)
+        ledger, _ = _load_plan_ledger(None, gate_repo)
+        ledger["reviews"].append({"scope": "graph", "role": "oracle", "verdict": "MORE WORK",
+                                  "plan_sha256": _plan_context(None, None, "graph")[3]})
+        _write_plan_ledger(None, gate_repo, ledger)
+        try:
+            plan_approve()
+        except StateError as exc:
+            assert "current repo graph PASS" in str(exc), str(exc)
+        else:
+            raise AssertionError("a MORE WORK graph verdict after PASS must block plan approval")
+        try:
+            plan_dispatch("oracle", "plan", change="gatecase", access="write")
+        except StateError as exc:
+            assert "needs --report" in str(exc), str(exc)
+        else:
+            raise AssertionError("an Oracle write dispatch without --report must be refused")
+        lane_open("one", "gatecase")
+        expect_refusal("--change", "gatecase", "dispatch", "one", "oracle", "--task", "1.1",
+                       "--access", "write", contains="lane-mediate")
 
         # Readiness is one computation for status, dashboard, and lane-open. A lane may
         # have one task ready while a later task waits on another lane.
@@ -5868,6 +5960,7 @@ def _self_check() -> int:
         assert git(flow_repository, "rev-parse", "HEAD") == before_bad_state_merge
         # Losing active coordination must not fabricate a review or completion. The
         # deterministic ref/worktree is recoverable, but the review gate is closed.
+        saved_coordination = coordination_path.read_bytes()
         coordination_path.unlink()
         unavailable_result, unavailable_status, unavailable_error = invoke("status", "--change", "flow")
         assert unavailable_result == 0, unavailable_error
@@ -5886,7 +5979,8 @@ def _self_check() -> int:
         assert f"source: {current_flow_head}\n" in stale_status, stale_status
         # There is no persisted derived state to go stale: the store is coordination.json only.
         assert not (workflow_dir(flow_repository) / "flow" / "state.json").exists()
-        expect_refusal("lane-merge", "b", "--change", "flow", contains="required review 'code-reviewer'")
+        expect_refusal("lane-merge", "b", "--change", "flow", contains="coordination record is missing")
+        coordination_path.write_bytes(saved_coordination)
         lane_review("b", "code-reviewer", "PASS", b_head, replacement_report, "flow-r1", change="flow")
         # An unfinished dispatch on a terminal lane is stale before any worktree-head
         # lookup. The lookup trap catches a refactor that gets the label right while
@@ -6098,17 +6192,9 @@ def _self_check() -> int:
         contract_report = root / "contract-review.md"
         contract_report.write_text("code review\n", encoding="utf-8")
         lane_review("only", "code-reviewer", "PASS", contract_head, contract_report, "contract-r1", change="contract")
-        # A lane-authored plan change is refused even while its ticks stay valid, and the
-        # review is re-bound to the tampered HEAD so the plan guard is what refuses the merge.
-        forged_plan = json.loads(contract_plan_path.read_text(encoding="utf-8"))
-        forged_plan["lanes"]["only"]["sensitive"] = True
-        contract_plan_path.write_text(json.dumps(forged_plan), encoding="utf-8")
-        subprocess.run(["git", "-C", str(contract_worktree), "add", "."], check=True)
-        subprocess.run(["git", "-C", str(contract_worktree), "commit", "-q", "-m", "forge plan"], check=True)
-        forged_head = git(contract_worktree, "rev-parse", "HEAD")
-        lane_review("only", "code-reviewer", "PASS", forged_head, contract_report, "contract-r2", change="contract")
-        expect_refusal("lane-merge", "only", "--change", "contract", contains="approved plan")
-        subprocess.run(["git", "-C", str(contract_worktree), "reset", "--hard", contract_head], check=True)
+        # The approved plan is the repo graph. It lives in the ignored workflow tree, so no lane
+        # worktree holds a copy that a lane could rewrite.
+        assert not (contract_worktree / _REPO_PLAN).exists(), "the repo graph must not appear in a lane worktree"
         # Rewording a task definition, keeping its identifier and its tick, is refused too. The
         # guard is exercised directly here so this case stays inside the two-round review bound the
         # lane-merge path enforces.
@@ -6156,8 +6242,6 @@ def _self_check() -> int:
         amendment_repository = make_repository(
             "amendment-repository", "amendment", amendment_plan, historical_tasks
         )
-        amendment_repository.joinpath(".gitignore").write_text(".agents/tmp/\n", encoding="utf-8")
-        commit(amendment_repository, "ignore fixture scratch state")
         os.chdir(amendment_repository)
         amendment_base = git(amendment_repository, "rev-parse", "HEAD")
         lane_open("only", "amendment")
@@ -6187,18 +6271,13 @@ def _self_check() -> int:
             amendment_repository, "amendment", amendment_plan, "only", amendment_base,
             amendment_head, approved_head,
         ) == ({"2.1"}, {"1.1"}, True)
-        changed_graph = json.loads(candidate_plan_path.read_text(encoding="utf-8"))
-        changed_graph["lanes"]["only"]["sensitive"] = True
-        for invalid_tasks, invalid_graph, refusal in (
-            (candidate_tasks.replace("approved amended work", "candidate-only work"), False, "task definitions"),
-            (historical_tasks.replace("- [ ] 2.1", "- [x] 2.1"), False, "task definitions"),
-            (candidate_tasks.replace("- [ ] 3.1", "- [x] 3.1"), False, "added ticks"),
-            (candidate_tasks.replace("- [x] 1.1", "- [ ] 1.1"), False, "removed checked tasks"),
-            (candidate_tasks, True, "approved plan"),
+        for invalid_tasks, refusal in (
+            (candidate_tasks.replace("approved amended work", "candidate-only work"), "task definitions"),
+            (historical_tasks.replace("- [ ] 2.1", "- [x] 2.1"), "task definitions"),
+            (candidate_tasks.replace("- [ ] 3.1", "- [x] 3.1"), "added ticks"),
+            (candidate_tasks.replace("- [x] 1.1", "- [ ] 1.1"), "removed checked tasks"),
         ):
             candidate_tasks_path.write_text(invalid_tasks, encoding="utf-8")
-            if invalid_graph:
-                candidate_plan_path.write_text(json.dumps(changed_graph), encoding="utf-8")
             invalid_head = commit(amendment_worktree, "invalid amendment candidate (fixture)")
             try:
                 _candidate_tick_state(
@@ -6212,24 +6291,6 @@ def _self_check() -> int:
             else:
                 raise AssertionError(f"amendment candidate must refuse {refusal}")
             git(amendment_worktree, "reset", "--hard", amendment_head)
-        # The approved feature graph must also equal the historical graph, even if the candidate agrees.
-        amendment_repository.joinpath(amendment_plan_relative).write_text(
-            json.dumps(changed_graph), encoding="utf-8"
-        )
-        changed_feature_head = commit(amendment_repository, "invalid feature graph (fixture)")
-        candidate_plan_path.write_text(json.dumps(changed_graph), encoding="utf-8")
-        changed_candidate_head = commit(amendment_worktree, "matching invalid graph (fixture)")
-        for graph_candidate_head in (amendment_head, changed_candidate_head):
-            try:
-                _candidate_tick_state(
-                    amendment_repository, "amendment", amendment_plan, "only", amendment_base,
-                    graph_candidate_head, changed_feature_head,
-                )
-            except StateError as exc:
-                assert "approved plan" in str(exc), str(exc)
-            else:
-                raise AssertionError("a graph change at approved HEAD must be refused")
-        git(amendment_repository, "reset", "--hard", approved_head)
         git(amendment_worktree, "reset", "--hard", amendment_head)
         state_derive("amendment", checkout=amendment_repository)
         amendment_report = root / "amendment-review.md"
@@ -6437,14 +6498,10 @@ def _self_check() -> int:
         grant_report = root / "grant-code-review.md"
         grant_report.write_text("code review\n", encoding="utf-8")
         lane_review("alpha", "code-reviewer", "PASS", grant_head, grant_report, "grant-r1", change="grant")
-        # The lane opened from the current feature HEAD, and the plan cannot drift (guarded above),
-        # so the approved plan revision the grant must name is the committed plan at that HEAD.
-        grant_plan_sha = hashlib.sha256(
-            _committed_file(
-                grant_repository, git(grant_repository, "rev-parse", "HEAD"),
-                "openspec/changes/grant/plan/graph-plan.json",
-            ).encode("utf-8")
-        ).hexdigest()
+        # The approved plan revision the grant must name is the plan digest at the feature HEAD.
+        grant_plan_sha = _change_plan_at(
+            grant_repository, git(grant_repository, "rev-parse", "HEAD"), "grant"
+        )[1]
         grant_record = {
             "id": "grant-a1",
             "granted_by": "human",
@@ -6462,6 +6519,7 @@ def _self_check() -> int:
         for case_name, grant_mutation, expected in (
             ("wrong-plan", {"plan_sha256": "0" * 64}, "another plan revision"),
             ("out-of-scope", {"scope": ["beta"]}, "does not cover lane"),
+            ("all-scope", {"scope": ["all"]}, "is not allowed"),
             ("not-human-origin", {"granted_by": "oracle"}, "not human-origin"),
             ("no-id", {"id": ""}, "id must be non-empty"),
         ):
@@ -6900,7 +6958,7 @@ def _parser() -> argparse.ArgumentParser:
         "human-gate",
         help="record a temporary human gate (interactive, or an Oracle stand-in under a grant)",
         epilog=(
-            "A grant is JSON with: id, granted_by ('human'), granted_at, scope (['all'] or lane ids)\n"
+            "A grant is JSON with: id, granted_by ('human'), granted_at, scope (lane ids)\n"
             "and plan_sha256 (the approved plan digest). With --approved-by oracle the per-workstream\n"
             "checkpoint is satisfied by that grant plus a PASS Oracle stand-in whose report covers\n"
             "--checklist; the grant is then consumed. Merging into the target branch is never\n"

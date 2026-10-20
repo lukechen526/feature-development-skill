@@ -96,7 +96,7 @@ Never reuse candidate evidence as final release evidence. Planning report files 
 include the cycle and round so a later cycle cannot overwrite them.
 
 `plan-approve` records approval at `.agents/workflow/plan-approval.json`; `status` reports whether it is
-current, stale, or missing. `lane-open` and `lane-merge` do not enforce it. The Coordinator verifies a
+current, stale, or missing. `lane-open` refuses unless it is current. `lane-merge` does not enforce it. The Coordinator verifies a
 current approval for the approved plan before opening a lane and before merging one.
 
 `FEATDEV_LANE_WORKTREE_ROOT` must be an absolute path. A relative value resolves against the
@@ -117,7 +117,7 @@ The helper records and validates bindings, but the Coordinator must verify the f
 binding is not evidence that the check was done.
 
 - Plan approval: verify a current `.agents/workflow/plan-approval.json` before opening a lane and before
-  merge. `lane-open` and `lane-merge` do not reject a stale or missing record.
+  merge. `lane-open` rejects a stale or missing record. `lane-merge` does not.
 - Review rounds: `lane-review` refuses a round after the second unless `lane-mediate` covers it; there
   is no cap after mediation. Require exactly one further Oracle-authored pass, then a human decision on
   any remaining work.
@@ -329,6 +329,6 @@ the artifact form uses `--scope change --change <change>` with the same fields.
 Record the intent before launching the Oracle, and record the verdict only after reading the actual report.
 Implementation review: supply the selected change/lane contract digest alongside commit and evidence bindings.
 Consultation never authorizes edits or resets rounds.
-Explicitly authorized Oracle fix: implementation template; record `dispatch --access write`.
+Write-access Oracle fix after a recorded mediation: implementation template; record `dispatch --access write`.
 For a standard Oracle-authored fix or an Oracle stand-in, verify independence and record the actual
 reviewer/stand-in ID in the report or brief; no helper flag records it.

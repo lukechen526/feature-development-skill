@@ -196,7 +196,7 @@ The helper records the decision; it never grants human approval or commits these
 
 `status` reports the plan-approval state as current, stale, or missing (JSON: `plan_approval.state`).
 Before opening any lane and before every lane merge, the Coordinator must run `status` and confirm `plan_approval.state` is `current`.
-`lane-open` and `lane-merge` do not check the approval record; this is a mandatory Coordinator verification of the human's approval, not helper enforcement.
+`lane-open` refuses unless the approval record is current. `lane-merge` does not check it; the Coordinator verifies it before every merge.
 
 Plan amendments require affected artifact review, then repo graph review, then human approval recorded with `plan-approve` before renewed implementation.
 Lane review and human-gate bindings include the lane contract digest; material lane edits require fresh verdicts.

@@ -32,7 +32,7 @@ The fixture's final human output inspection is a release rule, not an automatic 
 The human separately decides whether to open the PR and later whether to merge it.
 
 The helper records events and checks bindings.
-It does not enforce plan approval at `lane-open` or `lane-merge`, perform reviews, or grant consent.
+It refuses `lane-open` without current plan approval, but does not enforce approval at `lane-merge`. It does not perform reviews or grant consent.
 The Coordinator verifies every human gate and every record this walkthrough says to check.
 
 ## Before running commands
@@ -106,7 +106,20 @@ The proposal, design, and delta specs already exist from the consuming repositor
 The Coordinator writes the task checklist. No graph is required for this review.
 
 ```bash
-printf '%s\n' '- [ ] 1.1 Implement message.greeting() returning hello.' > "$TASKS"
+python3 - "$TASKS" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+task = "- [ ] 1.1 Implement message.greeting() returning hello.\n"
+lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+hits = [i for i, line in enumerate(lines) if line.startswith("- [ ] 1.1 ")]
+if len(hits) > 1:
+    sys.exit("tasks.md has more than one open task 1.1")
+if hits:
+    lines[hits[0]] = task
+else:
+    lines.append(task)
+path.write_text("".join(lines), encoding="utf-8")
+PY
 PLAN_HEAD="$(git rev-parse HEAD)"
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" plan-dispatch \
   --scope change --role oracle --task plan \
@@ -253,7 +266,7 @@ The record is local and gitignored; never commit it.
 It refuses uncommitted artifact changes, a missing or stale artifact `PASS`, or a missing or stale graph `PASS`.
 `status` reports the record as `current`, `stale`, or `missing`.
 
-`lane-open` and `lane-merge` do not enforce plan approval.
+`lane-open` refuses unless plan approval is current. `lane-merge` does not enforce it.
 Before opening this lane and again before merging it, the Coordinator must run `status` and confirm
 `plan_approval.state` is `current` for the approved plan.
 

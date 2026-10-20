@@ -12,7 +12,7 @@ Resolve and export `FEATDEV_SKILL_ROOT` to the absolute installed skill path bef
 - Each change's `plan-reviews.json` records Oracle review of its OpenSpec artifacts.
 - Repo-level `plan-graph-review.json` records the separate graph review, after all included artifact passes.
 - `.agents/workflow/model-selection.json` and its model/thinking/role profiles are repo-level only. No lane worktree or per-dispatch path is stored in a profile; the worktree is execution metadata in the brief and coordination.
-- `.agents/workflow/plan-approval.json` records the human plan approval. Status reports it as `current`, `stale`, or `missing`; the helper does not enforce it at lane-open or lane-merge. The Coordinator verifies current approval for the approved plan before opening a lane and before merge.
+- `.agents/workflow/plan-approval.json` records the human plan approval. Status reports it as `current`, `stale`, or `missing`; lane-open refuses unless it is current; lane-merge does not enforce it. The Coordinator verifies current approval before merge.
 - Briefs, reports, and evidence use the locations in [briefs-and-handoffs.md](briefs-and-handoffs.md#set-locations-no-ad-hoc-paths).
 
 One Coordinator writes the shared coordination file across all changes. The Coordinator authors the local graph.
@@ -37,7 +37,7 @@ Status and dashboards are derived per-change views, not approval records. Chat h
 ## Worktrees and readiness
 
 Open the lane with [lane-open](helper-commands.md#lane-open) before its first implementation dispatch.
-Before opening, the Coordinator verifies `.agents/workflow/plan-approval.json` is current for the approved plan; lane-open itself does not check it.
+`lane-open` refuses unless `.agents/workflow/plan-approval.json` is current for the approved plan.
 The default worktree is `~/.agents/worktrees/<repo>/<branch>/<change>/<lane>/`, with ref `featdev/<change>-<lane>`.
 `<repo>` is the URL-escaped resolved full feature-checkout path, not its folder name.
 For example, `/clients/alice/app` becomes `%2Fclients%2Falice%2Fapp`, including the escaped leading separator.
@@ -108,7 +108,7 @@ This is a procedural check, not an approval or a generated review package.
 
 Use the [review brief](briefs-and-handoffs.md#review). Reviewers read approved sources, the lane diff, and relevant dependencies directly.
 Every assigned acceptance criterion and completed task needs review coverage.
-Reviewers stay read-only. They report findings to the Coordinator; the Implementer or explicitly authorized Oracle makes corrections.
+Reviewers stay read-only. They report findings to the Coordinator; the Implementer or a write-access Oracle, dispatched after mediation, makes corrections.
 The UI reviewer ingests supplied screenshots, manifests, and metadata. It never builds, launches, or captures the application.
 
 Oracle-authored fixes and Oracle stand-ins have no provenance flag: the Coordinator verifies the Oracle is independent of the authored work and records the reviewer or stand-in worker ID in the review report or brief.
@@ -179,7 +179,7 @@ Review rounds persist across commits; a new commit does not reset the count.
 2. Send the deduplicated correction batch to the Implementer.
 3. Obtain fresh current-HEAD verdicts from all required roles after correction.
 4. Record Oracle mediation if the second review still requests work.
-5. Dispatch an explicitly authorized Oracle to author the bounded fix.
+5. The Coordinator dispatches a write-access Oracle to author the bounded fix, after the recorded mediation. The helper refuses that write dispatch without the mediation record.
 6. Obtain an independent current-HEAD review from a different reviewer.
 7. Complete the required human checkpoint before integration.
 
@@ -227,13 +227,13 @@ The override affects lane integration only. It is not final release approval and
 The human may grant an independent Oracle authority to judge a specific lane human checkpoint.
 This delegates the acceptance judgment; it does not waive that judgment or any required technical review.
 
-The grant must be human-origin, recorded, scoped to the checkpoint, and bound to the approved selected-change plan.
+The grant must be human-origin, recorded, scoped to the listed lane IDs at the checkpoint, and bound to the approved selected-change plan.
 A current Oracle stand-in must inspect the supplied acceptance checklist and evidence, then return an actual `PASS`.
 Technical correctness alone is insufficient. A failed stand-in leaves the gate closed and the grant unconsumed.
 The Coordinator verifies the stand-in is independent of the implementation and affected reviews, and records the stand-in worker ID in the stand-in report or brief; the helper has no stand-in independence flag.
 Record this with the [Oracle stand-in form of human-gate](helper-commands.md#oracle-stand-in).
 
-Each grant is consumed once for one lane checkpoint. It cannot authorize another lane or the PR merge.
+Each grant is consumed once for one lane checkpoint. It cannot authorize another lane or the PR merge. A grant lists lane IDs; `all` is refused.
 Rejection, revocation, changed inputs, or a stale binding requires fresh human acceptance or a renewed grant.
 A grant never removes independent code/test/UI reviews or creates an otherwise unrequired Oracle release review.
 Final hands-on release inspections remain human-only, as specified in [finish](finish.md).
@@ -265,5 +265,5 @@ Close only after integration is recorded. `lane-close` also accepts a lane whose
 
 After every change included in the PR has integrated, follow [finish](finish.md).
 Version/generated changes, release evidence, final inspections, and PR follow-up belong there.
-PR-opening consent is recorded in `.agents/workflow/finish/pr-follow-up.md` with the human, timestamp, HEAD, and included changes; it is separate from release classification and lane merge consent. `pr-check` does not validate this consent; the Coordinator verifies it.
+PR-opening consent is recorded in `.agents/workflow/finish/pr-follow-up.md` with the human, timestamp, HEAD, and included changes; it is separate from release classification and lane merge consent. It is given once; later pushes need no new consent. `pr-check` does not validate this consent; the Coordinator verifies it.
 Approval to open a PR never authorizes the later human PR merge.

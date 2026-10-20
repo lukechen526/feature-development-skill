@@ -78,7 +78,7 @@ The helper has no provenance or independence flag; the Coordinator's recorded id
   independent current-HEAD review and a human decision on any remaining work. Never silently extend the loop.
 - `technical_resolution`: after two failed rounds, diagnose root cause/smallest fix.
   Early consultation stays read-only; one uncertainty, no round reset or edit authority.
-  Authorized lane edits: approved files only; Coordinator records `dispatch --access write` before lane edits.
+  Lane edits after mediation: approved files only; the Coordinator records `dispatch --access write` before lane edits.
   Record authoring SHA; a different independent reviewer must pass—for Oracle review, a different Oracle.
   One further authored pass allowed. Advice dispatches remain `read-only`.
 - Oracle stand-in for a lane human checkpoint: only under a recorded, human-origin grant scoped to one checkpoint and

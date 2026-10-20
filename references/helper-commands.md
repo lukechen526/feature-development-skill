@@ -174,7 +174,7 @@ artifact digests in `.agents/workflow/plan-approval.json`.
 It refuses uncommitted `openspec/changes` content, a missing/stale graph `PASS`, or a missing/stale artifact `PASS`.
 It records the human decision; it never grants approval. `status` shows whether the record is current, stale, or missing.
 
-Plan approval is a Coordinator check: `lane-open` and `lane-merge` do not enforce it.
+`lane-open` refuses unless plan approval is current. `lane-merge` does not enforce it; the Coordinator checks it before merge.
 Before opening a lane and before every merge, run `status` and confirm the record is current for the approved plan.
 
 ## Plan validation and rendering
@@ -197,7 +197,7 @@ The default covers all graph entries. Pass `--change <change>` before the subcom
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> lane-open <lane-id>
 ```
 
-Before opening, the Coordinator verifies `.agents/workflow/plan-approval.json` is current for the approved plan; `lane-open` does not enforce it.
+`lane-open` refuses unless `.agents/workflow/plan-approval.json` is current for the approved plan.
 Set `FEATDEV_LANE_WORKTREE_ROOT` to an absolute path when overriding the default worktree root.
 A relative value resolves against the current working directory and can silently place new lanes
 elsewhere, so leave the variable unset or set an absolute path.
@@ -309,7 +309,7 @@ This template defines the format; it does not grant authority. Replace every pla
 ```
 
 - `id`: a non-empty identifier unique to this human grant.
-- `scope`: a non-empty list of authorized lane IDs in the selected change. Use `["all"]` only if the human explicitly grants that scope.
+- `scope`: a non-empty list of authorized lane IDs in the selected change. `all` is not allowed.
 - `granted_by`: the literal `human`; an agent cannot originate the authorization.
 - `granted_at`: the actual authorization timestamp; use an ISO-8601 timestamp.
 - `plan_sha256`: copy the top-level `plan_sha256` from this command after the plan is approved:
@@ -320,7 +320,7 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> status --json
 
 Do not use `plan_approval.plan_sha256` or a lane's `lane_plan_sha256`; they bind different inputs.
 The selected-change plan must match the plan at lane opening. Reconcile a changed plan before obtaining a renewed grant.
-A grant is consumed once for one lane checkpoint, even when its scope contains `all`.
+A grant is consumed once for one lane checkpoint.
 Use separate files for the grant, the human acceptance checklist, and the independent Oracle's actual stand-in report.
 The Coordinator records the independent stand-in's worker ID in the grant, the checklist, or the
 stand-in report. The helper has no stand-in provenance flag and does not verify independence.
