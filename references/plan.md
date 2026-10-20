@@ -69,7 +69,6 @@ Each change contains one or more lanes. Each lane contains one or more tasks.
   "schema_version": 3,
   "changes": {
     "example-change": {
-      "review_mode": "standard",
       "lanes": {
         "store": {
           "risk": "high",
@@ -100,7 +99,6 @@ Each change contains one or more lanes. Each lane contains one or more tasks.
 |---|---|---|
 | `schema_version` | yes | `3` |
 | `changes` | yes | non-empty object keyed by OpenSpec change directory name |
-| `changes.<change>.review_mode` | no | default `standard`; eligible `combined-single-lane` |
 | `changes.<change>.lanes` | yes | non-empty lane-id object |
 | `lanes.<lane>.risk` | yes | `ordinary` or `high` |
 | `lanes.<lane>.ui` | yes | boolean; user-facing appearance/interaction, including rendered evidence and human review |
@@ -121,15 +119,11 @@ Declared flags drive gates:
 - `ui: true` requires `ui-reviewer` inspection of supplied rendered evidence, a human checkpoint, and current evidence for both.
 - `sensitive: true` requires a human checkpoint, subject to the documented deferral rules.
 
-`combined-single-lane` requires exactly one ordinary-risk lane within the selected change.
-It retains independent Oracle implementation review, the UI review and human gate, and exact candidate/evidence bindings.
-It does not replace either planning review stage or the final release gates.
-
 ### Structural validation
 
 See the [helper command reference](helper-commands.md#plan-validation-and-rendering).
 
-The default validates or renders all changes. Global `--change <change>` selects one entry.
+The default validates or renders all changes. `--change <change>` is accepted before the subcommand and selects one entry.
 Use `--change` with `--tasks` when the graph has multiple changes.
 Validation checks nested shape, task-ID bijection, references, and dependency cycles.
 Lane cycle checks include edges implied by cross-lane task dependencies; otherwise an acyclic task graph can deadlock integration.
@@ -157,7 +151,12 @@ Changing either input invalidates the graph review. Changed artifact contracts r
 
 Each change's artifact review and the repo graph review have separate two-round correction cycles.
 Later planning work after a `PASS` starts a new cycle. Preserve every prior review in the ledger.
-Use unique report paths across cycles; include a cycle or dispatch identifier instead of reusing a round-only filename.
+Each Oracle planning dispatch has a canonical brief and report pair: artifact review at
+`.agents/workflow/<change>/briefs/artifacts-oracle-c<cycle>-r<round>.md` and
+`.agents/workflow/<change>/reviews/artifacts-oracle-c<cycle>-r<round>.md`; repo graph review at
+`.agents/workflow/briefs/plan-graph-oracle-c<cycle>-r<round>.md` and
+`.agents/workflow/reviews/plan-graph-oracle-c<cycle>-r<round>.md`.
+The `c<cycle>` and `r<round>` components prevent overwriting an earlier report when later planning work starts a new cycle or a correction review starts a new round.
 Edits after `MORE WORK` remain in the same cycle; changing a commit or digest never resets that cycle.
 A third review within that cycle requires `--mediation <report>` or escalation to the human.
 After a second `MORE WORK`, authorize bounded Oracle authorship or escalate to the human.
@@ -167,20 +166,40 @@ The authorization identifies the exact graph or OpenSpec artifact paths and the 
 Only this bounded planning exception permits an Oracle to write the local graph directly.
 Pause Coordinator graph writes and other graph authors until the Oracle stops or releases ownership.
 The Oracle never writes coordination or approval ledgers. The Coordinator records the outcome.
-Read the completed report before recording a fresh read-only review intent with a new key.
+Read the completed report before recording a fresh read-only follow-up with a new key and a new report.
+The follow-up plan-dispatch uses `--task plan` (or omits `--task`), never the author's correction task.
+Export `FEATDEV_SKILL_ROOT` to the resolved absolute skill path before running these commands:
+
+```bash
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-dispatch \
+  --scope graph --role oracle --task plan --key <new-key> \
+  --report .agents/workflow/reviews/plan-graph-oracle-c<cycle>-r<round>.md
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> plan-dispatch \
+  --scope change --role oracle --task plan --key <new-key> \
+  --report .agents/workflow/<change>/reviews/artifacts-oracle-c<cycle>-r<round>.md
+```
+
 That intent closes the author record; a different Oracle performs the independent review.
+Record the new verdict with `plan-review`, including the verdict, `--head <sha>`, and `--report <new-report>`.
 The author cannot approve its own correction. See [planning correction commands](helper-commands.md#oracle-planning-corrections).
 A stale intent requires a fresh unique `--key`; never reuse a dispatch ID for different inputs.
 
 After both stages pass, obtain explicit human approval of the artifacts and local graph.
 Commit the OpenSpec artifacts first, then record the approval with `plan-approve`.
 The record names the approver, current HEAD, graph digest, and per-change artifact digests.
-It refuses uncommitted `openspec/changes` content or a missing/stale graph PASS.
+It requires a current artifact PASS for every included change and a current graph PASS.
+It refuses uncommitted `openspec/changes` content, a missing/stale graph PASS, or a missing/stale artifact PASS.
+Committing a contract-changing artifact edit after its review does not satisfy the artifact requirement:
+the changed digest invalidates the earlier PASS and requires a fresh artifact review.
 Never stage `plan-graph.json`, `coordination.json`, or their review/approval records.
 The helper records the decision; it never grants human approval or commits these files.
+
+`status` reports the plan-approval state as current, stale, or missing (JSON: `plan_approval.state`).
+Before opening any lane and before every lane merge, the Coordinator must run `status` and confirm `plan_approval.state` is `current`.
+`lane-open` and `lane-merge` do not check the approval record; this is a mandatory Coordinator verification of the human's approval, not helper enforcement.
 
 Plan amendments require affected artifact review, then repo graph review, then human approval recorded with `plan-approve` before renewed implementation.
 Lane review and human-gate bindings include the lane contract digest; material lane edits require fresh verdicts.
 Unrelated changes or lanes do not invalidate an unchanged ordinary lane's review binding.
-Combined Oracle approvals and plan-bound grants retain their exact selected-change bindings.
-Back up the graph, coordination file, and approval record together; Git cannot reconstruct these local objects.
+Plan-bound grants retain their exact selected-change bindings.
+Back up the entire `.agents/workflow/` tree; Git cannot reconstruct these local objects.

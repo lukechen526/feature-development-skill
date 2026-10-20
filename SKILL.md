@@ -25,15 +25,27 @@ and its gates before starting the next. Do not batch, reorder, or skip phase gat
    profiles, and provision roles. Complete preflight before any role dispatch.
 2. **[Plan](references/plan.md).** Author the OpenSpec artifacts. Obtain separate
    Oracle reviews of each change's artifacts and then the whole repository graph.
-   Obtain human approval, commit the approved artifacts, and record approval
-   before implementation.
-3. **[Lanes](references/lane.md).** Dispatch isolated, scoped implementation per task.
+   Obtain human approval, commit the approved artifacts, and record approval with
+   [plan-approve](references/helper-commands.md#plan-approval) in
+   `.agents/workflow/plan-approval.json` before implementation.
+3. **[Lanes](references/lane.md).** Before opening or merging a lane, the
+   Coordinator must confirm `status` reports `plan_approval.state` as `current`;
+   the helper records and displays the approval but does not enforce it in
+   `lane-open` or `lane-merge`. Dispatch isolated, scoped implementation per task.
    Obtain independent reviews of the current lane `HEAD`, correct findings within
    the documented review limits, and integrate only through the lane gates.
-4. **[Finish](references/finish.md).** Start after all included lanes integrate.
-   Obtain human release classification, commit release preparation, and complete
-   required evidence, reviews, and human inspections. Obtain separate consent to
-   open the PR. Resolve post-PR findings through corrections, independent review,
+4. **[Finish](references/finish.md).** Start after every lane of every change in the
+   repository graph integrates. Finish is repository-level: one record at
+   `.agents/workflow/finish.json` covers the PR, which may include one or more
+   OpenSpec changes. Obtain human release classification, commit release preparation,
+   and complete required evidence, reviews, and human inspections. Before PR consent,
+   the Coordinator verifies the finish review record at
+   `.agents/workflow/finish/reviews/finish-<role>-<head>.md` binds its verdict,
+   exact HEAD, inputs/evidence revision, limitations, and reviewer identity;
+   `pr-check` does not validate it. Obtain separate consent to open the PR,
+   recorded in `.agents/workflow/finish/pr-follow-up.md` (human decision,
+   timestamp, HEAD, included changes) and distinct from merge consent; only the
+   human merges. Resolve post-PR findings through corrections, independent review,
    and renewed checks. Sync and archive included OpenSpec changes, recheck the PR,
    and hand off to the human for PR merge.
 
@@ -56,6 +68,10 @@ exception path, not a fifth stage.
 ## Non-negotiables
 
 - Implementation requires human-approved committed planning artifacts and recorded approval.
+- Model, thinking, and role-profile selection is repo-level only in
+  `.agents/workflow/model-selection.json`. Never create a per-lane or per-worktree
+  profile, and never put a lane worktree or per-dispatch path in a profile; the
+  worktree is execution metadata in the brief and coordination.
 - Keep implementation isolated and scoped. Required reviews must be independent
   and bind the exact current lane `HEAD`, subject only to documented exceptions.
 - The Coordinator dispatches, records, and gates; it never patches implementation.
@@ -66,4 +82,6 @@ exception path, not a fifth stage.
   including [Human Override and Oracle stand-in](references/lane.md#human-override).
 - Missing or stale records block affected work. Chat never replaces those records.
   Stop and report missing required helpers or unmet human gates; never invent substitutes.
-- PR-opening consent is a separate human decision. Only the human merges the PR.
+- PR-opening consent is a separate human decision recorded in
+  `.agents/workflow/finish/pr-follow-up.md`; it is not merge consent. Only the
+  human merges the PR.

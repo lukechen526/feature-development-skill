@@ -1,6 +1,7 @@
 # Recovery
 
 Command syntax: [helper command reference](helper-commands.md).
+Resolve and export `FEATDEV_SKILL_ROOT` to the absolute installed skill path before any helper command; never hardcode the location ([preflight](preflight-and-roles.md)).
 
 ## When to use recovery
 
@@ -23,14 +24,16 @@ An evidence refresh already prescribed by the phase guide does not require resta
 1. Pause the affected lane or phase.
 2. Pause all coordinator writes if the shared local objects are unreliable.
 3. Identify the interrupted phase, change, lane, and last confirmed operation.
-4. Read the retained local plan, plan-approval record, coordination records, reports, and approval bindings.
+4. Read the retained local plan, `.agents/workflow/plan-approval.json`, repo-level `.agents/workflow/plan-graph-review.json`, coordination records, and the affected change's `.agents/workflow/<change>/plan-reviews.json`, briefs, reports, reviews (including finish reviews), evidence, and `pr-follow-up.md`.
 5. Compare those records with committed OpenSpec artifacts, task ticks, and surviving worktrees/refs.
 6. Establish the actual status and ownership of every affected worker.
 7. Repair the interrupted operation or renew only the affected missing evidence and decisions.
+   Lost or unreadable review ledgers, reports, or evidence require re-review or re-capture; surviving code, task ticks, or summaries are not evidence.
    Resolve implementation conflicts in the lane worktree with fresh review, never as unreviewed feature-branch edits.
-   For finish workers, inspect `finish_dispatches` and its worktree/HEAD binding before resuming or replacing a worker.
+   For finish workers, inspect the repo-level `.agents/workflow/finish.json` dispatch list and its worktree/HEAD binding before resuming or replacing a worker.
    For Oracle planning authors, establish graph ownership before any graph mutation or independent review.
 8. Refresh coordination and inspect status after reconciliation.
+   `status` reports plan-approval state and open intents, but does not verify that review ledgers, reports, evidence, finish reviews, or `pr-follow-up.md` exist; inspect those paths directly.
 9. Resume the owning phase at its first incomplete operation.
 
 Recovery ends when records and execution state agree, worker ownership is known, and the next action is identified.
@@ -42,15 +45,19 @@ Do not replay completed phases, redispatch completed tasks, or repeat a successf
 
 - Missing dispatch records require reconciliation of the worker outcome before another launch. Never assume the old worker stopped.
 - Missing or stale review records require a fresh independent current-HEAD verdict. Never infer approval from code or task ticks.
+- A lost review ledger, review report, or evidence set is a missing record: re-review or re-capture it. Never rebuild it from surviving code, task ticks, or summaries.
+- After the actual re-review, record a lost planning verdict with a fresh `plan-dispatch` intent and then `plan-review`, including the verdict, `--head <sha>`, and `--report <path>`; a report path alone does not restore the ledger.
+- Missing finish reviews require a fresh independent review at the exact integrated HEAD. A lost PR-opening consent record requires renewed human consent, not an inference from an opened PR.
 - Unprovable human acceptance requires a renewed checkpoint. Silence, chat recollection, and green checks are not substitutes.
 - Before same-worktree redispatch, prove the prior session is absent, stopped, or released. Never start a second writer.
 - A retained pass counts only with its exact reviewed HEAD, current lane contract, and valid evidence bindings.
-- Human authorization and combined-Oracle approvals cannot be reconstructed from ancestry or equal trees.
+- Human authorization and plan-bound grants cannot be reconstructed from ancestry or equal trees.
 - A deferred checkpoint is not approval. Retain its exact eligibility and binding or perform the early human checkpoint.
 - Missing final hands-on inspection records require the human to repeat the inspection. Oracle stand-in cannot replace it.
 - Confirm operation results before retrying; never double-dispatch, double-merge, or double-remove.
 
-The local graph, coordination file, and approval record are not reconstructible from Git alone. Preserve them together.
+The local graph, coordination file, plan-approval record, review ledgers, reports, evidence, and PR follow-up are not reconstructible from Git alone. Preserve them together.
+Back up the entire `.agents/workflow/` tree before recovery, migration, cleanup, or any destructive repair. It includes `preflight.json`, `plan-graph.json`, `coordination.json`, `plan-approval.json`, `finish.json`, each change's `plan-reviews.json`, `plan-graph-review.json`, `model-selection.json`, the capability map, briefs, reports, reviews (including finish reviews), evidence, and `finish/pr-follow-up.md`.
 Use the conditional sections below only when their specific legacy-record condition applies.
 
 ## Repository-object migration
@@ -67,7 +74,7 @@ The helper imports retained legacy ledgers on the first shared coordination writ
 Once a shared object exists, legacy files never replace its entries.
 
 1. Pause dispatches before migration.
-2. Back up the existing plans, coordination records, and approval record together.
+2. Back up the entire `.agents/workflow/` tree; the legacy plans, coordination records, and approval record are only part of it.
 3. Run `python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" migrate-repo` from the feature checkout.
 4. Inspect the imported change, lane, task, review, dispatch, and approval records.
 5. Obtain current OpenSpec artifact passes for each affected change.
@@ -75,6 +82,9 @@ Once a shared object exists, legacy files never replace its entries.
 7. Obtain human approval of the local graph and affected OpenSpec artifacts.
 8. Commit only affected OpenSpec artifacts, then record the approval with `plan-approve`; never commit a repo object.
 9. Renew affected lane reviews, plan-bound grants, release evidence, and human inspections.
+
+Retired `review_mode` fields are dropped; remove them from the plan before validation.
+Legacy per-change finish records are not migrated. Finish is repo-level, so after every lane in the graph integrates, re-record classification, evidence, inspections, and PR consent in `.agents/workflow/finish.json` and `.agents/workflow/finish/`.
 
 Migration retains source files, reports, worker IDs, and dispatch keys.
 It carries recorded approval bindings forward only when the exact legacy commit proves the same contract.
@@ -88,8 +98,9 @@ Do not overwrite newer progress with an older backup without reconciliation.
 
 Legacy input paths are `openspec/changes/<change>/plan/graph-plan.json` and
 `.agents/workflow/<change>/coordination.json`. New work never creates them.
-Git retains historical OpenSpec artifacts and ticks, but cannot reconstruct a lost local graph or ledger.
+Git retains historical OpenSpec artifacts and ticks, but cannot reconstruct a lost local graph, imported review ledger, report, or evidence set.
 Lost local objects require a backup or renewed planning/review/approval—not inferred consent.
+Lost review ledgers, reports, or evidence require re-review or re-capture; a surviving graph or coordination entry is not a substitute.
 
 ## Finish records
 
@@ -98,11 +109,24 @@ Normal changes to release inputs follow restaging in [finish.md](finish.md), wit
 
 Existing finish records without a preparation artifact require `finish-record restage`.
 Restage reuses the stored classification; supply the new preparation receipt and its committed input
-paths. Pass `--check` to replace the declared check set. Repeat release checks and required human
+paths. Pass `--check` to replace the declared check set. Omitting `--version` clears the stored
+expected version; pass `--version` when the repository uses one. Repeat release checks and required human
 inspections. Use `checkpoint:` in new human inspection artifacts. See [finish.md](finish.md) for the record format.
 
-Preserve reports/evidence under absolute change directory.
-Block on missing/stale plan approval or review binding, unknown worker, unapproved changed plan, failed required check,
+Preserve lane reports and evidence under the change's absolute reports and evidence directories:
+`.agents/workflow/<change>/reports/` and `.agents/workflow/<change>/evidence/`. Finish reports and
+evidence live under `.agents/workflow/finish/reports/` and `.agents/workflow/finish/evidence/`.
+Recovery checks for finish also cover the repo-level finish review at
+`.agents/workflow/finish/reviews/finish-<role>-<head>.md`, with its verdict, exact integrated HEAD,
+inputs/evidence revision, limitations, and reviewer identity, and
+`.agents/workflow/finish/pr-follow-up.md` with its PR URL, current HEAD, finding dispositions,
+outstanding items, and PR-opening consent naming the human, timestamp, HEAD, and included changes.
+PR-opening consent is separate from release classification and lane merge consent.
+`pr-check` does not validate finish reviews, PR-opening consent, or PR follow-up; the Coordinator
+verifies each and requires fresh review, re-capture, or renewed human consent when one is missing or stale.
+
+Block on missing/stale plan approval or review binding, a missing finish review or PR-opening consent
+needed for the next action, unknown worker, unapproved changed plan, failed required check,
 unresolved Oracle escalation, or unmet human gate. Account for all workers/worktrees/sessions/temp resources before stopping.
 
 Prefer completion events; bound fallback polling/output. Reuse preflight only while mechanism/model/level/environment/evidence bindings match.

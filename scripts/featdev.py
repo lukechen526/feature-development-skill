@@ -22,10 +22,9 @@ from typing import Any
 
 FIELD_TABLE = """Plan fields:
   schema_version  3 for repository-level plan-graph.json
-  changes         OpenSpec change id -> review_mode, lanes
+  changes         OpenSpec change id -> lanes
   lanes           per change: lane id -> risk, ui, sensitive, depends_on, tasks
   tasks           per lane: task id -> deps (task IDs within the same change)
-  review_mode     per change: optional 'standard' (default) or 'combined-single-lane'
 
 Validation checks: shape, task-id bijection, reference resolution, acyclicity."""
 
@@ -297,13 +296,10 @@ def _check_shape(plan: dict[str, Any], plan_path: Path) -> None:
             f"shape: change must be {expected_change!r} for this plan directory; change the plan's change field"
         )
 
+    if "review_mode" in plan:
+        raise PlanError("shape: review_mode is retired; remove it (standard review is the only mode)")
     lanes = plan.get("lanes")
     tasks = plan.get("tasks")
-    review_mode = plan.get("review_mode", "standard")
-    if not isinstance(review_mode, str) or review_mode not in {"standard", "combined-single-lane"}:
-        raise PlanError(
-            "shape: review_mode must be 'standard' or 'combined-single-lane'; change the review mode"
-        )
     if not isinstance(lanes, dict):
         raise PlanError("shape: lanes must be an object; change lanes to a lane-id object")
     if not isinstance(tasks, dict):
@@ -337,17 +333,6 @@ def _check_shape(plan: dict[str, Any], plan_path: Path) -> None:
                 raise PlanError(
                     f"shape: lane {lane_id!r} {flag} must be true or false; change the lane flag"
                 )
-
-    if review_mode == "combined-single-lane":
-        eligible = [
-            lane_id for lane_id, lane in lanes.items()
-            if isinstance(lane, dict) and lane.get("risk") == "ordinary"
-        ]
-        if len(lanes) != 1 or len(eligible) != 1:
-            raise PlanError(
-                "shape: review_mode 'combined-single-lane' requires exactly one ordinary-risk lane; "
-                "change the plan to one ordinary lane or use standard mode"
-            )
 
 
 def _top_level_task_id_list(text: str) -> list[str]:
@@ -660,6 +645,85 @@ def _ensure_workflow_ignored(root: Path) -> None:
 def _coordination_path(change: str, checkout: Path | None = None) -> Path:
     _safe_change(change)
     return workflow_dir((checkout or Path.cwd()).resolve()) / "coordination.json"
+
+
+_FINISH_RECORD = "finish.json"
+
+
+def finish_record_path(checkout: Path) -> Path:
+    """Repo-level finish record shared by every OpenSpec change in the PR."""
+    return workflow_dir(checkout.resolve()) / _FINISH_RECORD
+
+
+def _load_finish_record(checkout: Path) -> dict[str, Any]:
+    root = checkout.resolve()
+    path = finish_record_path(root)
+    if not path.is_file():
+        return {"schema_version": 1, "feature_checkout": str(root)}
+    value = _read_state(path)
+    if value.get("schema_version") != 1:
+        raise StateError(f"finish: {path} needs schema_version 1; repair the finish record")
+    if value.get("feature_checkout") != str(root):
+        raise StateError("finish: finish record belongs to another checkout; reconcile it")
+    return value
+
+
+def _write_finish_record(checkout: Path, value: dict[str, Any]) -> Path:
+    root = checkout.resolve()
+    value["schema_version"] = 1
+    value["feature_checkout"] = str(root)
+    path = finish_record_path(root)
+    _atomic_write_json(path, value)
+    return path
+
+
+def _finish_changes(checkout: Path) -> list[str]:
+    """Every OpenSpec change in the repository plan, or retained legacy changes."""
+    root = _workflow_checkout(checkout)
+    path = root / _REPO_PLAN
+    if path.is_file():
+        return sorted(_change_plans(_load_json(path)))
+    return _active_changes(root)
+
+
+def _finish_plan_digest(checkout: Path) -> str:
+    root = _workflow_checkout(checkout)
+    head = _git_output(root, "rev-parse", "HEAD")
+    parts = {
+        change: _change_plan_at(root, head, change)[1]
+        for change in _finish_changes(root)
+    }
+    return hashlib.sha256(json.dumps(parts, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _finish_integrated(checkout: Path, head: str) -> None:
+    """Require every lane of every included change to be merged into the feature branch."""
+    root = _workflow_checkout(checkout)
+    changes = _finish_changes(root)
+    if not changes:
+        raise StateError("finish: no OpenSpec changes; author and approve a plan before release")
+    repository = _repository_coordination(root)
+    for change in changes:
+        state = state_derive(change, None, root)
+        recorded = repository.get("changes", {}).get(change, {}).get("lanes", {})
+        if not isinstance(recorded, dict):
+            raise StateError(f"finish: coordination lanes for {change!r} are malformed; repair them")
+        lanes = state.get("lanes", {})
+        if not lanes:
+            raise StateError(f"finish: change {change!r} has no lanes; repair the plan")
+        for lane_id, lane in lanes.items():
+            merge = recorded.get(lane_id, {}).get("merge") if isinstance(recorded.get(lane_id), dict) else None
+            if not isinstance(lane, dict) or lane.get("complete") is not True or not isinstance(merge, dict):
+                raise StateError(
+                    f"finish: lane {change}/{lane_id} is not merged into the feature branch; "
+                    "integrate every lane in every included change first"
+                )
+            merged_head = merge.get("merge_commit")
+            if not isinstance(merged_head, str) or not _is_ancestor(root, merged_head, head):
+                raise StateError(
+                    f"finish: lane {change}/{lane_id} merge commit is not in integrated HEAD"
+                )
+
 
 
 def _read_state(value: Any) -> dict[str, Any]:
@@ -1587,19 +1651,12 @@ def _lane_escalation_status(lane: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _review_mode(plan: dict[str, Any]) -> str:
-    """Return the committed plan's review mode, preserving old plans as standard."""
-    value = plan.get("review_mode", "standard")
-    return value if isinstance(value, str) else "standard"
-
-
 def _new_coordination(state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "change": state["change"],
         "feature_checkout": state["feature_checkout"],
         "branch": state.get("branch") or "HEAD",
-        "review_mode": _review_mode(plan),
         "plan_sha256": state["plan_sha256"],
         "subagents": [],
         "lanes": {
@@ -1613,7 +1670,6 @@ def _new_coordination(state: dict[str, Any], plan: dict[str, Any]) -> dict[str, 
         "worktrees": [],
         "authorizations": {},
         "human_gates": {},
-        "finish": {},
     }
 
 
@@ -1638,7 +1694,7 @@ def _repository_coordination(checkout: Path) -> dict[str, Any]:
 
 def _stored_change_coordination(coordination: dict[str, Any]) -> dict[str, Any]:
     value = json.loads(json.dumps({key: item for key, item in coordination.items() if not key.startswith("_")}))
-    for key in ("schema_version", "change", "feature_checkout"):
+    for key in ("schema_version", "change", "feature_checkout", "review_mode", "finish", "finish_dispatches"):
         value.pop(key, None)
     lanes = value.get("lanes")
     if not isinstance(lanes, dict):
@@ -1678,7 +1734,7 @@ def _load_coordination(state: dict[str, Any], plan: dict[str, Any]) -> dict[str,
     if not isinstance(lanes, dict):
         raise StateError("state: coordination lanes are missing; repair or remove the coordination data")
     result = _new_coordination(state, plan)
-    for key in ("dispatches", "reviews", "worktrees", "authorizations", "human_gates", "finish", "finish_dispatches", "subagents"):
+    for key in ("dispatches", "reviews", "worktrees", "authorizations", "human_gates", "subagents"):
         if key in value:
             result[key] = value[key]
     for lane_id in plan.get("lanes", {}):
@@ -1688,20 +1744,6 @@ def _load_coordination(state: dict[str, Any], plan: dict[str, Any]) -> dict[str,
             lane = dict(lanes[lane_id])
             lane["task_states"] = lane.pop("tasks", lane.get("task_states", {}))
             result["lanes"][lane_id] = _coordination_lane(lane)
-    # A committed plan revision may switch modes. Old combined records never satisfy the
-    # standard path, and old standard records never satisfy combined mode; discard only the
-    # incompatible combined lane records while preserving other coordination for recovery.
-    # Apply this after persisted lanes have been copied into the result; filtering the fresh
-    # lanes created above would leave stale combined rounds in place.
-    if value.get("review_mode") not in {None, _review_mode(plan)}:
-        for lane in result.get("lanes", {}).values():
-            if isinstance(lane, dict):
-                reviews = lane.get("reviews")
-                if isinstance(reviews, list):
-                    lane["reviews"] = [
-                        item for item in reviews
-                        if isinstance(item, dict) and item.get("combined") is not True
-                    ]
     _normalize_stored_roles(result)
     result["_available"] = True
     return result
@@ -1725,11 +1767,16 @@ def _overlay_coordination(
     # The summary validates a gate through the merge validator, which needs the live grants too.
     authorizations = coordination.get("authorizations")
     view["authorizations"] = authorizations if isinstance(authorizations, dict) else {}
-    view["review_mode"] = coordination.get("review_mode", _review_mode(plan))
+    finish: dict[str, Any] = {}
+    try:
+        finish = _load_finish_record(Path(str(state["feature_checkout"])))
+    except StateError as exc:
+        finish = {"_error": _one_line(exc)}
+    view["finish"] = finish
+    view["finish_dispatches"] = finish.get("dispatches", []) if isinstance(finish, dict) else []
     view["coordination_path"] = str(
         _coordination_path(str(state["change"]), Path(str(state["feature_checkout"])))
     )
-    view["finish_dispatches"] = coordination.get("finish_dispatches", [])
     view["subagents"] = coordination.get("subagents") if isinstance(coordination.get("subagents"), list) else []
     view["coordination_available"] = coordination.get("_available", True) is not False
     if not view["coordination_available"]:
@@ -1804,7 +1851,7 @@ def _active_changes(checkout: Path) -> list[str]:
     if not changes_root.is_dir():
         return []
     return sorted(
-        path.parent.name
+        path.parent.parent.name
         for path in changes_root.glob("*/plan/graph-plan.json")
         if path.is_file()
     )
@@ -2020,13 +2067,12 @@ def dispatch_run(
     worktree: Path | None = None,
 ) -> Path:
     role = _require_role(role)
-    path, state, plan = _state_context(change)
     if lane_id is None:
-        _require_coordinator_cwd(state, "finish dispatch")
-        coordination = _load_coordination(state, plan)
-        repository = Path(state["feature_checkout"])
-        head = _git_output(repository, "rev-parse", _feature_branch(state))
-        _finish_integrated(state, coordination, repository, head)
+        repository = _workflow_checkout(Path.cwd())
+        _require_coordinator_cwd({}, "finish dispatch")
+        record = _load_finish_record(repository)
+        head = _git_output(repository, "rev-parse", "HEAD")
+        _finish_integrated(repository, head)
         target = (worktree or repository).resolve()
         common = (repository / _git_output(repository, "rev-parse", "--git-common-dir")).resolve()
         target_common = (target / _git_output(target, "rev-parse", "--git-common-dir")).resolve()
@@ -2035,7 +2081,7 @@ def dispatch_run(
         access = _dispatch_access(role, access)
         if access == "write" and target == repository.resolve():
             raise StateError("finish: authoring requires a separate --worktree; the Coordinator owns the feature checkout")
-        dispatches = coordination.setdefault("finish_dispatches", [])
+        dispatches = record.setdefault("dispatches", [])
         if not isinstance(dispatches, list):
             raise StateError("finish: dispatch records are malformed; repair the ledger")
         previous = next((row for row in dispatches if row.get("key") == key), None) if key else None
@@ -2054,13 +2100,14 @@ def dispatch_run(
             raise StateError("finish: dispatch key has a different intent at this feature HEAD; use a new key")
         snapshot = (previous["lane_head"] if previous is not None and access == "write"
                     else _git_output(target, "rev-parse", "HEAD"))
-        holder = {"change": state["change"], "dispatches": dispatches}
-        dispatch_key = _dispatch_intent(holder, None, role, task, key, snapshot, access, acceptance, evidence)
+        holder = {"dispatches": dispatches}
+        dispatch_key = _dispatch_intent(holder, None, role, task, key, snapshot, access, None, None)
         row = next(row for row in dispatches if row["key"] == dispatch_key)
         row.update({"scope": "finish", "worktree": str(target), "feature_head": head})
-        _register_subagent(coordination, None, role, task, dispatch_key, access, str(target))
-        _write_coordination(state, coordination, plan)
-        return path
+        _register_subagent(record, None, role, task, dispatch_key, access, str(target))
+        _write_finish_record(repository, record)
+        return finish_record_path(repository)
+    path, state, plan = _state_context(change)
     if worktree is not None:
         raise StateError("dispatch: --worktree is only supported with --scope finish")
     coordination, runtime = _coordination_lane_for(state, plan, lane_id)
@@ -2147,15 +2194,16 @@ def dispatch_done(
     key: str | None = None,
 ) -> Path:
     role = _require_role(role)
-    path, state, plan = _state_context(change)
     if lane_id is None:
-        _require_coordinator_cwd(state, "finish dispatch-done")
-        coordination = _load_coordination(state, plan)
-        holder = {"dispatches": coordination.setdefault("finish_dispatches", [])}
+        repository = _workflow_checkout(Path.cwd())
+        _require_coordinator_cwd({}, "finish dispatch-done")
+        record = _load_finish_record(repository)
+        holder = {"dispatches": record.setdefault("dispatches", [])}
         _complete_dispatch(holder, None, role, worker_run_id, tokens, cost, result, key)
-        _close_subagent(coordination, None, role, worker_run_id, result, key)
-        _write_coordination(state, coordination, plan)
-        return path
+        _close_subagent(record, None, role, worker_run_id, result, key)
+        _write_finish_record(repository, record)
+        return finish_record_path(repository)
+    path, state, plan = _state_context(change)
     coordination, runtime = _coordination_lane_for(state, plan, lane_id)
     merged_view = dict(state["lanes"][lane_id])
     merged_view.update(runtime)
@@ -2378,7 +2426,7 @@ def _status_view(state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
             }
             lane["human_gate"] = _human_gate_summary(
                 lane_id, lane, view.get("human_gates"), coordination_available, view.get("authorizations"),
-                view.get("review_mode") != "combined-single-lane",
+                True,
             )
     if view.get("coordination_available", True):
         try:
@@ -3217,8 +3265,6 @@ def human_defer(lane_id: str, commit: str, evidence_revision: str, rationale: st
     path, state, plan = _state_context(change)
     lane = _state_lane(state, lane_id)
     _reject_finished_lane(lane_id, lane)
-    if _review_mode(plan) == "combined-single-lane":
-        raise StateError("lane: combined review does not allow checkpoint deferral")
     if not lane.get("ui") or lane.get("sensitive") or lane.get("risk") == "high":
         raise StateError("lane: sensitive, high-risk, or non-UI lanes cannot defer the human checkpoint")
     if risk_assessment != "low" or not isinstance(rationale, str) or not rationale.strip():
@@ -3716,24 +3762,9 @@ def lane_review(
     evidence_revision: str | None = None,
     evidence: object = None,
     change: str | None = None,
-    combined: bool = False,
-    oracle_provenance: str | None = None,
-    feature_base: str | None = None,
-    review_base: str | None = None,
-    acceptance: object = None,
 ) -> Path:
     role = _require_role(role)
     path, state, plan = _state_context(change)
-    if combined:
-        return _combined_lane_review(
-            lane_id, role, verdict, commit, report, evidence_revision, evidence,
-            oracle_provenance, feature_base, review_base, acceptance,
-            path, state, plan,
-        )
-    if any(value is not None for value in (oracle_provenance, feature_base, review_base, acceptance)):
-        raise StateError(
-            "lane: combined review inputs require --combined; remove them or select combined mode"
-        )
     lane = _state_lane(state, lane_id)
     _reject_finished_lane(lane_id, lane)
     if lane.get("complete"):
@@ -3858,320 +3889,6 @@ def lane_review(
     return path
 
 
-def _combined_lane_from_plan(plan: dict[str, Any], lane_id: str) -> dict[str, Any]:
-    """Validate the narrow eligibility contract for the combined review path."""
-    if _review_mode(plan) != "combined-single-lane":
-        raise StateError(
-            "lane: combined review requires plan review_mode 'combined-single-lane'; use standard review"
-        )
-    lanes = plan.get("lanes")
-    if not isinstance(lanes, dict) or len(lanes) != 1:
-        raise StateError(
-            "lane: combined review requires exactly one ordinary-risk lane; use standard review"
-        )
-    lane_plan = lanes.get(lane_id)
-    if not isinstance(lane_plan, dict) or lane_plan.get("risk") != "ordinary":
-        raise StateError(
-            f"lane: combined review lane {lane_id!r} is not the single ordinary-risk lane; use standard review"
-        )
-    return lane_plan
-
-
-def _combined_reviews(lane: dict[str, Any]) -> list[dict[str, Any]]:
-    records = lane.setdefault("reviews", [])
-    if not isinstance(records, list):
-        raise StateError("state: reviews are malformed; repair coordination data")
-    if any(not isinstance(item, dict) for item in records):
-        raise StateError("state: review record is malformed; repair coordination data")
-    return records  # type: ignore[return-value]
-
-
-def _combined_oracle_dispatch(
-    runtime: dict[str, Any],
-    provenance: object,
-    reviewed_head: str,
-    acceptance_path: str,
-    evidence_path: str,
-) -> dict[str, Any]:
-    """Resolve combined provenance to one completed, read-only Oracle dispatch."""
-    if not isinstance(provenance, str) or not provenance.strip():
-        raise StateError("lane: combined review needs non-empty --oracle-provenance")
-    dispatches = runtime.get("dispatches")
-    if not isinstance(dispatches, list):
-        raise StateError(
-            "lane: combined Oracle provenance has no dispatch ledger; record a completed read-only Oracle dispatch"
-        )
-    token = provenance.strip()
-    matches = [
-        item for item in dispatches
-        if isinstance(item, dict)
-        and (item.get("worker_run_id") == token or item.get("key") == token)
-    ]
-    if len(matches) == 1:
-        dispatch = matches[0]
-    else:
-        reviewed_matches = [item for item in matches if item.get("lane_head") == reviewed_head]
-        if len(reviewed_matches) != 1:
-            raise StateError(
-                "lane: combined Oracle provenance must identify exactly one completed Oracle dispatch for the "
-                "reviewed lane HEAD (lane_head); record an independent read-only Oracle dispatch for that exact candidate"
-            )
-        dispatch = reviewed_matches[0]
-    if not isinstance(dispatch, dict):
-        raise StateError(
-            "lane: combined Oracle provenance must identify exactly one completed Oracle dispatch; "
-            "record an independent read-only Oracle dispatch"
-        )
-    if dispatch.get("role") != "oracle":
-        raise StateError(
-            "lane: combined Oracle provenance identifies authored or non-Oracle work; use an independent Oracle"
-        )
-    if dispatch.get("result") != "ok":
-        raise StateError(
-            "lane: combined Oracle provenance identifies a dispatch whose result is not 'ok'; "
-            "complete the Oracle successfully before recording or merging the combined review"
-        )
-    access = dispatch.get("access")
-    if access == "write":
-        raise StateError(
-            "lane: combined Oracle provenance identifies an Oracle authoring dispatch; an independent Oracle "
-            "must review the authored candidate"
-        )
-    if access != "read-only":
-        raise StateError(
-            "lane: combined Oracle provenance identifies an ambiguous legacy Oracle dispatch; "
-            "record it with --access read-only"
-        )
-    if dispatch.get("lane_head") != reviewed_head:
-        raise StateError(
-            "lane: combined Oracle provenance dispatch lane_head does not match the reviewed lane HEAD; "
-            "record a dispatch for the exact candidate commit"
-        )
-    for label, expected_path, path_field, digest_field in (
-        ("acceptance", acceptance_path, "acceptance_path", "acceptance_sha256"),
-        ("evidence", evidence_path, "evidence_path", "evidence_sha256"),
-    ):
-        if dispatch.get(path_field) != expected_path or not isinstance(dispatch.get(digest_field), str):
-            raise StateError(
-                f"lane: combined Oracle provenance {label} snapshot is missing or bound to another path; "
-                "re-dispatch the Oracle with the current review documents"
-            )
-        if dispatch[digest_field] != _path_sha256(Path(expected_path)):
-            raise StateError(
-                f"lane: combined Oracle provenance {label} document changed since dispatch; "
-                "re-dispatch the Oracle before recording or merging the review"
-            )
-    reviewer_session = dispatch.get("worker_run_id")
-    if not isinstance(reviewer_session, str) or not reviewer_session.strip():
-        raise StateError(
-            "lane: combined Oracle provenance requires the reviewer dispatch to have a non-empty stable "
-            "worker_run_id"
-        )
-    reviewer_session = reviewer_session.strip()
-    for author in dispatches:
-        if not isinstance(author, dict) or author is dispatch:
-            continue
-        author_access = author.get("access")
-        # Historical stores may use the retired "worker" label; it is never accepted for a new
-        # dispatch, but it still counts as an author-capable record for independence checks.
-        authoring = author_access == "write" or (
-            author_access is None and author.get("role") in {"implementer", "worker", "oracle"}
-        )
-        if not authoring:
-            continue
-        author_session = author.get("worker_run_id")
-        if not isinstance(author_session, str) or not author_session.strip():
-            raise StateError(
-                "lane: combined Oracle provenance cannot verify an author-capable dispatch without a "
-                "non-empty stable worker_run_id"
-            )
-        if author_session.strip() == reviewer_session:
-            raise StateError(
-                "lane: combined Oracle provenance shares a worker session with authored work; "
-                "an independent Oracle must review the authored candidate"
-            )
-    return dispatch
-
-
-def _combined_lane_review(
-    lane_id: str,
-    role: str,
-    verdict: str,
-    commit: str,
-    report: object,
-    evidence_revision: str | None,
-    evidence: object,
-    oracle_provenance: str | None,
-    feature_base: str | None,
-    review_base: str | None,
-    acceptance: object,
-    path: Path,
-    state: dict[str, Any],
-    plan: dict[str, Any],
-) -> Path:
-    """Record one exact-HEAD Oracle pass covering lane code/test and implementation coherence."""
-    if role != "code-reviewer":
-        raise StateError("lane: combined review must use role 'code-reviewer'; the Oracle supplies the combined duty")
-    if verdict not in {"PASS", "MORE WORK"}:
-        raise StateError("lane: verdict must be PASS or MORE WORK; change it")
-    _combined_lane_from_plan(plan, lane_id)
-    lane = _state_lane(state, lane_id)
-    _reject_finished_lane(lane_id, lane)
-    coordination, runtime = _coordination_lane_for(state, plan, lane_id)
-    operation_lane = dict(lane)
-    operation_lane.update(runtime)
-    worktree, recorded_ref = _lane_runtime_for_operation(state, lane_id, operation_lane)
-    runtime["worktree"] = str(worktree)
-    runtime["ref"] = recorded_ref
-    if _run_git(worktree, "status", "--porcelain").stdout.strip():
-        raise StateError(f"lane: lane {lane_id!r} worktree is dirty; commit before review")
-    actual_head = _git_output(worktree, "rev-parse", "HEAD")
-    reviewed_head = _git_commit(worktree, commit)
-    if reviewed_head != actual_head:
-        raise StateError(
-            f"lane: combined review commit {reviewed_head} is not the lane HEAD {actual_head}; "
-            "review the exact candidate HEAD"
-        )
-    change_name = state.get("change")
-    if not isinstance(change_name, str) or not change_name:
-        raise StateError("lane: change is missing; re-derive the state")
-    assigned = _lane_assigned_tasks(plan, lane_id)
-    checked = _lane_checked_tasks(worktree, change_name, plan)
-    missing = assigned - checked
-    if missing:
-        raise StateError(
-            f"lane: lane {lane_id!r} has unfinished tasks ({', '.join(sorted(missing))}); "
-            "tick every assigned task before combined review"
-        )
-    oracle_provenance = oracle_provenance.strip() if isinstance(oracle_provenance, str) else ""
-    if not isinstance(feature_base, str) or not feature_base:
-        raise StateError("lane: combined review needs --feature-base")
-    if not isinstance(review_base, str) or not review_base:
-        raise StateError("lane: combined review needs --review-base")
-    if acceptance is None:
-        raise StateError("lane: combined review needs --acceptance")
-    repository = Path(state["feature_checkout"]).resolve()
-    branch = _feature_branch(state)
-    feature_head = _git_output(repository, "rev-parse", branch)
-    feature_base_sha = _git_commit(repository, feature_base)
-    review_base_sha = _git_commit(repository, review_base)
-    lane_base_value = runtime.get("base")
-    if not isinstance(lane_base_value, str) or not lane_base_value:
-        raise StateError("lane: combined review has no recorded lane base; reopen the lane")
-    lane_base_sha = _git_commit(repository, lane_base_value)
-    if feature_base_sha != feature_head:
-        raise StateError(
-            f"lane: combined review feature base {feature_base_sha} is not current feature HEAD {feature_head}; "
-            "review the unchanged feature base"
-        )
-    if lane_base_sha != feature_base_sha:
-        raise StateError(
-            f"lane: combined review lane base {lane_base_sha} differs from feature base {feature_base_sha}; "
-            "reopen the lane from the current feature base"
-        )
-    if not _is_ancestor(repository, review_base_sha, feature_base_sha):
-        raise StateError(
-            f"lane: whole-change review base {review_base_sha} is not an ancestor of feature base "
-            f"{feature_base_sha}; change --review-base"
-        )
-    if not _is_ancestor(repository, feature_base_sha, reviewed_head):
-        raise StateError(
-            f"lane: feature base {feature_base_sha} is not an ancestor of reviewed candidate {reviewed_head}; "
-            "reconcile the lane history"
-        )
-    report_path = _review_report(report)
-    evidence_path = _review_binding_path(evidence)
-    if not evidence_path:
-        raise StateError("lane: combined review needs candidate evidence; provide --evidence")
-    acceptance_path = _required_document(acceptance, "combined acceptance document")
-    if acceptance_path == report_path:
-        raise StateError(
-            "lane: combined acceptance document and review report must be different files; "
-            "record the final acceptance separately"
-        )
-    _combined_oracle_dispatch(runtime, oracle_provenance, reviewed_head, acceptance_path, evidence_path)
-    revision = str(evidence_revision or "").strip()
-    if not revision:
-        raise StateError("lane: combined review needs --evidence-revision")
-    plan_sha256 = state.get("plan_sha256")
-    if not isinstance(plan_sha256, str) or not plan_sha256:
-        raise StateError("lane: combined review has no approved plan hash; re-derive the state")
-    records = _combined_reviews(runtime)
-    role_records = [
-        item for item in records
-        if item.get("lane") == lane_id and item.get("combined") is True
-    ]
-    same_head = [item for item in role_records if _review_commit(item) == reviewed_head]
-    prior_rounds = [number for item in role_records if (number := _review_round(item)) is not None]
-    round_number = max(
-        (_review_round(item) or 0 for item in same_head),
-        default=max(prior_rounds, default=0) + 1,
-    )
-    if round_number > 2 and not _mediation_covers(runtime, "code-reviewer"):
-        raise StateError(
-            f"lane: combined review round {round_number} is past the two-round limit; consult the Oracle "
-            "for mediation before reviewing again"
-        )
-    record = {
-        "round": round_number,
-        "lane": lane_id,
-        "role": "code-reviewer",
-        "combined": True,
-        "duties": ["code", "test", "final"],
-        "oracle_provenance": oracle_provenance,
-        "verdict": verdict,
-        "reviewed_commit": reviewed_head,
-        "status": "current",
-        "gate_eligible": True,
-        "report": report_path,
-        "report_sha256": _path_sha256(Path(report_path)),
-        "binding": {
-            "commit": reviewed_head,
-            "plan_sha256": plan_sha256,
-            "feature_base": feature_base_sha,
-            "lane_base": lane_base_sha,
-            "review_base": review_base_sha,
-            "report_sha256": _path_sha256(Path(report_path)),
-            "evidence_revision": revision,
-            "evidence_path": evidence_path,
-            "evidence_sha256": _path_sha256(Path(evidence_path)),
-            "acceptance_path": acceptance_path,
-            "acceptance_sha256": _path_sha256(Path(acceptance_path)),
-        },
-    }
-    for previous in records:
-        if not isinstance(previous, dict) or previous.get("lane") != lane_id or previous.get("combined") is not True:
-            continue
-        previous_commit = _review_commit(previous)
-        if previous_commit == actual_head:
-            previous["status"] = "current"
-            previous["gate_eligible"] = True
-        elif previous_commit and _is_ancestor(worktree, previous_commit, actual_head):
-            previous["status"] = "superseded"
-            previous["gate_eligible"] = False
-        if previous_commit:
-            previous["reviewed_commit"] = previous_commit
-    for previous in same_head:
-        previous_binding = previous.get("binding")
-        if (
-            previous.get("combined") is True
-            and previous.get("verdict") == verdict
-            and previous.get("oracle_provenance") == record["oracle_provenance"]
-            and previous.get("report") == report_path
-            and previous.get("report_sha256") == record["report_sha256"]
-            and isinstance(previous_binding, dict)
-            and previous_binding == record["binding"]
-        ):
-            previous.update({"status": "current", "gate_eligible": True, "reviewed_commit": reviewed_head})
-            runtime["phase"] = "revising" if verdict == "MORE WORK" else "reviewing"
-            _write_coordination(state, coordination, plan)
-            return path
-    records.append(record)
-    runtime["phase"] = "revising" if verdict == "MORE WORK" else "reviewing"
-    _write_coordination(state, coordination, plan)
-    return path
-
-
 def _latest_reviews(lane: dict[str, Any], head: str | None = None) -> dict[str, dict[str, Any]]:
     latest: dict[str, dict[str, Any]] = {}
     for review in lane.get("reviews") or []:
@@ -4179,115 +3896,12 @@ def _latest_reviews(lane: dict[str, Any], head: str | None = None) -> dict[str, 
             continue
         # Combined records have their own final-review validator. They must never silently
         # satisfy a later standard-mode code gate after the plan changes mode.
-        if review.get("combined") is True:
-            continue
         if head is not None and _review_status(lane, review, head) != "current":
             continue
         if head is None and review.get("status") == "superseded":
             continue
         latest[review["role"]] = review
     return latest
-
-
-def _latest_combined_review(
-    lane: dict[str, Any], lane_id: str, head: str | None = None
-) -> dict[str, Any] | None:
-    records = _combined_reviews(lane)
-    candidates = [
-        (index, item) for index, item in enumerate(records)
-        if item.get("lane", lane_id) == lane_id
-        and item.get("combined") is True
-        and (head is None or _review_commit(item) == head)
-    ]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda pair: (_review_round(pair[1]) or 0, pair[0]))[1]
-
-
-def _validate_combined_review(
-    state: dict[str, Any],
-    plan: dict[str, Any],
-    lane_id: str,
-    lane: dict[str, Any],
-    runtime: dict[str, Any],
-    coordination: dict[str, Any],
-    head: str,
-    feature_head: str,
-    lane_base: str,
-    post_merge: bool = False,
-) -> dict[str, Any]:
-    """Validate combined review and all supplied files at the exact pre-merge state."""
-    _combined_lane_from_plan(plan, lane_id)
-    review = _latest_combined_review(runtime, lane_id, head)
-    if not review:
-        raise StateError(
-            f"lane: combined review is missing for current HEAD {head}; record an independent combined review"
-        )
-    if review.get("verdict") != "PASS":
-        raise StateError(
-            f"lane: combined review is {review.get('verdict')!r}, not PASS; fix the lane"
-        )
-    if review.get("role") != "code-reviewer" or review.get("duties") != ["code", "test", "final"]:
-        raise StateError(
-            "lane: combined review does not record code/test/final duties; record a fresh combined review"
-        )
-    round_number = _review_round(review)
-    if round_number and round_number > 2 and not _mediation_covers(runtime, "code-reviewer"):
-        raise StateError(
-            f"lane: combined review reached round {round_number} without Oracle mediation; consult the Oracle"
-        )
-    binding = review.get("binding")
-    if not isinstance(binding, dict):
-        raise StateError("lane: combined review has no binding; record a fresh combined review")
-    if binding.get("commit") != head:
-        raise StateError(
-            f"lane: combined review is bound to {binding.get('commit') or 'no commit'}, lane HEAD is {head}; "
-            "re-review the lane"
-        )
-    if binding.get("plan_sha256") != state.get("plan_sha256"):
-        raise StateError("lane: combined review is bound to another plan revision; record a fresh review")
-    repository = Path(state["feature_checkout"]).resolve()
-    for label in ("feature_base", "lane_base", "review_base"):
-        value = binding.get(label)
-        if not isinstance(value, str) or not value:
-            raise StateError(f"lane: combined review has no {label}; record a fresh review")
-        binding[label] = _git_commit(repository, value)
-    expected_feature_base = lane_base if post_merge else feature_head
-    if binding["feature_base"] != expected_feature_base:
-        raise StateError(
-            f"lane: combined review feature base {binding['feature_base']} differs from expected feature base "
-            f"{expected_feature_base}; re-review the unchanged feature base"
-        )
-    if binding["lane_base"] != lane_base:
-        raise StateError(
-            f"lane: combined review lane base {binding['lane_base']} differs from current lane base {lane_base}; "
-            "reconcile the lane before merging"
-        )
-    if not _is_ancestor(repository, binding["review_base"], binding["feature_base"]):
-        raise StateError("lane: combined whole-change review base is not an ancestor of feature base")
-    if not _is_ancestor(repository, binding["feature_base"], head):
-        raise StateError("lane: combined feature base is not an ancestor of reviewed HEAD")
-    evidence_revision = binding.get("evidence_revision")
-    if not isinstance(evidence_revision, str) or not evidence_revision.strip():
-        raise StateError("lane: combined review has no evidence revision; record a fresh review")
-    report_path = _required_document(review.get("report"), "combined review report")
-    report_digest = review.get("report_sha256")
-    if (
-        report_digest != _path_sha256(Path(report_path))
-        or binding.get("report_sha256") != report_digest
-    ):
-        raise StateError("lane: combined review report changed after review; record a fresh review")
-    evidence_path = _required_document(binding.get("evidence_path"), "combined review evidence")
-    if binding.get("evidence_sha256") != _path_sha256(Path(evidence_path)):
-        raise StateError("lane: combined review evidence changed after review; record fresh evidence and review")
-    acceptance_path = _required_document(binding.get("acceptance_path"), "combined acceptance document")
-    if binding.get("acceptance_sha256") != _path_sha256(Path(acceptance_path)):
-        raise StateError(
-            "lane: combined acceptance document changed after review; record a fresh acceptance and review"
-        )
-    provenance = review.get("oracle_provenance")
-    _combined_oracle_dispatch(runtime, provenance, head, acceptance_path, evidence_path)
-    return review
 
 
 def lane_mediate(
@@ -4329,6 +3943,8 @@ def lane_mediate(
     )
     _write_coordination(state, coordination, plan)
     return path
+
+
 
 
 def _validate_lane_reviews(
@@ -4536,84 +4152,6 @@ def _completed_lane_reviewed_head(lane: dict[str, Any], lane_id: str) -> str | N
     return next(iter(heads))
 
 
-def _validate_completed_combined_lane_merge(
-    state: dict[str, Any],
-    plan: dict[str, Any],
-    lane_id: str,
-    lane: dict[str, Any],
-    runtime: dict[str, Any],
-    coordination: dict[str, Any],
-) -> None:
-    """Revalidate an already-complete combined lane without trusting ancestry alone."""
-    _combined_lane_from_plan(plan, lane_id)
-    merge = runtime.get("merge")
-    if not isinstance(merge, dict):
-        raise StateError(
-            f"lane: completed combined lane {lane_id!r} has no merge record; matching ticks do not establish "
-            "combined approval; recover with a fresh combined review"
-        )
-    if merge.get("review_mode") != "combined-single-lane":
-        raise StateError(
-            f"lane: completed combined lane {lane_id!r} has an inconsistent merge mode; "
-            "recover with a fresh combined review"
-        )
-    operation_lane = dict(lane)
-    operation_lane.update(runtime)
-    reviewed_head = merge.get("reviewed_head")
-    merge_commit = merge.get("merge_commit")
-    recorded_base = merge.get("base")
-    recorded_branch = merge.get("branch")
-    if not all(
-        isinstance(value, str) and value
-        for value in (reviewed_head, merge_commit, recorded_base, recorded_branch)
-    ):
-        raise StateError(
-            f"lane: completed combined lane {lane_id!r} has an incomplete merge record; recover with a fresh review"
-        )
-    repository = Path(state["feature_checkout"]).resolve()
-    feature_branch = _feature_branch(state)
-    if recorded_branch != feature_branch:
-        raise StateError(
-            f"lane: completed combined lane {lane_id!r} merge is bound to branch {recorded_branch!r}, "
-            f"not {feature_branch!r}; reconcile the feature branch"
-        )
-    current_branch = _git_output(repository, "rev-parse", "--abbrev-ref", "HEAD")
-    if current_branch != feature_branch:
-        raise StateError(
-            f"lane: feature checkout is on {current_branch!r}, not recorded branch {feature_branch!r}; "
-            "switch branches before recovery"
-        )
-    if _run_git(repository, "status", "--porcelain", "--untracked-files=no").stdout.strip():
-        raise StateError(
-            f"lane: feature checkout is dirty after combined merge; commit or discard tracked changes before recovery"
-        )
-    reviewed_head = _git_commit(repository, reviewed_head)
-    merge_commit = _git_commit(repository, merge_commit)
-    recorded_base = _git_commit(repository, recorded_base)
-    feature_head = _git_output(repository, "rev-parse", feature_branch)
-    if merge_commit != reviewed_head or not _is_ancestor(repository, merge_commit, feature_head):
-        raise StateError(
-            f"lane: completed combined lane {lane_id!r} does not preserve reviewed commit {reviewed_head}; "
-            "reconcile the feature branch and revalidate"
-        )
-    review = _validate_combined_review(
-        state, plan, lane_id, lane, runtime, coordination,
-        reviewed_head, feature_head, recorded_base, post_merge=True,
-    )
-    if review.get("binding", {}).get("commit") != merge_commit:
-        raise StateError("lane: combined merge record and review binding disagree; recover with a fresh review")
-    ui_roles = [role for role in _required_review_roles(operation_lane) if role != "code-reviewer"]
-    _validate_lane_reviews(
-        lane_id, operation_lane, reviewed_head, ui_roles,
-
-
-    )
-    _validate_human_gate(
-        lane_id, operation_lane, reviewed_head, coordination, state.get("plan_sha256"),
-        allow_consumed_by=lane_id,
-    )
-
-
 def _validate_completed_lane_merge(
     state: dict[str, Any],
     lane_id: str,
@@ -4713,7 +4251,6 @@ def lane_merge(
     path, state, plan = _state_context(change)
     lane = _state_lane(state, lane_id)
     coordination, runtime = _coordination_lane_for(state, plan, lane_id)
-    combined_mode = _review_mode(plan) == "combined-single-lane"
     if human_override:
         # A recorded human decision trumps the review gates. The workflow restricts the
         # override to waivable review duties: it can never waive clean-tree, task completion
@@ -4796,7 +4333,6 @@ def lane_merge(
             "merge_commit": merge_commit,
             "base": base,
             "branch": branch,
-            "review_mode": "combined-single-lane" if combined_mode else "standard",
             "human_override": {
                 "reason": reason,
                 "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
@@ -4814,9 +4350,6 @@ def lane_merge(
         # without this command validating them. Establish the reviewed commit, its containment in
         # the feature branch, the lane's required reviews, and the lane's human gate before
         # treating the lane as merged.
-        if combined_mode:
-            _validate_completed_combined_lane_merge(state, plan, lane_id, lane, runtime, coordination)
-            return path
         recorded_before = bool((runtime.get("merge") or {}).get("reviewed_head"))
         _validate_completed_lane_merge(state, lane_id, lane, runtime, coordination, state.get("plan_sha256"))
         if not recorded_before:
@@ -4858,38 +4391,16 @@ def lane_merge(
     feature_head = _git_output(repository, "rev-parse", branch)
     base = _lane_merge_base(repository, ref, feature_head)
     _validate_resolved_lane_base(repository, base, head, feature_head)
-    if combined_mode:
-        _validate_combined_review(
-            state, plan, lane_id, operation_lane, runtime, coordination,
-            head, feature_head, base,
-        )
-        ui_roles = [role for role in _required_review_roles(operation_lane) if role != "code-reviewer"]
-        _validate_lane_reviews(
-            lane_id, operation_lane, head, ui_roles,
+    _validate_lane_reviews(
+        lane_id, operation_lane, head,
 
-        )
-    else:
-        _validate_lane_reviews(
-            lane_id, operation_lane, head,
-
-        )
+    )
     _validate_human_gate(lane_id, operation_lane, head, coordination, state.get("plan_sha256"),
-                         allow_deferred=not combined_mode)
+                         allow_deferred=True)
     candidate_lane_checked, _, _ = _candidate_tick_state(
         repository, change_name, plan, lane_id, base, head, feature_head
     )
-    if combined_mode:
-        result = _run_git(repository, "merge", "--ff-only", head)
-        if result.returncode:
-            raise StateError(
-                f"lane: combined fast-forward failed: {_one_line(result.stderr or result.stdout)}; "
-                "the feature base moved or the reviewed candidate is no longer a direct descendant; "
-                "obtain a fresh combined review"
-            )
-        merge_commit = _git_output(repository, "rev-parse", "HEAD")
-        if merge_commit != head:
-            raise StateError("lane: combined fast-forward did not preserve the exact reviewed candidate SHA")
-    elif _is_ancestor(repository, head, feature_head):
+    if _is_ancestor(repository, head, feature_head):
         merge_commit = feature_head
     else:
         result = _run_git(
@@ -4916,7 +4427,6 @@ def lane_merge(
         "merge_commit": merge_commit,
         "base": base,
         "branch": branch,
-        "review_mode": "combined-single-lane" if combined_mode else "standard",
     }
     runtime["phase"] = "merged"
     # An authorization is consumed at most once per checkpoint. Record the consumption before the
@@ -4964,20 +4474,6 @@ def _human_inspection_accepts(path: Path, checkpoint: str) -> bool:
     return _human_inspection_verdict(path, checkpoint) == "accept"
 
 
-def _finish_integrated(state: dict[str, Any], coordination: dict[str, Any], repository: Path, head: str) -> None:
-    lanes = state.get("lanes", {})
-    recorded = coordination.get("lanes", {})
-    if not isinstance(lanes, dict) or not lanes or not isinstance(recorded, dict):
-        raise StateError("finish: no completed integrated lanes; merge assigned lanes into the feature branch first")
-    for lane_id, lane in lanes.items():
-        merge = recorded.get(lane_id, {}).get("merge") if isinstance(recorded.get(lane_id), dict) else None
-        if not isinstance(lane, dict) or lane.get("complete") is not True or not isinstance(merge, dict):
-            raise StateError(f"finish: lane {lane_id} not merged into the feature branch; integrate all assigned ticks first")
-        merged_head = merge.get("merge_commit")
-        if not isinstance(merged_head, str) or not _is_ancestor(repository, merged_head, head):
-            raise StateError(f"finish: lane {lane_id} merge commit is not in integrated HEAD")
-
-
 def _one_check(check: object) -> str:
     values = check if isinstance(check, list) else [check] if check is not None else []
     if len(values) != 1 or not isinstance(values[0], str) or not values[0].strip():
@@ -4989,16 +4485,15 @@ def finish_record(action: str, classification: str | None = None, version: str |
                   check: object = None, artifact: str | None = None,
                   inputs: list[str] | None = None, change: str | None = None,
                   inspections: list[str] | None = None) -> Path:
-    """Bind repository-defined release artifacts to committed feature-branch inputs."""
-    path, state, plan = _state_context(change)
-    repository = Path(state["feature_checkout"])
-    coordination = _load_coordination(state, plan)
+    """Bind repository-level release artifacts to the committed integrated feature branch."""
+    repository = _workflow_checkout(Path.cwd())
+    _require_coordinator_cwd({}, "finish-record")
     if _run_git(repository, "status", "--porcelain", "--untracked-files=no").stdout.strip():
         raise StateError("finish: tracked changes are uncommitted; commit before final capture")
     head = _git_output(repository, "rev-parse", "HEAD")
-    record = coordination.setdefault("finish", {})
+    record = _load_finish_record(repository)
     if action in {"classify", "restage"}:
-        _finish_integrated(state, coordination, repository, head)
+        _finish_integrated(repository, head)
         if action == "classify":
             if not classification or not classification.strip():
                 raise StateError("finish: record the human release classification with --classification")
@@ -5031,7 +4526,8 @@ def finish_record(action: str, classification: str | None = None, version: str |
                 selected: list(existing.get(selected, []))
                 for selected in sorted(set(declared_checks))
             }
-        record.update({"plan_sha256": state["plan_sha256"],
+        record.update({"plan_sha256": _finish_plan_digest(repository),
+                       "included_changes": _finish_changes(repository),
                        "classification": classification.strip(), "expected_version": version,
                        "classified_at": head,
                        "preparation": {"head": head, "artifact": preparation_path,
@@ -5047,9 +4543,9 @@ def finish_record(action: str, classification: str | None = None, version: str |
         preparation_hash = _finish_preparation(record, repository, head)
         evidence = record.setdefault("evidence", {})
         if action in {"capture", "inspect", "pr-check"}:
-            if state.get("runtime_plan") and record.get("plan_sha256") != state.get("plan_sha256"):
-                raise StateError("finish: selected plan changed; restage and renew release validation")
-            _finish_integrated(state, coordination, repository, head)
+            if record.get("plan_sha256") != _finish_plan_digest(repository):
+                raise StateError("finish: repository plan changed; restage and renew release validation")
+            _finish_integrated(repository, head)
         if action == "capture":
             check = _one_check(check)
             if not artifact or not inputs:
@@ -5080,7 +4576,7 @@ def finish_record(action: str, classification: str | None = None, version: str |
                     "head": head, "artifact": str(report_path), "sha256": digest,
                     "preparation_sha256": preparation_hash, "verdict": verdict}
             if verdict == "reject":
-                _write_coordination(state, coordination, plan)
+                _write_finish_record(repository, record)
             if verdict != "accept":
                 raise StateError("finish: human must personally record accept at this checkpoint; Oracle stand-in cannot inspect")
         elif action == "pr-check":
@@ -5094,8 +4590,12 @@ def finish_record(action: str, classification: str | None = None, version: str |
                 raise StateError("finish: selected checks missing final evidence; recapture before PR approval")
             if any(item.get("verdict") == "reject" for item in record.get("inspection", {}).values()):
                 raise StateError("finish: rejected human inspection blocks PR approval")
-            deferred = any(isinstance(gate, dict) and gate.get("state") == "deferred-to-integrated"
-                           for gate in coordination.get("human_gates", {}).values())
+            deferred = any(
+                isinstance(gate, dict) and gate.get("state") == "deferred-to-integrated"
+                for node in _repository_coordination(repository).get("changes", {}).values()
+                if isinstance(node, dict)
+                for gate in (node.get("human_gates") or {}).values()
+            )
             checkpoints = record.get("required_inspections", [])
             if deferred and not checkpoints:
                 raise StateError("finish: deferred UI requires declared human inspection checkpoints; restage with --inspection")
@@ -5116,8 +4616,8 @@ def finish_record(action: str, classification: str | None = None, version: str |
                     raise StateError(f"finish: affected final evidence: {selected}")
         else:
             raise StateError("finish: unknown action")
-    _write_coordination(state, coordination, plan)
-    return path
+    _write_finish_record(repository, record)
+    return finish_record_path(repository)
 
 
 def _check_local_links(paths: list[Path]) -> None:
@@ -5209,11 +4709,9 @@ def _check_docs(root: Path) -> None:
         if f"role_id: {role_id}" not in path.read_text(encoding="utf-8").splitlines():
             raise AssertionError(f"doc lint: {filename} must declare role_id: {role_id}")
     if (root / "assets" / "reviewer.md").exists():
-        raise AssertionError("doc lint: the combined reviewer role file must be removed")
+        raise AssertionError("doc lint: the legacy reviewer role file must be removed")
     if "Mutation testing" not in (root / "assets" / "test-reviewer.md").read_text(encoding="utf-8"):
         raise AssertionError("doc lint: test-reviewer must own mutation testing")
-    if "combined code/test" not in (root / "assets" / "code-reviewer.md").read_text(encoding="utf-8"):
-        raise AssertionError("doc lint: code-reviewer must document the ordinary combined duty")
     table_commands = set(re.findall(r"^\|\s*`([a-z][a-z-]+)", command_text, flags=re.MULTILINE))
     parser = _parser()
     subparsers = next(
@@ -5659,20 +5157,25 @@ def _self_check() -> int:
             assert invoke("--change", "defercase", "finish-record", "inspect", "--check", checkpoint,
                           "--artifact", str(report))[0] == 0
         assert invoke("--change", "defercase", "finish-record", "pr-check")[0] == 0
-        declared = read_fixture(_coordination_path("defercase", ui_repo))
+        declared = _load_finish_record(ui_repo)
         no_checkpoints = json.loads(json.dumps(declared))
-        no_checkpoints["finish"]["required_inspections"] = []
-        write_fixture(_coordination_path("defercase", ui_repo), no_checkpoints)
+        no_checkpoints["required_inspections"] = []
+        _write_finish_record(ui_repo, no_checkpoints)
         expect_refusal("--change", "defercase", "finish-record", "pr-check", contains="declared human inspection")
-        write_fixture(_coordination_path("defercase", ui_repo), declared)
+        _write_finish_record(ui_repo, declared)
         # Repository-declared inspections also apply without a lane deferral.
-        normal_gate = read_fixture(_coordination_path("defercase", ui_repo))
-        saved_gate = json.loads(json.dumps(normal_gate))
-        normal_gate["human_gates"]["ui"]["state"] = "accepted"
-        normal_gate["finish"]["inspection"] = {}
-        write_fixture(_coordination_path("defercase", ui_repo), normal_gate)
+        inspection_state = read_fixture(state_derive("defercase", checkout=ui_repo))
+        normal_coord = _load_coordination(inspection_state, ui_plan)
+        saved_coord = json.loads(json.dumps(normal_coord))
+        normal_finish = _load_finish_record(ui_repo)
+        saved_finish = json.loads(json.dumps(normal_finish))
+        normal_coord["human_gates"]["ui"]["state"] = "accepted"
+        _write_coordination(inspection_state, normal_coord, ui_plan)
+        normal_finish["inspection"] = {}
+        _write_finish_record(ui_repo, normal_finish)
         expect_refusal("--change", "defercase", "finish-record", "pr-check", contains="inspection missing")
-        write_fixture(_coordination_path("defercase", ui_repo), saved_gate)
+        _write_coordination(inspection_state, saved_coord, ui_plan)
+        _write_finish_record(ui_repo, saved_finish)
         separate_reject = ui_repo / ".agents" / "workflow" / "defercase" / "later-mobile.md"
         separate_reject.write_text('inspector: human\ncheckpoint: mobile\nverdict: reject\nprevious verdict: accept\n')
         expect_refusal("--change", "defercase", "finish-record", "inspect", "--check", "mobile",
@@ -5688,10 +5191,9 @@ def _self_check() -> int:
         expect_refusal("--change", "defercase", "finish-record", "inspect", "--check", "mobile",
                        "--artifact", str(report), contains="personally record accept")
         # Even if a stored hash is refreshed externally, re-parse authoritative verdict.
-        inspection_state = read_fixture(state_derive("defercase", checkout=ui_repo))
-        inspection_coord = _load_coordination(inspection_state, ui_plan)
-        inspection_coord["finish"]["inspection"]["mobile"]["sha256"] = _path_sha256(report)
-        _write_coordination(inspection_state, inspection_coord, ui_plan)
+        inspection_finish = _load_finish_record(ui_repo)
+        inspection_finish["inspection"]["mobile"]["sha256"] = _path_sha256(report)
+        _write_finish_record(ui_repo, inspection_finish)
         expect_refusal("--change", "defercase", "finish-record", "pr-check", contains="rejected human inspection")
         report.write_text('inspector: human\ncheckpoint: mobile\nverdict: accept\nverdict: reject\n')
         expect_refusal("--change", "defercase", "finish-record", "inspect", "--check", "mobile",
@@ -5726,48 +5228,6 @@ def _self_check() -> int:
         )
         plan_path.write_text(json.dumps(check_plan), encoding="utf-8")
         validate_plan(plan_path, tasks_path)
-        malformed_mode = json.loads(json.dumps(check_plan))
-        malformed_mode["review_mode"] = "oracle-fast"
-        plan_path.write_text(json.dumps(malformed_mode), encoding="utf-8")
-        try:
-            validate_plan(plan_path, tasks_path)
-        except PlanError as exc:
-            assert str(exc).startswith("shape: review_mode"), str(exc)
-        else:
-            raise AssertionError("an unknown review mode must fail plan validation")
-        malformed_mode_type = json.loads(json.dumps(check_plan))
-        malformed_mode_type["review_mode"] = []
-        plan_path.write_text(json.dumps(malformed_mode_type), encoding="utf-8")
-        try:
-            validate_plan(plan_path, tasks_path)
-        except PlanError as exc:
-            assert str(exc).startswith("shape: review_mode"), str(exc)
-        else:
-            raise AssertionError("a non-string review mode must fail plan validation")
-        ineligible_combined = json.loads(json.dumps(check_plan))
-        ineligible_combined["review_mode"] = "combined-single-lane"
-        ineligible_combined["lanes"]["two"] = dict(ineligible_combined["lanes"]["one"])
-        ineligible_combined["lanes"]["two"]["depends_on"] = []
-        ineligible_combined["tasks"]["2.1"] = {"lane": "two", "deps": []}
-        tasks_path.write_text("- [ ] 1.1 first\n- [ ] 2.1 second\n", encoding="utf-8")
-        plan_path.write_text(json.dumps(ineligible_combined), encoding="utf-8")
-        try:
-            validate_plan(plan_path, tasks_path)
-        except PlanError as exc:
-            assert "exactly one ordinary-risk lane" in str(exc), str(exc)
-        else:
-            raise AssertionError("combined mode with multiple lanes must fail plan validation")
-        ineligible_risk = json.loads(json.dumps(check_plan))
-        ineligible_risk["review_mode"] = "combined-single-lane"
-        ineligible_risk["lanes"]["one"]["risk"] = "high"
-        tasks_path.write_text("- [ ] 1.1 first\n", encoding="utf-8")
-        plan_path.write_text(json.dumps(ineligible_risk), encoding="utf-8")
-        try:
-            validate_plan(plan_path, tasks_path)
-        except PlanError as exc:
-            assert "exactly one ordinary-risk lane" in str(exc), str(exc)
-        else:
-            raise AssertionError("combined mode with a high-risk lane must fail plan validation")
         plan_path.write_text(json.dumps(check_plan), encoding="utf-8")
         tasks_path.write_text("- [ ] 1.1 first\n  - [ ] **Phase:** annotation\n", encoding="utf-8")
         validate_plan(plan_path, tasks_path)
@@ -7234,654 +6694,6 @@ def _self_check() -> int:
             else:
                 raise AssertionError(f"a {case_name} must not satisfy the merge gate")
 
-        # Combined single-lane mode records one independent Oracle pass for code/test and the
-        # whole-change implementation duty. The fast-forward preserves that exact candidate SHA, while
-        # moved bases, candidate HEADs, and changed untracked binding files fail closed.
-        combined_plan = {
-            "schema_version": 1,
-            "change": "combined",
-            "review_mode": "combined-single-lane",
-            "lanes": {
-                "only": {"risk": "ordinary", "ui": False,
-                          "sensitive": False, "depends_on": []},
-            },
-            "tasks": {"1.1": {"lane": "only", "deps": []}},
-        }
-        combined_repository = make_repository(
-            "combined-repository", "combined", combined_plan, "- [ ] 1.1 combined work\n"
-        )
-        os.chdir(combined_repository)
-        combined_base = git(combined_repository, "rev-parse", "HEAD")
-        lane_open("only", "combined")
-        dispatch_run("only", "implementer",  "1.1",
-                     key="combined/only/implementer", change="combined")
-        dispatch_done("only", "implementer", "impl/session-1", 20, "0.1", "ok", "combined")
-        combined_coordination_path = _coordination_path("combined", combined_repository)
-        combined_coordination = read_fixture(combined_coordination_path)
-        assert combined_coordination["lanes"]["only"]["dispatches"][0]["access"] == "write"
-        combined_worktree = Path(combined_coordination["lanes"]["only"]["worktree"])
-        combined_worktree.joinpath("implementation.txt").write_text("combined implementation\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(combined_worktree), "add", "implementation.txt"], check=True)
-        subprocess.run(["git", "-C", str(combined_worktree), "commit", "-q", "-m", "combined code"], check=True)
-        tick_fixture("only", "1.1", "combined")
-        subprocess.run(
-            ["git", "-C", str(combined_worktree), "add", "openspec/changes/combined/tasks.md"], check=True
-        )
-        subprocess.run(["git", "-C", str(combined_worktree), "commit", "-q", "-m", "combined tick"], check=True)
-        combined_head = git(combined_worktree, "rev-parse", "HEAD")
-        dispatch_run(
-            "only", "oracle",  "1.1",
-            key="oracle/author-session", change="combined", access="write",
-        )
-        dispatch_done("only", "oracle", "oracle/author-session", 15, "0.2", "ok", "combined")
-        combined_report = root / "combined-review.md"
-        combined_evidence = root / "combined-evidence.json"
-        combined_acceptance = root / "combined-acceptance.md"
-        combined_report.write_text("code/test/final review\n", encoding="utf-8")
-        combined_evidence.write_text('{"revision":"combined-r1"}\n', encoding="utf-8")
-        combined_acceptance.write_text("classification: pre-release\nversion: 0.2+1\n", encoding="utf-8")
-        self_authored_result, _, self_authored_error = invoke(
-            "lane-review", "only", "code-reviewer", "PASS", "--commit", combined_head,
-            "--report", str(combined_report), "--evidence-revision", "combined-r1",
-            "--evidence", str(combined_evidence), "--combined", "--oracle-provenance", "impl/session-1",
-            "--feature-base", combined_base, "--review-base", combined_base,
-            "--acceptance", str(combined_acceptance), "--change", "combined",
-        )
-        assert self_authored_result == 1 and "authored or non-Oracle work" in self_authored_error, (
-            self_authored_result, self_authored_error
-        )
-        oracle_author_result, _, oracle_author_error = invoke(
-            "lane-review", "only", "code-reviewer", "PASS", "--commit", combined_head,
-            "--report", str(combined_report), "--evidence-revision", "combined-r1",
-            "--evidence", str(combined_evidence), "--combined", "--oracle-provenance", "oracle/author-session",
-            "--feature-base", combined_base, "--review-base", combined_base,
-            "--acceptance", str(combined_acceptance), "--change", "combined",
-        )
-        assert oracle_author_result == 1 and "authoring dispatch" in oracle_author_error, (
-            oracle_author_result, oracle_author_error
-        )
-        missing_oracle_result, _, missing_oracle_error = invoke(
-            "lane-review", "only", "code-reviewer", "PASS", "--commit", combined_head,
-            "--report", str(combined_report), "--evidence-revision", "combined-r1",
-            "--evidence", str(combined_evidence), "--combined", "--oracle-provenance", "oracle/missing",
-            "--feature-base", combined_base, "--review-base", combined_base,
-            "--acceptance", str(combined_acceptance), "--change", "combined",
-        )
-        assert missing_oracle_result == 1 and "exactly one completed Oracle dispatch" in missing_oracle_error, (
-            missing_oracle_result, missing_oracle_error
-        )
-        combined_coordination = read_fixture(combined_coordination_path)
-        combined_coordination["lanes"]["only"]["dispatches"].append({
-            "role": "oracle", "model": "provider/oracle:legacy", "level": "normal", "task": "1.1",
-            "key": "oracle/legacy", "worker_run_id": "oracle/legacy", "result": "ok",
-            "started_at": "2026-09-12T00:00:00Z", "lane_head": combined_head,
-        })
-        combined_state = read_fixture(state_derive("combined", checkout=combined_repository))
-        _write_coordination(combined_state, combined_coordination, combined_plan)
-        legacy_oracle_result, _, legacy_oracle_error = invoke(
-            "lane-review", "only", "code-reviewer", "PASS", "--commit", combined_head,
-            "--report", str(combined_report), "--evidence-revision", "combined-r1",
-            "--evidence", str(combined_evidence), "--combined", "--oracle-provenance", "oracle/legacy",
-            "--feature-base", combined_base, "--review-base", combined_base,
-            "--acceptance", str(combined_acceptance), "--change", "combined",
-        )
-        assert legacy_oracle_result == 1 and "ambiguous legacy Oracle" in legacy_oracle_error, (
-            legacy_oracle_result, legacy_oracle_error
-        )
-        dispatch_run(
-            "only", "oracle",  "1.1",
-            key="oracle/session-1", change="combined", access="read-only",
-            acceptance=combined_acceptance, evidence=combined_evidence,
-        )
-        dispatch_done("only", "oracle", "oracle/author-session", 25, "0.3", "ok", "combined")
-        shared_session_result, _, shared_session_error = invoke(
-            "lane-review", "only", "code-reviewer", "PASS", "--commit", combined_head,
-            "--report", str(combined_report), "--evidence-revision", "combined-r1",
-            "--evidence", str(combined_evidence), "--combined", "--oracle-provenance", "oracle/session-1",
-            "--feature-base", combined_base, "--review-base", combined_base,
-            "--acceptance", str(combined_acceptance), "--change", "combined",
-        )
-        assert shared_session_result == 1 and "shares a worker session" in shared_session_error, (
-            shared_session_result, shared_session_error
-        )
-        dispatch_run(
-            "only", "oracle",  "1.1",
-            key="oracle/session-2", change="combined", access="read-only",
-            acceptance=combined_acceptance, evidence=combined_evidence,
-        )
-        dispatch_done("only", "oracle", "oracle/session-2", 25, "0.3", "ok", "combined")
-        combined_review_arguments = (
-            "lane-review", "only", "code-reviewer", "PASS", "--commit", combined_head,
-            "--report", str(combined_report), "--evidence-revision", "combined-r1",
-            "--evidence", str(combined_evidence), "--combined", "--oracle-provenance", "oracle/session-2",
-            "--feature-base", combined_base, "--review-base", combined_base,
-            "--acceptance", str(combined_acceptance), "--change", "combined",
-        )
-        combined_coordination = read_fixture(combined_coordination_path)
-        combined_state = read_fixture(state_derive("combined", checkout=combined_repository))
-        combined_dispatches = combined_coordination["lanes"]["only"]["dispatches"]
-        session_2_dispatch = next(item for item in combined_dispatches if item.get("key") == "oracle/session-2")
-        implementer_dispatch = next(item for item in combined_dispatches if item.get("key") == "combined/only/implementer")
-        legacy_oracle_dispatch = next(item for item in combined_dispatches if item.get("key") == "oracle/legacy")
-
-        # Provenance is resolved at the reviewed candidate HEAD, not by whichever dispatch
-        # happens to be found first in one read-only session. An old session-A dispatch may
-        # coexist with the current session-B dispatch, while two session-B records remain
-        # ambiguous and must refuse. Author identity is scanned across the full ledger, even
-        # when an authored record is bound to an older candidate HEAD.
-        old_session_dispatch = {
-            "role": "oracle", "model": "provider/oracle:old", "level": "normal", "task": "1.1",
-            "key": "oracle/session-2-old", "access": "read-only", "worker_run_id": "oracle/session-2",
-            "result": "ok", "started_at": "2026-09-12T00:00:00Z", "lane_head": combined_base,
-        }
-        combined_dispatches.append(old_session_dispatch)
-        _write_coordination(combined_state, combined_coordination, combined_plan)
-        old_head_result, _, old_head_error = invoke(*combined_review_arguments)
-        assert old_head_result == 0, old_head_error
-        combined_coordination = read_fixture(combined_coordination_path)
-        combined_state = read_fixture(state_derive("combined", checkout=combined_repository))
-        combined_dispatches = combined_coordination["lanes"]["only"]["dispatches"]
-        session_2_dispatch = next(item for item in combined_dispatches if item.get("key") == "oracle/session-2")
-        implementer_dispatch = next(item for item in combined_dispatches if item.get("key") == "combined/only/implementer")
-        legacy_oracle_dispatch = next(item for item in combined_dispatches if item.get("key") == "oracle/legacy")
-        duplicate_session_dispatch = dict(session_2_dispatch)
-        duplicate_session_dispatch["key"] = "oracle/session-2-duplicate"
-        combined_dispatches.append(duplicate_session_dispatch)
-        _write_coordination(combined_state, combined_coordination, combined_plan)
-        duplicate_head_result, _, duplicate_head_error = invoke(*combined_review_arguments)
-        assert duplicate_head_result == 1 and "exactly one" in duplicate_head_error, duplicate_head_error
-        combined_dispatches.remove(duplicate_session_dispatch)
-        authored_old_head = {
-            "role": "oracle", "model": "provider/oracle:author-old", "level": "normal", "task": "1.1",
-            "key": "oracle/session-2-author-old", "access": "write", "worker_run_id": "oracle/session-2",
-            "result": "ok", "started_at": "2026-09-12T00:00:00Z", "lane_head": combined_base,
-        }
-        combined_dispatches.append(authored_old_head)
-        _write_coordination(combined_state, combined_coordination, combined_plan)
-        old_author_result, _, old_author_error = invoke(*combined_review_arguments)
-        assert old_author_result == 1 and "shares a worker session" in old_author_error, old_author_error
-        combined_dispatches.remove(authored_old_head)
-        _write_coordination(combined_state, combined_coordination, combined_plan)
-
-        # The Oracle receipt snapshots both review documents before launch. Editing either
-        # document, omitting a stored snapshot, or retrying the same key with a new receipt
-        # must refuse without replacing the original snapshot.
-        original_acceptance = combined_acceptance.read_text(encoding="utf-8")
-        original_evidence = combined_evidence.read_text(encoding="utf-8")
-        original_acceptance_sha = session_2_dispatch["acceptance_sha256"]
-        original_evidence_sha = session_2_dispatch["evidence_sha256"]
-        for changed_path, changed_text in (
-            (combined_acceptance, "classification: changed after dispatch\n"),
-            (combined_evidence, '{"revision":"changed-after-dispatch"}\n'),
-        ):
-            before = changed_path.read_text(encoding="utf-8")
-            changed_path.write_text(changed_text, encoding="utf-8")
-            drift_result, _, drift_error = invoke(*combined_review_arguments)
-            assert drift_result == 1 and "since dispatch" in drift_error, drift_error
-            changed_path.write_text(before, encoding="utf-8")
-        missing_snapshot = session_2_dispatch.pop("acceptance_sha256")
-        _write_coordination(combined_state, combined_coordination, combined_plan)
-        missing_snapshot_result, _, missing_snapshot_error = invoke(*combined_review_arguments)
-        assert missing_snapshot_result == 1 and "snapshot" in missing_snapshot_error, missing_snapshot_error
-        session_2_dispatch["acceptance_sha256"] = missing_snapshot
-        _write_coordination(combined_state, combined_coordination, combined_plan)
-        changed_acceptance = combined_acceptance.with_name("combined-acceptance-retry.md")
-        changed_acceptance.write_text("classification: retry receipt\n", encoding="utf-8")
-        try:
-            dispatch_run(
-                "only", "oracle",  "1.1",
-                key="oracle/session-2", change="combined", access="read-only",
-                acceptance=changed_acceptance, evidence=combined_evidence,
-            )
-        except StateError as exc:
-            assert "different intent or receipt" in str(exc), str(exc)
-        else:
-            raise AssertionError("a same-key retry with a changed receipt must be refused")
-        persisted_retry = read_fixture(combined_coordination_path)
-        persisted_retry_dispatch = next(
-            item for item in persisted_retry["lanes"]["only"]["dispatches"]
-            if item.get("key") == "oracle/session-2"
-        )
-        assert persisted_retry_dispatch["acceptance_sha256"] == original_acceptance_sha, persisted_retry_dispatch
-        changed_acceptance.unlink()
-        combined_acceptance.write_text(original_acceptance, encoding="utf-8")
-        combined_evidence.write_text(original_evidence, encoding="utf-8")
-        assert session_2_dispatch["acceptance_sha256"] == original_acceptance_sha
-        assert session_2_dispatch["evidence_sha256"] == original_evidence_sha
-        _write_coordination(combined_state, combined_coordination, combined_plan)
-
-        # Combined provenance must be tied to the exact candidate HEAD, not merely to an old
-        # completed Oracle dispatch that happens to have the requested key or run ID.
-        for dispatch_head in (combined_base, None):
-            session_2_dispatch["lane_head"] = dispatch_head
-            _write_coordination(combined_state, combined_coordination, combined_plan)
-            stale_dispatch, _, stale_dispatch_error = invoke(*combined_review_arguments)
-            assert stale_dispatch == 1 and "lane_head" in stale_dispatch_error, (
-                dispatch_head, stale_dispatch_error
-            )
-        session_2_dispatch["lane_head"] = combined_head
-
-        # Combined provenance accepts only a successfully completed Oracle. Failed, unknown,
-        # and incomplete outcomes must fail at review recording rather than being treated as
-        # merely present.
-        for outcome in ("failed", "unknown", None):
-            session_2_dispatch["result"] = outcome
-            _write_coordination(combined_state, combined_coordination, combined_plan)
-            failed_result, _, failed_error = invoke(*combined_review_arguments)
-            assert failed_result == 1 and "result is not 'ok'" in failed_error, (outcome, failed_error)
-        session_2_dispatch["result"] = "ok"
-
-        # Combined provenance also requires stable identity for the selected reviewer and every
-        # author-capable record. Explicit read-only advice remains compatible without an ID.
-        session_2_dispatch["worker_run_id"] = None
-        _write_coordination(combined_state, combined_coordination, combined_plan)
-        missing_reviewer, _, missing_reviewer_error = invoke(*combined_review_arguments)
-        assert missing_reviewer == 1 and "reviewer dispatch" in missing_reviewer_error, missing_reviewer_error
-        session_2_dispatch["worker_run_id"] = "oracle/session-2"
-
-        implementer_dispatch["worker_run_id"] = None
-        _write_coordination(combined_state, combined_coordination, combined_plan)
-        missing_writer, _, missing_writer_error = invoke(*combined_review_arguments)
-        assert missing_writer == 1 and "author-capable dispatch" in missing_writer_error, missing_writer_error
-        implementer_dispatch["worker_run_id"] = "impl/session-1"
-
-        legacy_implementer_dispatch = {
-            "role": "implementer", "model": "provider/implementer:legacy", "level": "normal", "task": "1.1",
-            "key": "implementer/legacy-missing-id", "result": "ok",
-            "started_at": "2026-09-12T00:00:00Z", "lane_head": combined_head,
-        }
-        combined_dispatches.append(legacy_implementer_dispatch)
-        _write_coordination(combined_state, combined_coordination, combined_plan)
-        missing_legacy_implementer, _, missing_legacy_implementer_error = invoke(*combined_review_arguments)
-        assert missing_legacy_implementer == 1 and "author-capable dispatch" in missing_legacy_implementer_error, (
-            missing_legacy_implementer, missing_legacy_implementer_error
-        )
-        combined_dispatches.remove(legacy_implementer_dispatch)
-
-        legacy_oracle_dispatch["worker_run_id"] = None
-        _write_coordination(combined_state, combined_coordination, combined_plan)
-        missing_legacy_oracle, _, missing_legacy_oracle_error = invoke(*combined_review_arguments)
-        assert missing_legacy_oracle == 1 and "author-capable dispatch" in missing_legacy_oracle_error, (
-            missing_legacy_oracle, missing_legacy_oracle_error
-        )
-        legacy_oracle_dispatch["worker_run_id"] = "oracle/legacy"
-
-        read_only_advice = {
-            "role": "oracle", "model": "provider/oracle:advice", "level": "normal", "task": "1.1",
-            "key": "oracle/advice-without-id", "access": "read-only", "worker_run_id": None,
-            "result": "ok", "started_at": "2026-09-12T00:00:00Z", "lane_head": combined_head,
-        }
-        combined_dispatches.append(read_only_advice)
-        _write_coordination(combined_state, combined_coordination, combined_plan)
-        combined_review_result, _, combined_review_error = invoke(*combined_review_arguments)
-        assert combined_review_result == 0, combined_review_error
-        combined_coordination = read_fixture(combined_coordination_path)
-        combined_records = [
-            item for item in combined_coordination["lanes"]["only"].get("reviews", [])
-            if isinstance(item, dict) and item.get("combined") is True
-        ]
-        assert isinstance(combined_records, list) and len(combined_records) == 1, combined_coordination
-        combined_record = combined_records[0]
-        assert combined_record["duties"] == ["code", "test", "final"], combined_record
-        assert combined_record["binding"]["feature_base"] == combined_base, combined_record
-        assert combined_record["binding"]["lane_base"] == combined_base, combined_record
-        assert combined_record["binding"]["review_base"] == combined_base, combined_record
-        assert combined_record["oracle_provenance"] == "oracle/session-2", combined_record
-
-        # Merge revalidation must apply the same session-independence check to an existing
-        # combined record, not only to a newly recorded review.
-        combined_record["oracle_provenance"] = "oracle/session-1"
-        combined_state = read_fixture(state_derive("combined", checkout=combined_repository))
-        try:
-            _write_coordination(combined_state, combined_coordination, combined_plan)
-            lane_merge("only", "combined")
-        except StateError as exc:
-            assert "shares a worker session" in str(exc), str(exc)
-        else:
-            raise AssertionError("merge revalidation must reject a shared Oracle author session")
-        combined_record["oracle_provenance"] = "oracle/session-2"
-        _write_coordination(combined_state, combined_coordination, combined_plan)
-
-        # The same exact dispatch-HEAD binding is enforced on the normal pre-merge path, not only
-        # when a completed lane is recovered after cleanup.
-        for dispatch_head in (combined_base, None):
-            premerge_coordination = json.loads(json.dumps(combined_coordination))
-            premerge_dispatch = next(
-                item for item in premerge_coordination["lanes"]["only"]["dispatches"]
-                if item.get("key") == "oracle/session-2"
-            )
-            premerge_dispatch["lane_head"] = dispatch_head
-            _write_coordination(combined_state, premerge_coordination, combined_plan)
-            try:
-                lane_merge("only", "combined")
-            except StateError as exc:
-                assert "lane_head" in str(exc), (dispatch_head, str(exc))
-            else:
-                raise AssertionError("a stale or missing dispatch HEAD must block pre-merge validation")
-        _write_coordination(combined_state, combined_coordination, combined_plan)
-
-        # A changed candidate HEAD cannot reuse the combined verdict.
-        subprocess.run(
-            ["git", "-C", str(combined_worktree), "commit", "--allow-empty", "-q", "-m", "combined drift"],
-            check=True,
-        )
-        drifted_head = git(combined_worktree, "rev-parse", "HEAD")
-        try:
-            lane_merge("only", "combined")
-        except StateError as exc:
-            assert "combined review is missing" in str(exc), str(exc)
-        else:
-            raise AssertionError("a combined verdict must not cover a moved candidate HEAD")
-        subprocess.run(["git", "-C", str(combined_worktree), "reset", "--hard", combined_head], check=True)
-        assert git(combined_worktree, "rev-parse", "HEAD") == combined_head
-
-        # A moved feature base invalidates the review before merge, even when the lane candidate
-        # and all supplied files remain unchanged.
-        subprocess.run(
-            ["git", "-C", str(combined_repository), "commit", "--allow-empty", "-q", "-m", "feature drift"],
-            check=True,
-        )
-        try:
-            lane_merge("only", "combined")
-        except StateError as exc:
-            assert "feature base" in str(exc), str(exc)
-        else:
-            raise AssertionError("a moved feature base must invalidate combined review")
-        subprocess.run(["git", "-C", str(combined_repository), "reset", "--hard", combined_base], check=True)
-        lane_merge("only", "combined")
-        assert git(combined_repository, "rev-parse", "HEAD") == combined_head
-        combined_coordination = read_fixture(combined_coordination_path)
-        combined_merge = combined_coordination["lanes"]["only"]["merge"]
-        assert combined_merge["reviewed_head"] == combined_head
-        assert combined_merge["merge_commit"] == combined_head
-        assert combined_merge["branch"] == git(combined_repository, "branch", "--show-current")
-        assert combined_merge["review_mode"] == "combined-single-lane"
-
-        # Completed-lane recovery must re-check both provenance identity and the exact successful
-        # Oracle outcome; a hand-edited coordination record cannot turn missing/failed/unknown
-        # evidence into a valid combined merge.
-        valid_combined_coordination = read_fixture(combined_coordination_path)
-        combined_evidence_copy = root / "combined-evidence-copy.json"
-        combined_evidence_copy.write_text(combined_evidence.read_text(encoding="utf-8"), encoding="utf-8")
-        for case_name, field, value, expected in (
-            ("stale-dispatch-head", "lane_head", combined_base, "lane_head"),
-            ("missing-dispatch-head", "lane_head", None, "lane_head"),
-            ("missing-acceptance-snapshot", "acceptance_sha256", None, "snapshot"),
-            ("changed-acceptance-snapshot", "acceptance_sha256", "0" * 64, "since dispatch"),
-            ("changed-evidence-snapshot", "evidence_sha256", "0" * 64, "since dispatch"),
-            ("swapped-evidence-snapshot-path", "evidence_path", str(combined_evidence_copy), "snapshot"),
-            ("missing-reviewer-id", "worker_run_id", None, "reviewer dispatch"),
-            ("missing-author-id", "worker_run_id", None, "author-capable dispatch"),
-            ("failed-result", "result", "failed", "result is not 'ok'"),
-            ("unknown-result", "result", "unknown", "result is not 'ok'"),
-            ("incomplete-result", "result", None, "result is not 'ok'"),
-        ):
-            case_coordination = json.loads(json.dumps(valid_combined_coordination))
-            case_dispatches = case_coordination["lanes"]["only"]["dispatches"]
-            case_key = "oracle/session-2" if field == "worker_run_id" and case_name == "missing-reviewer-id" else (
-                "combined/only/implementer" if case_name == "missing-author-id" else "oracle/session-2"
-            )
-            case_dispatch = next(item for item in case_dispatches if item.get("key") == case_key)
-            case_dispatch[field] = value
-            _write_coordination(
-                read_fixture(state_derive("combined", checkout=combined_repository)),
-                case_coordination,
-                combined_plan,
-            )
-            try:
-                lane_merge("only", "combined")
-            except StateError as exc:
-                assert expected in str(exc), (case_name, str(exc))
-            else:
-                raise AssertionError(f"{case_name} must block combined merge recovery")
-        _write_coordination(
-            read_fixture(state_derive("combined", checkout=combined_repository)),
-            valid_combined_coordination,
-            combined_plan,
-        )
-        lane_merge("only", "combined")
-
-        # Post-merge recovery requires the exact recorded branch and a clean feature checkout;
-        # equal trees do not make a dirty checkout acceptable.
-        combined_implementation = combined_repository / "implementation.txt"
-        combined_implementation.write_text("unreviewed feature edit\n", encoding="utf-8")
-        try:
-            lane_merge("only", "combined")
-        except StateError as exc:
-            assert "feature checkout is dirty" in str(exc), str(exc)
-        else:
-            raise AssertionError("a dirty completed combined feature checkout must block recovery")
-        subprocess.run(["git", "-C", str(combined_repository), "checkout", "--", "implementation.txt"], check=True)
-
-        # Post-merge recovery validates binding-file hashes rather than trusting matching trees.
-        combined_evidence.write_text('{"revision":"tampered"}\n', encoding="utf-8")
-        try:
-            lane_merge("only", "combined")
-        except StateError as exc:
-            assert "evidence changed" in str(exc), str(exc)
-        else:
-            raise AssertionError("changed combined evidence must block recovery")
-        combined_evidence.write_text('{"revision":"combined-r1"}\n', encoding="utf-8")
-        lane_close("only", "combined")
-        combined_acceptance.write_text("classification: release\nversion: 0.3\n", encoding="utf-8")
-        try:
-            lane_merge("only", "combined")
-        except StateError as exc:
-            assert "acceptance document changed" in str(exc), str(exc)
-        else:
-            raise AssertionError("changed combined acceptance must block post-close recovery")
-        combined_acceptance.write_text("classification: pre-release\nversion: 0.2+1\n", encoding="utf-8")
-        lane_merge("only", "combined")
-        # Release preparation follows the lane merge and can advance the feature branch.
-        (combined_repository / "release.txt").write_text("repository-defined release metadata\n")
-        release_head = commit(combined_repository, "prepare release after lane merge")
-        assert release_head != combined_head
-        lane_merge("only", "combined")
-        release_preparation = workflow_dir(combined_repository) / "combined" / "evidence" / "preparation.md"
-        release_preparation.parent.mkdir(parents=True, exist_ok=True)
-        release_preparation.write_text("Human classification: stable. Metadata and generated artifacts checked.\n")
-        finish_record("classify", classification="stable", artifact=str(release_preparation),
-                      inputs=["release.txt"], change="combined")
-        # Candidate review alone does not establish final release readiness.
-        expect_refusal("finish-record", "pr-check", "--change", "combined", contains="missing final evidence")
-        release_evidence = release_preparation.with_name("release-check.md")
-        release_evidence.write_text("Release checks passed on integrated HEAD.\n")
-        finish_record("capture", check="release-check", artifact=str(release_evidence),
-                      inputs=["release.txt", "implementation.txt"], change="combined")
-        finish_record("pr-check", change="combined")
-        lane_merge("only", "combined")
-        # Removing the merge record must not turn matching ticks and trees into approval.
-        recovered_coordination = read_fixture(combined_coordination_path)
-        recovered_coordination["lanes"]["only"]["merge"] = None
-        _write_coordination(read_fixture(state_derive("combined", checkout=combined_repository)), recovered_coordination, combined_plan)
-        try:
-            lane_merge("only", "combined")
-        except StateError as exc:
-            assert "has no merge record" in str(exc), str(exc)
-        else:
-            raise AssertionError("missing combined merge record must fail recovery")
-
-        # Switching a committed plan through standard mode must remove incompatible combined
-        # review rounds only after persisted lanes are loaded, while retaining ordinary reviews
-        # and the rest of the coordination. Switching back must not resurrect those rounds.
-        recovered_coordination["lanes"]["only"]["reviews"].append({
-            "round": 7,
-            "lane": "only",
-            "role": "code-reviewer",
-            "verdict": "PASS",
-            "reviewed_commit": combined_head,
-            "status": "current",
-        })
-        _write_coordination(
-            read_fixture(state_derive("combined", checkout=combined_repository)),
-            recovered_coordination,
-            combined_plan,
-        )
-        combined_plan_path = (
-            combined_repository / "openspec" / "changes" / "combined" / "plan" / "graph-plan.json"
-        )
-        standard_plan = json.loads(json.dumps(combined_plan))
-        standard_plan["review_mode"] = "standard"
-        combined_plan_path.write_text(json.dumps(standard_plan), encoding="utf-8")
-        commit(combined_repository, "switch combined plan to standard mode")
-        standard_state = read_fixture(state_derive("combined", checkout=combined_repository))
-        standard_coordination, standard_runtime = _coordination_lane_for(
-            standard_state, standard_plan, "only"
-        )
-        standard_reviews = standard_runtime["reviews"]
-        assert any(item.get("round") == 7 for item in standard_reviews), standard_reviews
-        assert not any(item.get("combined") is True for item in standard_reviews), standard_reviews
-        assert standard_runtime["dispatches"], "mode switch must retain dispatch state"
-        _write_coordination(standard_state, standard_coordination, standard_plan)
-        persisted_standard = read_fixture(_coordination_path("combined", combined_repository))
-        assert not any(
-            item.get("combined") is True for item in persisted_standard["lanes"]["only"]["reviews"]
-        ), persisted_standard
-
-        combined_plan_path.write_text(json.dumps(combined_plan), encoding="utf-8")
-        commit(combined_repository, "switch standard plan back to combined mode")
-        combined_again_state = read_fixture(state_derive("combined", checkout=combined_repository))
-        combined_again_coordination, combined_again_runtime = _coordination_lane_for(
-            combined_again_state, combined_plan, "only"
-        )
-        combined_again_reviews = combined_again_runtime["reviews"]
-        assert any(item.get("round") == 7 for item in combined_again_reviews), combined_again_reviews
-        assert not any(item.get("combined") is True for item in combined_again_reviews), combined_again_reviews
-
-        # Combined recovery keeps plan-driven UI/screen evidence and a one-use grant auditable.
-        screen_plan = {
-            "schema_version": 1,
-            "change": "combined-screen",
-            "review_mode": "combined-single-lane",
-            "lanes": {
-                "only": {"risk": "ordinary", "ui": True,
-                          "sensitive": True, "depends_on": []},
-            },
-            "tasks": {"1.1": {"lane": "only", "deps": []}},
-        }
-        screen_repository = make_repository(
-            "combined-screen-repository", "combined-screen", screen_plan, "- [ ] 1.1 screen work\n"
-        )
-        os.chdir(screen_repository)
-        screen_base = git(screen_repository, "rev-parse", "HEAD")
-        lane_open("only", "combined-screen")
-        dispatch_run("only", "implementer",  "1.1", change="combined-screen")
-        dispatch_done("only", "implementer", "screen/implementer", 20, "0.1", "ok", "combined-screen")
-        screen_coordination_path = _coordination_path("combined-screen", screen_repository)
-        screen_coordination = read_fixture(screen_coordination_path)
-        screen_worktree = Path(screen_coordination["lanes"]["only"]["worktree"])
-        screen_worktree.joinpath("implementation.txt").write_text("screen implementation\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(screen_worktree), "add", "implementation.txt"], check=True)
-        subprocess.run(["git", "-C", str(screen_worktree), "commit", "-q", "-m", "screen code"], check=True)
-        tick_fixture("only", "1.1", "combined-screen")
-        subprocess.run(
-            ["git", "-C", str(screen_worktree), "add", "openspec/changes/combined-screen/tasks.md"], check=True
-        )
-        subprocess.run(["git", "-C", str(screen_worktree), "commit", "-q", "-m", "screen tick"], check=True)
-        screen_head = git(screen_worktree, "rev-parse", "HEAD")
-        screen_report = root / "combined-screen-review.md"
-        screen_evidence = root / "combined-screen-final-evidence.json"
-        screen_acceptance = root / "combined-screen-acceptance.md"
-        screen_ui_report = root / "combined-screen-ui-review.md"
-        screen_ui_evidence = root / "combined-screen-ui-evidence.png"
-        screen_gate_evidence = root / "combined-screen-gate-evidence.json"
-        screen_standin_report = root / "combined-screen-stand-in.md"
-        screen_checklist = root / "combined-screen-checklist.md"
-        screen_report.write_text("combined screen code/test/final review\n", encoding="utf-8")
-        screen_evidence.write_text('{"revision":"screen-r1"}\n', encoding="utf-8")
-        screen_acceptance.write_text("classification: pre-release\nversion: 0.2+1\n", encoding="utf-8")
-        dispatch_run(
-            "only", "oracle",  "1.1",
-            key="screen/oracle", change="combined-screen", access="read-only",
-            acceptance=screen_acceptance, evidence=screen_evidence,
-        )
-        dispatch_done("only", "oracle", "screen/oracle", 25, "0.3", "ok", "combined-screen")
-        screen_ui_report.write_text("UI review\n", encoding="utf-8")
-        screen_ui_evidence.write_text("screen evidence\n", encoding="utf-8")
-        screen_gate_evidence.write_text('{"revision":"screen-r1"}\n', encoding="utf-8")
-        screen_standin_report.write_text("Oracle stand-in acceptance review\n", encoding="utf-8")
-        screen_checklist.write_text("- acceptance checklist complete\n", encoding="utf-8")
-        lane_review(
-            "only", "code-reviewer", "PASS", screen_head, screen_report, "screen-r1", screen_evidence,
-            change="combined-screen", combined=True, oracle_provenance="screen/oracle",
-            feature_base=screen_base, review_base=screen_base, acceptance=screen_acceptance,
-        )
-        lane_review(
-            "only", "ui-reviewer", "PASS", screen_head, screen_ui_report, "screen-r1", screen_ui_evidence,
-            change="combined-screen",
-        )
-        screen_plan_sha = hashlib.sha256(
-            _committed_file(
-                screen_repository, git(screen_repository, "rev-parse", "HEAD"),
-                "openspec/changes/combined-screen/plan/graph-plan.json",
-            ).encode("utf-8")
-        ).hexdigest()
-        screen_grant = {
-            "id": "screen-grant",
-            "granted_by": "human",
-            "granted_at": "2026-09-12T00:00:00Z",
-            "scope": ["only"],
-            "plan_sha256": screen_plan_sha,
-        }
-        screen_grant_file = root / "combined-screen-grant.json"
-        screen_grant_file.write_text(json.dumps(screen_grant), encoding="utf-8")
-        human_gate(
-            "only", "approved", screen_head, "screen-r1", screen_gate_evidence,
-            "combined-screen", "oracle", screen_grant, {"verdict": "PASS", "report": screen_standin_report},
-            screen_checklist,
-        )
-        lane_merge("only", "combined-screen")
-        screen_coordination = read_fixture(screen_coordination_path)
-        assert screen_coordination["authorizations"]["screen-grant"]["status"] == "consumed", screen_coordination
-        lane_close("only", "combined-screen")
-        screen_state = read_fixture(state_derive("combined-screen", checkout=screen_repository))
-
-        screen_ui_evidence.unlink()
-        try:
-            lane_merge("only", "combined-screen")
-        except StateError as exc:
-            assert "evidence" in str(exc) and "missing" in str(exc), str(exc)
-        else:
-            raise AssertionError("missing completed screen evidence must block combined recovery")
-        screen_ui_evidence.write_text("screen evidence\n", encoding="utf-8")
-        lane_merge("only", "combined-screen")
-        valid_screen_coordination = read_fixture(screen_coordination_path)
-        for case_name, mutate, expected in (
-            (
-                "revoked-grant",
-                lambda value: value["authorizations"]["screen-grant"].__setitem__("status", "revoked"),
-                "not active",
-            ),
-            (
-                "foreign-consumer",
-                lambda value: value["authorizations"]["screen-grant"].update(
-                    {"status": "consumed", "consumed_by": "other-lane"}
-                ),
-                "not active",
-            ),
-            (
-                "missing-grant",
-                lambda value: value["authorizations"].pop("screen-grant"),
-                "is missing from coordination data",
-            ),
-            (
-                "tampered-stand-in",
-                lambda value: screen_standin_report.write_text("tampered\n", encoding="utf-8"),
-                "stand-in report for 'only' changed",
-            ),
-        ):
-            case_coordination = json.loads(json.dumps(valid_screen_coordination))
-            mutate(case_coordination)
-            _write_coordination(screen_state, case_coordination, screen_plan)
-            try:
-                lane_merge("only", "combined-screen")
-            except StateError as exc:
-                assert expected in str(exc), (case_name, str(exc))
-            else:
-                raise AssertionError(f"{case_name} must block consumed-grant recovery")
-            if case_name == "tampered-stand-in":
-                screen_standin_report.write_text("Oracle stand-in acceptance review\n", encoding="utf-8")
-            _write_coordination(screen_state, valid_screen_coordination, screen_plan)
         os.chdir(root)
 
         # Planning reviews use their own scoped ledgers and source bindings.
@@ -8053,14 +6865,6 @@ def _parser() -> argparse.ArgumentParser:
         "--access", choices=("read-only", "write"),
         help="dispatch access; implementers default to write, reviewers and Oracle advice to read-only",
     )
-    send.add_argument(
-        "--acceptance", metavar="<path>",
-        help="combined-review acceptance document to snapshot at Oracle dispatch",
-    )
-    send.add_argument(
-        "--evidence", metavar="<path>",
-        help="combined-review evidence document to snapshot at Oracle dispatch",
-    )
     _add_change_option(send)
 
     sent = commands.add_parser("dispatch-done", help="record a temporary worker outcome")
@@ -8090,23 +6894,6 @@ def _parser() -> argparse.ArgumentParser:
     reviewed.add_argument("--report", required=True, metavar="<path>")
     reviewed.add_argument("--evidence-revision", metavar="<rev>")
     reviewed.add_argument("--evidence", metavar="<path>")
-    reviewed.add_argument(
-        "--combined", "--combined-final", dest="combined", action="store_true",
-        help="record the eligible single-lane Oracle implementation review",
-    )
-    reviewed.add_argument(
-        "--oracle-provenance", "--reviewer", "--oracle", dest="oracle_provenance", metavar="<id>",
-        help="Oracle reviewer/session provenance (required with --combined)",
-    )
-    reviewed.add_argument("--feature-base", metavar="<sha>", help="unchanged feature-branch base (combined mode)")
-    reviewed.add_argument(
-        "--review-base", "--reviewed-base", dest="review_base", metavar="<sha>",
-        help="whole-change review base (combined mode)",
-    )
-    reviewed.add_argument(
-        "--acceptance", "--acceptance-path", dest="acceptance", metavar="<path>",
-        help="candidate acceptance document (combined mode)",
-    )
     _add_change_option(reviewed)
 
     gate = commands.add_parser(
@@ -8264,11 +7051,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "dispatch":
             path = dispatch_run(
                 args.lane, args.role,  args.task, args.key, selected_change,
-                args.access, args.acceptance, args.evidence, args.worktree,
+                args.access, None, None, args.worktree,
             )
-            change = selected_change or _infer_change(Path.cwd())
-            node = _read_state(path)["changes"][change]
-            rows = node.get("finish_dispatches", []) if args.scope == "finish" else node["lanes"][args.lane]["dispatches"]
+            if args.scope == "finish":
+                rows = _load_finish_record(_workflow_checkout(Path.cwd())).get("dispatches", [])
+            else:
+                change = selected_change or _infer_change(Path.cwd())
+                node = _read_state(path)["changes"][change]
+                rows = node["lanes"][args.lane]["dispatches"]
             key = args.key or rows[-1]["key"]
             print(f"dispatch: recorded {args.lane or 'finish'}/{args.role} key={key} ({path})")
             return 0
@@ -8290,7 +7080,6 @@ def main(argv: list[str] | None = None) -> int:
             path = lane_review(
                 args.lane, args.role, args.verdict, args.commit, args.report,
                 args.evidence_revision, args.evidence, selected_change,
-                args.combined, args.oracle_provenance, args.feature_base, args.review_base, args.acceptance,
             )
             print(f"lane-review: recorded {args.lane}/{args.role}={args.verdict} ({path})")
             return 0

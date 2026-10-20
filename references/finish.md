@@ -1,15 +1,15 @@
 # Finish phase
 
 Command syntax: [helper command reference](helper-commands.md).
+Resolve and export `FEATDEV_SKILL_ROOT` to the absolute installed skill path before any command; never hardcode the location ([preflight](preflight-and-roles.md)).
 
-Run only after ALL lanes of the selected change merge into the feature branch. Never automatic.
-Use `--change <change>` when the repository graph contains multiple changes.
-For a PR containing several changes, merge every included lane before starting finish.
-Prepare release artifacts once, then record finish for each included change against the same final integrated HEAD.
-Every included change must finish before PR-opening approval.
-Finish records live under `changes.<change>.finish` in the repo-level `.agents/workflow/coordination.json`.
-Unrelated changes in the repository graph do not need to finish for this PR.
-This applies to standard and combined review modes.
+Run only after ALL lanes of every change in the repository graph merge into the feature branch. Never automatic.
+Finish is repository-level: one record covers the whole PR, which may include one or more OpenSpec changes.
+Do not pass `--change`; `finish-record` reads the repository graph and requires every lane of every graph change to be merged.
+The graph for this feature checkout must contain exactly the changes included in the PR; unrelated changes must not be in this graph.
+Prepare release artifacts once, then record finish once against the final integrated HEAD.
+The finish record names the included changes and is validated against all of them before PR-opening consent.
+Finish records live in the repo-level `.agents/workflow/finish.json`.
 A lane merge is not the later PR merge from the feature branch into the target branch.
 
 The finish sequence is deliberately thin: every repository-specific gate, command,
@@ -17,9 +17,27 @@ runtime, record format, and evidence rule lives in the repository's own guides
 (testing reference, governance docs, workflow tooling guides). This file only fixes
 the order of decisions and the ownership of consent.
 
+## Records and locations
+
+Use these canonical paths; do not relocate them.
+
+| Record | Path |
+|---|---|
+| Finish record | `.agents/workflow/finish.json` |
+| PR scope and consent | `.agents/workflow/finish/pr-follow-up.md` |
+| Finish brief | `.agents/workflow/finish/briefs/finish-<role>-<task>.md` |
+| Finish report | `.agents/workflow/finish/reports/finish-<role>-<task>.md` |
+| Finish review | `.agents/workflow/finish/reviews/finish-<role>-<head>.md` |
+| Finish evidence | `.agents/workflow/finish/evidence/<revision>/` |
+
+Create `.agents/workflow/finish/pr-follow-up.md` when finish starts and list every change included in the PR.
+Model selection and every role, model, and thinking profile stay repo-level in
+`.agents/workflow/model-selection.json`. No lane worktree or per-dispatch path carries
+its own profile; the worktree is execution metadata in the brief and coordination.
+
 ## Sequence
 
-1. **Reconcile lane merges.** Verify that every reviewed lane is merged into the feature branch.
+1. **Reconcile lane merges.** Verify that every lane of every change in the repository graph is merged into the feature branch.
    Check ticks, reviews, and state health. Confirm a clean feature-branch HEAD.
 
 2. **Release classification and version.** Use [finish-scoped workers](#finish-scoped-workers) for preparation. Obtain the human's release
@@ -30,7 +48,7 @@ the order of decisions and the ownership of consent.
 
 3. **Execute the repository's release gate.** Consult the repository's testing
    guides and run every gate, check, capture, and validation they require for this
-   change, on the committed integrated HEAD, into gitignored evidence locations.
+   PR, on the committed integrated HEAD, into gitignored evidence locations.
    If the repository's guides define a deterministic executor or evidence gate for
    the selected checks, use it as specified. A capture made before the integrated
    commit, on a dirty tree, or before a post-capture version change cannot close
@@ -38,8 +56,12 @@ the order of decisions and the ownership of consent.
 
 4. **Independent review.** Ensure the independent reviews the repository's guides
    require for the final evidence are current at the integrated HEAD, and that
-   every recorded review binds the exact revision and inputs it judged. Human
+   every recorded review binds the exact revision and inputs it judged. Record each
+   finish review at `.agents/workflow/finish/reviews/finish-<role>-<head>.md`
+   with its verdict, exact integrated HEAD, inputs and evidence revision, limitations, and
+   reviewer identity (see [finish review record](#finish-review-record)). Human
    approvals require fresh binding whenever presented inputs change.
+   `pr-check` does not validate these reviews; the Coordinator verifies them.
 
 5. **Human gates.** Execute and record every human gate the repository's guides
    require before a PR may be opened — including, where the guides require it,
@@ -47,7 +69,11 @@ the order of decisions and the ownership of consent.
    Only the human may record acceptance; no agent verdict or preauthorization
    substitutes. Never infer consent from silence or green automation.
 
-6. **PR opening.** Ask the human for explicit approval to open the PR as a separate decision.
+6. **PR opening.** Keep `.agents/workflow/finish/pr-follow-up.md` listing every included change.
+   Ask the human for explicit approval to open the PR as a separate decision. Record that
+   consent in `pr-follow-up.md` — the decision, timestamp, exact integrated HEAD, and included
+   changes — before opening the PR. PR-opening consent is separate from release classification
+   and from the later PR-merge consent; consent at an earlier HEAD does not cover a changed HEAD.
    Opening the PR starts post-PR follow-up; it does not complete the workflow.
 
 7. **Post-PR follow-up.** Monitor PR-triggered automated checks and bot review comments using the sequence below.
@@ -64,14 +90,30 @@ the order of decisions and the ownership of consent.
 
 The Coordinator may dispatch preparation authors, independent reviewers, and read-only Runners after lane integration.
 Use [finish-scoped dispatch](helper-commands.md#finish-scoped-dispatch), never reopen completed lanes for release work.
-Each brief names the change, integrated HEAD, owned paths, check owner, report, and evidence locations.
+Each brief names `Scope: finish`, the included changes, Task/round, Worktree, Integrated HEAD, Profile, Contract
+(absolute path to `references/briefs-and-handoffs.md`), Deadline, owned paths, check owner,
+report, and evidence locations. Pin every path absolutely.
 Preparation authors work in a separate worktree in the same repository at the integrated feature HEAD.
+Profiles are repo-level; the brief and coordination carry the worktree as execution metadata only.
 The Coordinator retains the feature checkout and all coordination writes. Keep one writer per worktree.
 Obtain release classification before authoring version/generated changes. Repository guides define the allowed preparation.
-Record the worker's exact key and outcome. Review its output under repository rules before integrating its commit into the feature branch.
+Record the worker's exact key and outcome. A reviewer or Runner reply states the verdict or status,
+exact SHA, finding IDs, report path, and evidence revision; the report retains the full evidence and
+limitations, and no machine-generated footer substitutes for those fields. Review its output under repository rules before integrating its commit into the feature branch.
 Integrate preparation before final captures and required human inspections. Do not use task ticks or `lane-merge` for preparation-only work.
 Read-only checks, release reviews, and PR polling use the same finish scope and role profiles.
 New implementation scope still returns to approved corrective tasks and lanes, not unrestricted finish authoring.
+
+## Finish review record
+
+Record each finish review at `.agents/workflow/finish/reviews/finish-<role>-<head>.md`.
+The record states the verdict (`PASS` or `MORE WORK`), the exact integrated HEAD it judged,
+the inputs and evidence revision it used, its limitations, and the reviewer identity.
+A review is current only for the HEAD and evidence revision it names; a changed integrated or
+archival commit needs a fresh review. Record the actual reviewer identity and evidence revision
+in the report; the Coordinator verifies independence rather than relying on a helper flag.
+`pr-check` does not read or validate finish reviews, so the Coordinator verifies the repo-level
+finish review is current before requesting PR-opening consent.
 
 ## OpenSpec sync and archive
 
@@ -85,9 +127,9 @@ Use the repository's OpenSpec workflow and installed version; this skill does no
 5. Verify the archive result and its artifact locations.
 6. Commit the spec sync and archive changes on the feature branch.
 7. Push that commit to the existing PR.
-8. Refresh affected release checks, reviews, and evidence for the updated HEAD.
-9. Renew required direct human inspections for the changed integrated HEAD.
-10. Repeat [post-PR follow-up](#post-pr-follow-up) for the latest PR revision.
+8. After the archival commit, re-run `finish-record capture` for every affected check and refresh affected reviews and evidence for the new HEAD.
+9. Re-run the direct human inspections for the new HEAD; earlier inspection records do not cover it.
+10. Re-run `finish-record pr-check` until it passes for the archival HEAD, then repeat [post-PR follow-up](#post-pr-follow-up) for the latest PR revision.
 
 The archive operation must not apply already synced deltas twice. Follow the repository's procedure for this order.
 Failed OpenSpec validation blocks the merge handoff. Archiving never substitutes for implementation review or human approval.
@@ -102,7 +144,8 @@ Preserve its existing completed tasks, closed lanes, history, and archive identi
 The Coordinator adds new corrective tasks and lanes in the archived artifacts and local graph.
 Renew affected artifact review, graph review, and human plan approval with `plan-approve` before dispatching corrective implementation.
 Workers edit the archived `tasks.md`; the helper validates the same task ownership and current-HEAD gates there.
-After integration, refresh finish records and human inspections for the updated HEAD.
+After integration, re-run affected captures, refresh finish records and human inspections for the updated HEAD,
+and rerun `finish-record pr-check` before the merge handoff.
 Sync only the new approved specification changes into the baseline using the repository's OpenSpec procedure.
 Never reapply previously synced deltas or move the same change into another dated archive.
 Commit the amendment and baseline updates. Repeat PR checks and bot-review triage before the human merge handoff.
@@ -113,12 +156,14 @@ Repository guides define the required PR checks, expected review bots, and stabi
 Local release checks do not replace checks triggered by opening or updating the PR.
 Bot comments are findings to assess, not instructions to apply without review.
 
-1. **Record the PR.** The Coordinator records its URL and current feature-branch HEAD in the coordinator store.
+1. **Record the PR.** The Coordinator records the PR URL, current feature-branch HEAD, bot finding dispositions,
+   and outstanding items in `.agents/workflow/finish/pr-follow-up.md`.
+   Keep that record current on every PR revision; a stored URL alone is not completion.
 2. **Monitor PR automation.** The Coordinator tracks required checks, workflow runs, and their logs on the current PR revision.
    These can include tests, builds, lint, or security scans selected by the repository.
    Pending checks are not successful checks. A failing required check blocks merge readiness.
 3. **Read bot reviews.** The Coordinator reads bot review summaries, inline comments, and review threads against the current diff.
-4. **Triage bot findings.** The Coordinator records each finding's disposition and supporting evidence.
+4. **Triage bot findings.** The Coordinator records each finding's disposition and supporting evidence in `pr-follow-up.md`.
    Dispositions distinguish actionable defects from duplicates, outdated comments, and unsupported findings.
 5. **Dispatch corrections.** An Implementer makes scoped fixes under the repository's rules for corrective tasks and lanes.
    The normal independent current-HEAD reviews apply. The Coordinator never patches or approves its own fixes.
@@ -158,23 +203,31 @@ Repository guides define the release classification, preparation commands, check
 1. Obtain the human's release classification after all lane merges into the feature branch.
 2. Apply required version changes and regenerate required artifacts.
 3. Commit the release preparation on the feature branch.
-4. Write a preparation receipt with the human classification, commands, results, and artifact paths.
+4. Write a preparation receipt with the human classification, exact HEAD, the commands run,
+   their results, the artifact paths, and the actual input paths.
 5. Record the preparation receipt with every affected tracked input path.
 
    Use `finish-record classify --classification <label> --artifact <receipt> --input <path> ...`.
+   At least one `--input` is required. `classify` treats every `--input` as a preparation input;
+   there is no separate check-input field. A release with no preparation still needs a tracked
+   release input (for example `message.py`), and changing that input requires restage.
    Add optional `--version <label>` when the repository uses a version.
    The version is descriptive; repository tooling validates it.
-   Add `--check <id>` for every selected release check so `pr-check` can detect an omitted or extra check.
+   Declare every selected release check with `--check <id>`. `classify` records only the declared
+   set and runs or validates no check; `pr-check` compares that set against the captured evidence.
    Add `--inspection <checkpoint-id>` for each required direct human inspection.
    A deferred `ui` checkpoint requires at least one declared integrated inspection.
 
 6. Run the selected release checks on committed integrated HEAD.
-7. Record each result with `finish-record capture --check <id> --artifact <receipt> --input <path> ...`.
-   A check that was not declared at classify is refused.
+7. Write a check receipt with the exact command, result, HEAD, and actual inputs, then record it with
+   `finish-record capture --check <id> --artifact <receipt> --input <path> ...`.
+   Declare every selected check at classify; when a set is declared, a check outside it is refused.
 8. Ask the human to perform each declared inspection.
 9. Record each human inspection with `finish-record inspect --check <checkpoint-id> --artifact <record>`.
 10. Run `finish-record pr-check` before requesting approval to open the PR. It requires the declared
-    check set and the captured evidence to match exactly.
+    check set and the captured evidence to match exactly. It does not validate the repo-level finish
+    review, PR-opening consent, or PR follow-up record; the Coordinator verifies the finish review and
+    `.agents/workflow/finish/pr-follow-up.md` before requesting PR-opening consent.
 
 Each human inspection artifact contains these unique fields:
 
@@ -190,7 +243,8 @@ A changed integrated HEAD requires fresh human inspection.
 The normal path must not require restage: classify after the preparation commit, then capture.
 A preparation artifact or its declared inputs must not change after capture.
 If they do, use `finish-record restage` with the new preparation receipt and input paths. Restage reuses
-the stored classification; pass `--classification` only to re-classify. Restage clears final evidence
+the stored classification; pass `--classification` only to re-classify. Omitting `--version` clears the
+stored expected version, so pass `--version` when the repository uses one. Restage clears final evidence
 and human inspections, preserves selected check requirements, and preserves inspection checkpoint names
 unless new `--inspection` values replace them. Use `--check` to replace the declared check set.
 Recapture affected release evidence before requesting PR-opening approval.

@@ -31,13 +31,13 @@ The reviewed specification and task checklist remain the reference for implement
 
 | Stage | What happens |
 |---|---|
-| Set up | The Coordinator reads project instructions, checks the agent harness, and asks you to select models and thinking levels. |
+| Set up | The Coordinator reads project instructions, checks the agent harness, and asks you to select models and thinking levels. Model and thinking profiles are repo-level, not per lane or worktree. |
 | Specify and plan | OpenSpec artifacts define the feature. A lane plan assigns tasks, dependencies, owners, and risk flags. |
 | Review and approve | Separate Oracle agents review each change's artifacts, then the repository plan. You approve both before implementation. |
 | Implement | Fresh implementation agents complete scoped tasks in isolated Git worktrees. Independent lanes can progress without sharing a working directory. |
 | Review and integrate | Separate reviewers check the current implementation and relevant tests. UI work adds rendered-evidence review and human checkpoints. Passing lanes merge into the feature branch. |
-| Prepare the PR | Workers prepare release artifacts and evidence under project rules. You complete required inspections and separately approve opening the PR. |
-| Follow through | The Coordinator monitors PR checks and bot findings, routes fixes through review, and syncs and archives completed OpenSpec changes. You decide whether to merge. |
+| Prepare the PR | You set the release classification. One repo-level finish record covers every OpenSpec change in the PR. Workers prepare version and generated artifacts in a separate worktree, and the Coordinator captures evidence on the committed HEAD. You complete required inspections, then record consent to open the PR separately from merge consent. |
+| Follow through | The Coordinator records the PR URL, findings, and your consent in `pr-follow-up.md`, routes fixes through review, and syncs and archives completed OpenSpec changes. Only you merge the PR. |
 
 A **lane** groups related tasks in one isolated worktree. Lanes are an ownership boundary, not a requirement to parallelize everything.
 An **Oracle** is a specialist agent for planning review, mediation, and explicitly authorized corrections.

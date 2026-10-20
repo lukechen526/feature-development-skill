@@ -2,6 +2,7 @@
 
 Follow the approved [plan](plan.md). Implement assigned tasks, review the current lane HEAD, resolve findings, then integrate and close.
 Use [helper-commands.md](helper-commands.md) for command syntax. This document defines workflow order, ownership, and gates.
+Resolve and export `FEATDEV_SKILL_ROOT` to the absolute installed skill path before any command; never hardcode the location ([preflight](preflight-and-roles.md)).
 
 ## Records and progress
 
@@ -10,6 +11,8 @@ Use [helper-commands.md](helper-commands.md) for command syntax. This document d
 - Both objects group `changes → lanes → tasks`. Lane and task IDs are local to a change.
 - Each change's `plan-reviews.json` records Oracle review of its OpenSpec artifacts.
 - Repo-level `plan-graph-review.json` records the separate graph review, after all included artifact passes.
+- `.agents/workflow/model-selection.json` and its model/thinking/role profiles are repo-level only. No lane worktree or per-dispatch path is stored in a profile; the worktree is execution metadata in the brief and coordination.
+- `.agents/workflow/plan-approval.json` records the human plan approval. Status reports it as `current`, `stale`, or `missing`; the helper does not enforce it at lane-open or lane-merge. The Coordinator verifies current approval for the approved plan before opening a lane and before merge.
 - Briefs, reports, and evidence use the locations in [briefs-and-handoffs.md](briefs-and-handoffs.md#set-locations-no-ad-hoc-paths).
 
 One Coordinator writes the shared coordination file across all changes. The Coordinator authors the local graph.
@@ -25,7 +28,8 @@ The Coordinator records every subagent update before proceeding:
 5. Read status and report the current result or blocker.
 
 Sync reads lane-ref ticks for in-flight progress and feature-branch ticks for integrated completion.
-Only feature-branch ticks satisfy cross-lane prerequisites. Same-lane prerequisites use the lane's committed ticks.
+Readiness and status compute eligibility from feature-branch ticks, for same-lane and cross-lane dependencies alike. A same-lane task ticked only in the lane worktree remains displayed blocked until that tick is integrated; implementation may continue while the display catches up.
+Only feature-branch ticks satisfy cross-lane prerequisites.
 A completed task is never redispatched as pending merely because its tick is not yet merged.
 Use task-status for a blocker that sync cannot infer. It does not replace committed completion.
 Status and dashboards are derived per-change views, not approval records. Chat history is never the source of progress or consent.
@@ -33,18 +37,20 @@ Status and dashboards are derived per-change views, not approval records. Chat h
 ## Worktrees and readiness
 
 Open the lane with [lane-open](helper-commands.md#lane-open) before its first implementation dispatch.
+Before opening, the Coordinator verifies `.agents/workflow/plan-approval.json` is current for the approved plan; lane-open itself does not check it.
 The default worktree is `~/.agents/worktrees/<repo>/<branch>/<change>/<lane>/`, with ref `featdev/<change>-<lane>`.
 `<repo>` is the URL-escaped resolved full feature-checkout path, not its folder name.
 For example, `/clients/alice/app` becomes `%2Fclients%2Falice%2Fapp`, including the escaped leading separator.
 The escaped path must fit the filesystem limit for one directory name.
-`FEATDEV_LANE_WORKTREE_ROOT` permits an absolute Coordinator-controlled root override.
+`FEATDEV_LANE_WORKTREE_ROOT` overrides that root and must be an absolute path. The helper resolves a relative value against the current directory, which can silently place new lanes elsewhere; set an absolute path or leave it unset.
 A recorded worktree remains authoritative for that lane's lifetime, including recovery and cleanup.
 Optional environment-specific worktree registration is best-effort; the workflow does not depend on it.
 
 Allow one writer per lane worktree. Parallel lanes must have disjoint writes or explicit sequencing.
+`dispatch` refuses an open same-role intent without a new `--key`, but a new key bypasses that guard. A new key is not authorization for a second writer: the Coordinator completes or transfers the current writer's dispatch before starting another writer in that worktree.
 Implementation, corrections, checks, task edits, and commits run in the named lane worktree, never the feature checkout.
 The feature checkout receives implementation through lane integration only.
-Every brief names the OpenSpec change, lane, task or review round, absolute worktree, base, and HEAD.
+Every brief names Change, Lane (or `Scope: finish`), Task or round, Worktree (absolute), Base, HEAD, Profile, Contract (absolute path to [briefs-and-handoffs.md](briefs-and-handoffs.md)), and Deadline.
 
 For wrong-tree work:
 
@@ -56,7 +62,7 @@ For wrong-tree work:
 ## Implementation
 
 Use the [implementation brief](briefs-and-handoffs.md#implementation). The Coordinator never patches implementation or approves its own work.
-The selected role profile controls the actual harness model and thinking settings. Helper dispatch records need only role, task, and execution metadata.
+`model-selection.json` and its model/thinking/role profiles stay repo-level. The selected profile controls the actual harness model and thinking settings; the helper records role, task, and execution metadata.
 
 ### One fresh Implementer per task
 
@@ -75,6 +81,7 @@ Corrections may continue the same task's session only when its brief and ownersh
 Task edits change checkbox state only. Never alter task IDs, wording, notes, nested bullets, or another lane/change's tasks.
 The Coordinator verifies the result, closes that exact dispatch, and runs sync before dispatching the next task.
 A new task, correction dispatch, or replacement session needs a new key. Only a retry of the same recorded intent retains its key.
+A new key bypasses the open same-role guard but is not authorization for a second writer; complete or transfer the open dispatch first.
 
 ### Deadlines and recovery
 
@@ -98,12 +105,13 @@ This is a procedural check, not an approval or a generated review package.
 | Ordinary risk | `code-reviewer` covers implementation, task completeness, and test adequacy |
 | High risk | `code-reviewer` covers implementation and task completeness; separate `test-reviewer` covers test adequacy |
 | `ui: true` | Add `ui-reviewer` inspection of supplied rendered evidence; the UI `PASS` and human gate each require current evidence |
-| Eligible `combined-single-lane` | Independent Oracle covers code, tests, and whole-change implementation coherence; the UI review and human gate still apply |
 
 Use the [review brief](briefs-and-handoffs.md#review). Reviewers read approved sources, the lane diff, and relevant dependencies directly.
 Every assigned acceptance criterion and completed task needs review coverage.
 Reviewers stay read-only. They report findings to the Coordinator; the Implementer or explicitly authorized Oracle makes corrections.
 The UI reviewer ingests supplied screenshots, manifests, and metadata. It never builds, launches, or captures the application.
+
+Oracle-authored fixes and Oracle stand-ins have no provenance flag: the Coordinator verifies the Oracle is independent of the authored work and records the reviewer or stand-in worker ID in the review report or brief.
 
 Only direct verdicts for the current lane HEAD satisfy review gates.
 Earlier verdicts remain superseded history. An unchanged role still performs an independent impact check after a new commit.
@@ -137,6 +145,7 @@ Avoid unrelated cleanup, hypothetical hardening, and duplicate findings.
 Collect all first-pass verdicts before building one deduplicated correction batch.
 An uncovered criterion or unjustified task tick requires more work.
 Record the current commit, lane contract digest, evidence revision, report path, and limitations.
+A reviewer or Runner reply states the verdict or status, exact SHA, finding IDs, report path, and evidence revision; it carries no machine-readable verdict footer.
 After corrections, each required role returns a fresh current-HEAD verdict. An unaffected role may perform a short impact check.
 The two-round limit and unresolved findings continue under [Escalation](#escalation).
 
@@ -153,8 +162,8 @@ Other independent ready lanes may continue while one lane waits for a human.
 An explicit [human-defer](helper-commands.md#human-defer) can move an eligible checkpoint to integrated inspection:
 
 - The lane has UI work, ordinary risk, and no sensitive flag.
-- The Coordinator records bounded, reversible impact and the excluded sensitive effects.
-- Combined mode is not active.
+- The helper stores the supplied rationale plus fixed `bounded`, `reversible`, and `excluded_effects` flags; it does not validate the rationale's content.
+- The rationale must enumerate the bounded impact, the reversible path, and each excluded sensitive effect: safety, privacy, sharing, data integrity, and content correctness. The fixed flags are not evidence.
 - The deferral binds current lane HEAD, evidence revision, and required UI evidence.
 
 Deferral is not approval and does not waive any independent review.
@@ -174,8 +183,8 @@ Review rounds persist across commits; a new commit does not reset the count.
 6. Obtain an independent current-HEAD review from a different reviewer.
 7. Complete the required human checkpoint before integration.
 
-The helper refuses further review records after two rounds without [lane-mediate](helper-commands.md#lane-mediate).
-One further Oracle-authored pass is allowed. Unresolved work then goes to the human; never silently extend the loop.
+The helper refuses a review record that would be round three or later for a role unless a current [lane-mediate](helper-commands.md#lane-mediate) record covers that role. It imposes no round cap after mediation.
+The workflow allows exactly one further Oracle-authored pass after mediation, followed by an independent current-HEAD review and the required human checkpoint. If unresolved work remains, stop for a human decision; never silently extend the loop.
 Every correction retains the plan-required checks, reviewer independence, evidence bindings, and human gates.
 
 A focused technical consultation is read-only unless edit authority is explicitly granted.
@@ -193,7 +202,6 @@ The Coordinator records the actual human decision; it never invents or infers an
 A human may explicitly direct integration despite missing or negative code, test, or UI review verdicts.
 Use the [human-override form of lane-merge](helper-commands.md#human-override) with the human's reason.
 Prefer completing normal reviews; the exception does not turn a failed or missing review into `PASS`.
-For combined mode, use an approved move to standard mode before waiving the exact combined Oracle review.
 
 The override cannot waive:
 
@@ -209,7 +217,7 @@ Record an override in this order:
 2. Verify the current candidate HEAD and all non-waivable gates.
 3. Record any separately required human checkpoint.
 4. Run the override integration with the human's reason.
-5. Preserve the override reason, timestamp, and waived review gates in the merge record.
+5. Preserve the human's reason and timestamp in the merge record. The helper stores `skipped_gates` only as one generic `reviews` entry, so the reason and record must name each exact waived review duty and each review duty that still applies.
 
 A changed candidate needs a renewed decision. The Coordinator does not reuse an earlier instruction for different work.
 The override affects lane integration only. It is not final release approval and does not reset review history.
@@ -222,6 +230,7 @@ This delegates the acceptance judgment; it does not waive that judgment or any r
 The grant must be human-origin, recorded, scoped to the checkpoint, and bound to the approved selected-change plan.
 A current Oracle stand-in must inspect the supplied acceptance checklist and evidence, then return an actual `PASS`.
 Technical correctness alone is insufficient. A failed stand-in leaves the gate closed and the grant unconsumed.
+The Coordinator verifies the stand-in is independent of the implementation and affected reviews, and records the stand-in worker ID in the stand-in report or brief; the helper has no stand-in independence flag.
 Record this with the [Oracle stand-in form of human-gate](helper-commands.md#oracle-stand-in).
 
 Each grant is consumed once for one lane checkpoint. It cannot authorize another lane or the PR merge.
@@ -232,6 +241,7 @@ Final hands-on release inspections remain human-only, as specified in [finish](f
 ## Merge and close
 
 Normal integration requires current independent reviewer passes, current UI evidence where `ui: true`, and the bound human checkpoint.
+Before merge, the Coordinator verifies `.agents/workflow/plan-approval.json` is current for the approved plan and that the recorded reviewer evidence is sound; lane-merge does not enforce plan approval.
 The [merge command reference](helper-commands.md#lane-merge-and-lane-close) contains syntax, not authority to waive those gates.
 
 The helper validates:
@@ -241,7 +251,9 @@ The helper validates:
 - Candidate task definitions match the approved feature-branch definitions.
 - Newly added completion ticks match this lane's assigned tasks, excluding inherited completed tasks.
 - No other change's task file or another lane's completion state was modified.
-- Review, local-plan, evidence, and human-checkpoint bindings are current.
+- Review, local-plan, UI-evidence, and human-checkpoint bindings are current.
+
+Among role evidence, the standard merge check revalidates only the `ui-reviewer` evidence path and digest; it confirms other review reports exist, but not their evidence content or report hashes. The Coordinator verifies every other role's evidence and each report hash before merge.
 
 A standard merge preserves the reviewed candidate SHA. Do not rebase a passed lane merely because another lane merged first.
 For conflicts, the helper aborts the feature-branch merge. Merge the feature branch into the lane worktree instead.
@@ -249,12 +261,9 @@ An Implementer resolves conflicts there and commits the result. Preserve earlier
 The changed lane HEAD requires fresh independent reviews and affected human gates under the normal review/escalation budget.
 Retry integration only after those gates pass. Never resolve implementation conflicts directly on the feature branch.
 Interrupted bookkeeping after an already successful merge follows [recovery](recovery.md); it never grants approval to unreviewed resolutions.
-Close only after integration is recorded. The recorded worktree remains authoritative for cleanup.
-
-In combined mode, the Oracle's [implementation review](helper-commands.md#combined-oracle-review) binds the exact base, candidate, acceptance, and evidence.
-Integration is fast-forward-only to that candidate. Changed inputs invalidate approval.
-The combined `final` duty means implementation coherence, not release approval.
+Close only after integration is recorded. `lane-close` also accepts a lane whose ticks are complete without a merge record, so the Coordinator verifies the recorded merge (phase `merged` or a matching merge record) before closing. The recorded worktree remains authoritative for cleanup.
 
 After every change included in the PR has integrated, follow [finish](finish.md).
 Version/generated changes, release evidence, final inspections, and PR follow-up belong there.
+PR-opening consent is recorded in `.agents/workflow/finish/pr-follow-up.md` with the human, timestamp, HEAD, and included changes; it is separate from release classification and lane merge consent. `pr-check` does not validate this consent; the Coordinator verifies it.
 Approval to open a PR never authorizes the later human PR merge.
