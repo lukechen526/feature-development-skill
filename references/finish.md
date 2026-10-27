@@ -23,10 +23,10 @@ Model selection and every role, model, and thinking profile stay repo-level in `
 ## Sequence
 
 1. **Reconcile lane merges.** Verify that every lane of every change in the repository graph is merged into the feature branch.
-   Check ticks, reviews, and state health. Confirm a clean feature-branch HEAD.
+   Check ticks, reviews, and state health. Confirm a clean feature-branch HEAD. List advance waiver uses for human review.
 
 2. **Release classification and version.** Use [finish-scoped workers](#finish-scoped-workers) for preparation. Obtain the human's release
-   classification first, then apply the version change the repository's versioning policy
+   classification first, or use an applicable [advance waiver](lane.md#advance-human-waiver). Record the waiver ID and use in `finish.json` when applicable. Apply the version change the repository's versioning policy
    requires; regenerate generated files as the repository specifies and commit.
    Never hand-edit generated files.
 

@@ -84,7 +84,7 @@ in a profile. The absolute worktree belongs only in the brief and coordination.
 
 Lane evidence binds a candidate lane revision and finish evidence the integrated release revision; their paths are in the table above. Never reuse candidate evidence as final release evidence. Planning report files live under the matching `reviews/` directory and include the cycle and round so a later cycle cannot overwrite them.
 
-`plan-approve` records approval at `.agents/workflow/plan-approval.json`; `status` reports whether it is current, stale, or missing. The Coordinator verifies current approval before opening a lane and before merging one ([lane records](lane.md#records-and-progress)).
+`plan-approve` records approval at `.agents/workflow/plan-approval.json`. `plan-waive` records a distinct waiver in the same file, replacing the prior plan decision. `status` distinguishes approval from waiver. The Coordinator verifies current approval or an applicable advance waiver before opening a lane and before merging one ([lane records](lane.md#records-and-progress)).
 
 `FEATDEV_LANE_WORKTREE_ROOT` must be an absolute path. A relative value resolves against the
 Coordinator's current working directory, so never rely on a relative setting.

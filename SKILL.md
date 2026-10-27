@@ -17,8 +17,8 @@ not need this coordination.
 
 ## Workflow stages and steps
 
-Read and follow each linked guide before starting that phase. Complete each phase
-and its gates before starting the next. Do not batch, reorder, or skip phase gates.
+Read and follow each linked guide before starting that phase. Complete each phase and its gates before starting the next, except for an explicit
+[advance human waiver](references/lane.md#advance-human-waiver).
 
 1. **[Preflight and roles](references/preflight-and-roles.md).** Verify harness
    capabilities, resolve the skill root, obtain human-selected role/model/thinking
@@ -26,10 +26,9 @@ and its gates before starting the next. Do not batch, reorder, or skip phase gat
 2. **[Plan](references/plan.md).** Turn the human's feature intent into OpenSpec
    artifacts, reusing an existing change when one matches. Obtain separate Oracle
    reviews of each change's artifacts and then the whole repository graph.
-   Obtain human approval, commit the approved artifacts, and record approval with
-   [plan-approve](references/helper-commands.md#plan-approval) in
-   `.agents/workflow/plan-approval.json` before implementation.
-3. **[Lanes](references/lane.md).** Opening a lane needs a current plan approval.
+   Obtain human approval or a scoped advance waiver, commit the artifacts, and record approval or waiver with
+   [the appropriate command](references/helper-commands.md#plan-approval) before implementation.
+3. **[Lanes](references/lane.md).** Opening a lane needs current plan approval or a current waiver covering that lane.
    Dispatch isolated, scoped implementation per task, obtain independent reviews of
    the current lane `HEAD`, correct findings within the documented review limits, and
    integrate through the lane gates or an explicit human override. Verify current approval before merge unless waived;
@@ -58,6 +57,13 @@ resume the owning phase's first incomplete operation or stop for the human. Reco
 is an exception path, not a fifth stage: it never recreates consent or restarts
 completed work.
 
+## Human waiver precedence
+
+An explicit human waiver may cover named human gates in advance for selected lanes
+or all lanes. Follow [advance human waiver](references/lane.md#advance-human-waiver).
+It takes precedence over conflicting pre-PR human-gate instructions in this skill.
+It does not waive technical gates, grant consent, or extend to the pre-PR check or PR decisions.
+
 ## Lane override precedence
 
 An explicit human decision for a named lane and candidate HEAD may waive any
@@ -67,7 +73,7 @@ approval does not waive other gates. This exception does not apply to other phas
 
 ## Non-negotiables
 
-- Implementation requires human-approved committed planning artifacts and recorded approval.
+- Implementation requires committed planning artifacts and recorded plan approval or an applicable plan-approval waiver.
 - Model, thinking, and role-profile selection is repo-level only in
   `.agents/workflow/model-selection.json`. Never create a per-lane or per-worktree
   profile, and never put a lane worktree or per-dispatch path in one.
@@ -77,9 +83,9 @@ approval does not waive other gates. This exception does not apply to other phas
   Reviewers remain read-only. Authors, including Oracle authors, never self-approve.
   Runner observations never satisfy review duties or supply verdicts.
 - Never fabricate completion, evidence, verdicts, or consent. Complete required
-  task, review, evidence, and human gates unless explicitly waived for lane integration. Only documented exceptions apply,
+  task, review, evidence, and human gates unless explicitly waived under the documented human waiver rules. Only documented exceptions apply,
   including [Human Override and Oracle stand-in](references/lane.md#human-override).
-- Missing or stale records block affected work unless explicitly waived for lane integration. Chat never replaces those records.
+- Missing or stale records block affected work unless explicitly waived under the documented human waiver rules. Chat never replaces those records.
   Stop and report missing required helpers or unmet human gates; never invent substitutes.
 - PR-opening consent is a separate, one-time human decision recorded in
   `.agents/workflow/finish/pr-follow-up.md`; it is not merge consent, and only the

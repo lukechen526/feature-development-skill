@@ -113,7 +113,7 @@ The Coordinator reads the map before every dispatch, and every brief carries its
 
 ## Step 1 — ask the human (once per repository)
 
-Before any dispatch, ask the human through the harness's user-question tool (or in chat when no
+Unless an applicable [advance waiver](lane.md#advance-human-waiver) covers these questions, before any dispatch ask the human through the harness's user-question tool (or in chat when no
 question tool exists). Ask one question per role, in this order:
 
 | Role ID | Role | Question | Role file | Review duty |
@@ -131,7 +131,7 @@ Rules:
 1. Offer only the models and thinking levels the preflight reports as selectable, plus a free-text
    option. When model enumeration is unavailable, accept free text and verify each entry against the
    live harness before recording it.
-2. Ask per role; do not invent a default and do not fill an answer yourself.
+2. Ask per role unless an applicable advance waiver covers this decision. Under a waiver, record the actual available selection and the waiver use; never claim the human selected it.
 3. If the harness cannot select a model or thinking level, say so, require explicit human acknowledgement, and record it as defined below; never silently substitute a value.
 4. The human may answer "same as X" or "you choose"; record that literally with the resolved value.
 5. Never infer a role model from another role, from the coordinator session, or from another repository.
@@ -140,7 +140,7 @@ Rules:
 `effective` records the value the harness actually uses for each of `model` and `thinking`: the selected
 value when supported, the session default when not. `degraded` is true when either selected value could
 not be used. `acknowledged` records the human's explicit acceptance of that degradation, recorded only after the human answers; a degraded role
-without acknowledgement blocks dispatch.
+without acknowledgement blocks dispatch unless an applicable advance waiver covers that human acknowledgement. Record the waiver ID and use in `model-selection.json`; never set `acknowledged` to true without the human acknowledgement.
 
 ## Canonical roles
 

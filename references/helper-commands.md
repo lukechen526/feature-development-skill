@@ -29,6 +29,7 @@ Back up the entire `.agents/workflow/` tree before migration, cleanup, or destru
 | `plan-dispatch …` | record an Oracle intent: `--scope change` for artifacts, then `--scope graph` for the repo graph |
 | `plan-review …` | record the corresponding scoped verdict; graph scope requires every included artifact PASS |
 | `plan-approve …` | record human approval after current artifact and graph PASS |
+| `plan-waive …` | record an advance plan approval waiver for selected or all lanes |
 | `dispatch [<lane>] <role> …` | record lane intent or `--scope finish` before worker starts |
 | `dispatch-done [<lane>] <role> …` | record lane or finish session/outcome |
 | `lane-open <lane>` | create/recover worktree/ref |
@@ -160,7 +161,16 @@ artifact digests in `.agents/workflow/plan-approval.json`.
 It refuses uncommitted `openspec/changes` content, a missing/stale graph `PASS`, or a missing/stale artifact `PASS`.
 It records the human decision; it never grants approval. `status` shows whether the record is current, stale, or missing.
 
-`lane-open` refuses unless plan approval is current. `lane-merge` does not enforce it; the Coordinator checks it before merge ([lane records](lane.md#records-and-progress)).
+For an explicit [advance waiver](lane.md#advance-human-waiver) of plan approval, use one of:
+
+```bash
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-waive --reason "<human decision and reason>" --lane <change>/<lane> [--lane <change>/<lane>]
+python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-waive --reason "<human decision and reason>" --all-lanes
+```
+
+The helper stores the waiver in `.agents/workflow/plan-approval.json`, the same file as an approval. The waiver uses distinct fields and replaces the prior plan decision. It records `waived`, not `current` approval. It binds the current reviewed graph and artifacts. The Coordinator verifies the advance waiver in `coordination.json` before invoking the command and includes its ID in the reason. A new graph requires a new record. Only covered lanes may open under this waiver.
+
+`lane-open` refuses unless plan approval is current or a current waiver covers the lane. `lane-merge` does not enforce it; the Coordinator checks it before merge ([lane records](lane.md#records-and-progress)).
 
 ## Plan validation and rendering
 
@@ -182,7 +192,7 @@ The default covers all graph entries. Pass `--change <change>` before the subcom
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> lane-open <lane-id>
 ```
 
-`lane-open` refuses unless `.agents/workflow/plan-approval.json` is current for the approved plan.
+`lane-open` requires current approval or a current plan waiver covering the lane.
 Set `FEATDEV_LANE_WORKTREE_ROOT` only to an absolute path; a relative value can silently place new lanes elsewhere ([worktree rules](lane.md#worktrees-and-readiness)).
 
 ## dispatch
@@ -320,7 +330,7 @@ only `reviews` is waived. Unselected gates still apply. The human may also waive
 other lane review and merge rules in the reason; the Coordinator must apply that
 decision. The helper records selected categories, reason, candidate, and timestamp.
 
-A changed candidate requires a renewed decision. The helper still identifies the
+A changed candidate requires a renewed decision unless an active advance waiver explicitly covers it. For an advance waiver, pass the actual current candidate and cite the waiver ID in `coordination.json` in the reason. The helper still identifies the
 candidate and target, and Git can refuse the merge. A dirty lane's uncommitted
 changes are not included. The helper does not fabricate task completion or verdicts.
 

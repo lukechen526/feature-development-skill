@@ -37,7 +37,7 @@ An evidence refresh already prescribed by the phase guide does not require resta
 9. Resume the owning phase at its first incomplete operation.
 
 Recovery ends when records and execution state agree, worker ownership is known, and the next action is identified.
-A missing approval remains a gate in the owning phase. Request it there; recovery never substitutes for consent.
+A missing approval remains a gate in the owning phase unless an active recorded waiver covers it. Verify the waiver in `coordination.json`, including its scope and revocation status. Request it there; recovery never substitutes for consent.
 If the state cannot be reconciled or worker ownership remains unknown, stop for the human.
 Do not replay completed phases, redispatch completed tasks, or repeat a successful merge merely to recreate the normal sequence.
 
@@ -49,6 +49,7 @@ Do not replay completed phases, redispatch completed tasks, or repeat a successf
 - After the actual re-review, record a lost planning verdict with a fresh `plan-dispatch` intent and then `plan-review`, including the verdict, `--head <sha>`, and `--report <path>`; a report path alone does not restore the ledger.
 - Missing finish reviews require a fresh independent review at the exact integrated HEAD. A lost PR-opening consent record requires renewed human consent, not an inference from an opened PR.
 - Unprovable human acceptance requires a renewed checkpoint. Silence, chat recollection, and green checks are not substitutes.
+- Use each lane's recorded worktree path for recovery and cleanup, including older URL-escaped paths. Do not move or replace an existing worktree when the default naming scheme changes.
 - Before same-worktree redispatch, prove the prior session is absent, stopped, or released. Never start a second writer.
 - A retained pass counts only with its exact reviewed HEAD, current lane contract, and valid evidence bindings.
 - Human authorization and plan-bound grants cannot be reconstructed from ancestry or equal trees.

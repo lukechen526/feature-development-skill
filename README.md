@@ -38,6 +38,8 @@ Four gated phases:
 You approve the plan, set the release classification, consent to opening the PR, and decide the merge.
 A passing test is not your approval.
 
+You can explicitly waive selected human gates in advance for named lanes or all lanes. The workflow distinguishes waivers from approvals in its records and keeps the pre-PR check and PR consent. See [advance human waiver](references/lane.md#advance-human-waiver).
+
 A **lane** groups related tasks in one worktree: an ownership boundary, not a demand to parallelize everything. An **Oracle** is a specialist agent for planning review, mediation, and explicitly authorized corrections. The Coordinator manages the workflow; it does not patch implementation or approve its own work.
 
 Phase detail and gates: [SKILL.md](SKILL.md).

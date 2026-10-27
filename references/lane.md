@@ -12,7 +12,7 @@ Resolve and export `FEATDEV_SKILL_ROOT` to the absolute installed skill path bef
 - Each change's `plan-reviews.json` records Oracle review of its OpenSpec artifacts.
 - Repo-level `plan-graph-review.json` records the separate graph review, after all included artifact passes.
 - `.agents/workflow/model-selection.json` and its model/thinking/role profiles are repo-level only. No lane worktree or per-dispatch path is stored in a profile; the worktree is execution metadata in the brief and coordination.
-- `.agents/workflow/plan-approval.json` records the human plan approval. Status reports it as `current`, `stale`, or `missing`; lane-open refuses unless it is current; lane-merge does not enforce it. The Coordinator verifies current approval before merge unless the human explicitly waives it.
+- `.agents/workflow/plan-approval.json` records the human plan approval. Status reports approval or waiver as `current`, `waived`, `stale`, or `missing`; lane-open refuses unless it is current or a current plan waiver covers the lane; lane-merge does not enforce it. The Coordinator verifies current approval before merge unless the human explicitly waives it.
 - Briefs, reports, and evidence use the locations in [briefs-and-handoffs.md](briefs-and-handoffs.md#set-locations-no-ad-hoc-paths).
 
 One Coordinator writes the shared coordination file across all changes. The Coordinator authors the local graph.
@@ -38,7 +38,7 @@ Status and dashboards are derived per-change views, not approval records. Chat h
 
 Open the lane with [lane-open](helper-commands.md#lane-open) before its first implementation dispatch.
 The default worktree is `~/.agents/worktrees/<repo>/<branch>/<change>/<lane>/`, with ref `featdev/<change>-<lane>`.
-`<repo>` is the URL-escaped resolved full feature-checkout path, not its folder name, so `/clients/alice/app` becomes `%2Fclients%2Falice%2Fapp`. The escaped path must fit the filesystem limit for one directory name.
+`<repo>` is `repo-` followed by the SHA-256 hex digest of the resolved full feature-checkout path. It is a fixed-length, filesystem-safe name; different checkouts with the same folder name remain distinct. Existing recorded worktrees keep their original paths, including older URL-escaped paths.
 `FEATDEV_LANE_WORKTREE_ROOT` overrides that root and must be an absolute path. The helper resolves a relative value against the current directory, which can silently place new lanes elsewhere; set an absolute path or leave it unset.
 A recorded worktree remains authoritative for that lane's lifetime, including recovery and cleanup.
 Optional environment-specific worktree registration is best-effort; the workflow does not depend on it.
@@ -150,7 +150,7 @@ Repository guides define the states, visual variants, environments, and acceptan
 Record the actual human decision against the current lane commit and evidence revision with [human-gate](helper-commands.md#human-gate).
 UI lanes require current evidence for that checkpoint.
 
-Missing, rejected, revoked, stale, or wrong-commit approval blocks integration. Silence and green automation never imply consent.
+Missing, rejected, revoked, stale, or wrong-commit approval blocks integration unless an applicable advance waiver explicitly covers the checkpoint. Silence and green automation never imply consent.
 Other independent ready lanes may continue while one lane waits for a human.
 
 An explicit [human-defer](helper-commands.md#human-defer) can move an eligible checkpoint to integrated inspection:
@@ -183,7 +183,23 @@ Every correction retains the plan-required checks, reviewer independence, eviden
 A focused technical consultation is read-only unless edit authority is explicitly granted.
 It does not reset rounds, approve a merge, or authorize new scope.
 Pause dependent edits for conflicting requirements or unclear closure criteria.
-Only an [explicit human override](#human-override) can waive lane review or merge rules; agent preference cannot.
+Only an [explicit human override](#human-override) or applicable [advance waiver](#advance-human-waiver) can waive lane review or merge rules; agent preference cannot.
+
+## Advance human waiver
+
+The human may explicitly waive any named human gate before lane integration, including plan approval, intake confirmation, model-selection questions, lane checkpoints, and human escalation decisions. The human may name individual gates or all pre-integration human gates. The human selects either all lanes or exact `change/lane` pairs. A lane-scoped waiver covers a shared planning decision only for those lanes; other lanes still need the decision. This waiver may cover human decisions before the pre-PR check, including release classification. The pre-PR check, its required inspections, PR-opening consent, and PR merge remain separate and cannot use it.
+
+Before relying on an advance waiver, the Coordinator records the human's actual decision in the repo-level `.agents/workflow/coordination.json`, alongside lane human decisions. Add an `advance_waivers` array at the top level. Record a unique ID, selected gates, exact `change/lane` scope or `all`, reason, decision date, state, and any limits or expiry. If the file does not exist and no legacy coordination needs migration, create it with `schema_version: 2`, the absolute `feature_checkout`, an empty `changes` object, and the array. Otherwise preserve the existing object and all its entries; migrate legacy data first if required. Only the Coordinator writes this record. The helper preserves the array but does not validate the decision, scope, expiry, or revocation.
+
+The human may revoke or narrow a waiver. Record that decision in `advance_waivers` before further use. Remove or replace a revoked or narrowed plan waiver in `.agents/workflow/plan-approval.json`. Never use an obsolete waiver. A waiver is not approval, a review verdict, or evidence. Do not infer it from absence or silence.
+
+For an eligible human decision, verify the recorded waiver covers the specific gate and lane. Record the waiver ID, use, affected lane, and inputs with that gate's existing decision record: plan decisions in `plan-approval.json`, model choices in `model-selection.json`, lane checkpoints in `coordination.json`, and release classification in `finish.json`. Use a distinct `waiver` or `waived` field; never represent a waiver as approval. Make only the decision needed to proceed within the human's stated feature scope. Stop if the decision needs facts that are unavailable or conflicts with another instruction. Do not fabricate answers, acceptance, or authorization. Continue independent technical reviews, evidence checks, and other non-human gates. Never use a waiver to discard data or bypass repository policy without explicit authority.
+
+For plan approval, complete both Oracle review stages and commit the artifacts. Record the waiver using `plan-waive --reason` and its exact lane scope as described in [plan approval](helper-commands.md#plan-approval). The record binds the reviewed graph; a changed graph requires a fresh record under the still-applicable human waiver. Do not call the waived decision an approval.
+
+For a lane human checkpoint, run the [human override](helper-commands.md#human-override) with `--waive human-gate`, the actual current candidate HEAD, and a reason identifying the waiver ID in `coordination.json`. Add `--waive plan-approval` only when that gate is also waived. Do not select other gates unless the human expressly waived them. The helper records `state: waived` in the lane human-gate record and the actual merged candidate in the merge record. It does not claim the human approved either. A changed candidate may use the same active advance waiver only within its recorded scope.
+
+At finish, list every waiver use for human review. An applicable waiver may cover release classification, but the Coordinator records the actual classification as a waiver use, not human approval. Run the normal pre-PR checks, required release inspections, and consent steps. An advance waiver never authorizes opening or merging a PR.
 
 ## Human Override
 

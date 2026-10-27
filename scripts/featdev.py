@@ -1078,9 +1078,16 @@ def plan_review(
     return _write_plan_ledger(change, checkout, ledger)
 
 
-def plan_approve(approver: str = "human") -> Path:
-    """Record the human's plan approval for the committed artifacts and reviewed graph."""
+def plan_approve(approver: str = "human", waiver: str | None = None, lanes: list[str] | None = None, all_lanes: bool = False) -> Path:
+    """Record plan approval or a distinct waiver for the reviewed graph."""
     _require_coordinator_cwd({}, "plan-approve")
+    if waiver is not None:
+        if not waiver.strip() or bool(lanes) == all_lanes:
+            raise StateError("plan: waiver requires a reason and either --lane or --all-lanes")
+        if lanes and any(len(item.split("/")) != 2 or not all(item.split("/")) for item in lanes):
+            raise StateError("plan: waiver lanes must use change/lane")
+    elif lanes or all_lanes:
+        raise StateError("plan: --lane and --all-lanes require --waiver")
     root, _, plan_path, plan_sha256, head = _plan_context(None, None, "graph")
     ledger, _ = _load_plan_ledger(None, root)
     reviews = [
@@ -1110,6 +1117,10 @@ def plan_approve(approver: str = "human") -> Path:
         "plan_sha256": plan_sha256,
         "artifacts": artifacts,
     }
+    if waiver is not None:
+        record["waived_by"] = record.pop("approver")
+        record["waived_at"] = record.pop("approved_at")
+        record["waiver"] = {"reason": waiver.strip(), "lanes": lanes or [], "all_lanes": all_lanes}
     path = workflow_dir(root) / _PLAN_APPROVAL
     _atomic_write_json(path, record)
     return path
@@ -1126,14 +1137,26 @@ def _plan_approval_status(state: dict[str, Any]) -> dict[str, Any]:
         record = _load_json(path)
     except (OSError, ValueError) as exc:
         return {"state": "unreadable", "error": _one_line(exc)}
+    kind = "waived" if "waiver" in record else "current"
+    if kind == "waived":
+        waiver = record.get("waiver")
+        if (not isinstance(waiver, dict) or not isinstance(waiver.get("reason"), str)
+                or not waiver["reason"].strip() or not isinstance(waiver.get("lanes"), list)
+                or not all(isinstance(item, str) for item in waiver["lanes"])
+                or not isinstance(waiver.get("all_lanes"), bool)
+                or bool(waiver["lanes"]) == waiver["all_lanes"]):
+            return {"state": "unreadable", "error": "malformed plan waiver"}
     try:
         current = _plan_context(None, None, "graph")[3]
     except (OSError, PlanError, StateError, ValueError):
         current = None
     return {
-        "state": "current" if current and record.get("plan_sha256") == current else "stale",
+        "state": kind if current and record.get("plan_sha256") == current else "stale",
+        "waiver": record.get("waiver"),
         "approver": record.get("approver"),
         "approved_at": record.get("approved_at"),
+        "waived_by": record.get("waived_by"),
+        "waived_at": record.get("waived_at"),
         "head": record.get("head"),
         "plan_sha256": record.get("plan_sha256"),
     }
@@ -2500,7 +2523,7 @@ def _status_text(view: dict[str, Any]) -> str:
             lines.append(f"plan approval: unreadable ({approval.get('error')})")
         else:
             lines.append(
-                f"plan approval: {approval.get('approver')} at {str(approval.get('head'))[:12]} "
+                f"plan approval: {approval.get('approver') or approval.get('waived_by')} at {str(approval.get('head'))[:12]} "
                 f"({approval.get('state')})"
             )
     if not view.get("dispatch_view_available", True):
@@ -2924,8 +2947,7 @@ def _lane_worktree_path(state: dict[str, Any], lane_id: str) -> Path:
     if any(not part or part in {".", ".."} for part in branch.split("/")) or "\n" in branch or "\r" in branch:
         raise StateError("lane: branch must be a safe git branch name; repair the derived state")
     checkout = Path(checkout_value).resolve()
-    # shortcut: escaped paths must fit one directory name; use bounded naming if long checkout paths need support.
-    repo = quote(str(checkout), safe="")
+    repo = "repo-" + hashlib.sha256(os.fsencode(checkout)).hexdigest()
     lane_id = _safe_component(lane_id, "lane id")
     change = _safe_component(change, "change")
     result = _lane_worktree_root(state) / repo
@@ -3573,6 +3595,10 @@ def _human_gate_summary(
     if not coordination_available:
         return f"required ({flag}); coordination unavailable"
     head = _lane_current_head(lane)
+    gate = gates.get(lane_id) if isinstance(gates, dict) else None
+    if (isinstance(gate, dict) and gate.get("state") == "waived" and head is not None
+            and isinstance(gate.get("binding"), dict) and gate["binding"].get("commit") == head):
+        return f"required ({flag}): waived"
     if head is not None:
         try:
             _validate_human_gate(
@@ -3714,7 +3740,11 @@ def lane_open(lane_id: str, change: str | None = None) -> Path:
     if phase in {"writing", "reviewing", "revising"} and registered_branch == expected_ref and existing_ref:
         return path
     approval = _plan_approval_status(state)
-    if approval.get("state") != "current":
+    waiver = approval.get("waiver")
+    covered = (approval.get("state") == "waived" and isinstance(waiver, dict)
+               and (waiver.get("all_lanes") is True
+                    or f"{state.get('change')}/{lane_id}" in waiver.get("lanes", [])))
+    if approval.get("state") != "current" and not covered:
         raise StateError(
             f"lane: plan approval is {approval.get('state')}; record a current plan-approve before opening lanes"
         )
@@ -4355,6 +4385,8 @@ def lane_merge(
         if "human-gate" not in waived:
             _validate_human_gate(lane_id, override_lane, head, coordination, state.get("plan_sha256"),
                                  allow_deferred=True)
+        elif _lane_requires_human_gate(override_lane) and not isinstance(coordination.get("human_gates", {}), dict):
+            raise StateError("state: human gates are malformed; repair the coordination data")
         if _is_ancestor(repository, head, feature_head):
             merge_commit = feature_head
         else:
@@ -4386,6 +4418,15 @@ def lane_merge(
             },
         }
         runtime["phase"] = "merged"
+        if "human-gate" in waived and _lane_requires_human_gate(override_lane):
+            gates = coordination.setdefault("human_gates", {})
+            if not isinstance(gates, dict):
+                raise StateError("state: human gates are malformed; repair the coordination data")
+            prior_gate = gates.get(lane_id)
+            gates[lane_id] = {"lane": lane_id, "state": "waived", "reason": reason,
+                              "binding": {"commit": head}, "recorded_at": _utc_timestamp()}
+            if prior_gate is not None:
+                gates[lane_id]["previous_decision"] = prior_gate
         if "human-gate" not in waived:
             _consume_human_grant(coordination, lane_id)
         _write_coordination(state, coordination, plan)
@@ -5469,6 +5510,20 @@ def _self_check() -> int:
         assert state_derive("derived", checkout=fresh_clone)["source_sha"] == main_head
         assert not (fresh_clone / ".agents" / "tmp" / "featdev-old-run").exists()
 
+        # Checkout directory names are bounded, safe, deterministic, and distinguish paths.
+        naming_state = {"branch": "main", "change": "sample", "feature_checkout": str(root / "a-b" / "app")}
+        first_path = _lane_worktree_path(naming_state, "lane")
+        component = first_path.relative_to(_lane_worktree_root(naming_state)).parts[0]
+        assert re.fullmatch(r"repo-[0-9a-f]{64}", component)
+        assert len(os.fsencode(component)) <= 255 and "%" not in component
+        assert _lane_worktree_path(naming_state, "lane") == first_path
+        for checkout in (root / "a" / "b-app", root / "elsewhere" / "app",
+                         root.joinpath(*(["x" * 80] * 8))):
+            alternate = _lane_worktree_path({**naming_state, "feature_checkout": str(checkout)}, "lane")
+            alternate_component = alternate.relative_to(_lane_worktree_root(naming_state)).parts[0]
+            assert alternate_component != component and re.fullmatch(r"repo-[0-9a-f]{64}", alternate_component)
+            assert len(os.fsencode(alternate_component)) <= 255
+
         # Lane opening needs a current plan approval. An Oracle lane write needs a recorded mediation.
         # A MORE WORK graph verdict after PASS blocks approval. An Oracle write needs --report.
         gate_repo = make_repository("gatecase", "gatecase", {
@@ -5481,6 +5536,32 @@ def _self_check() -> int:
         expect_refusal("lane-open", "one", "--change", "gatecase", contains="plan approval is missing")
         approve_plan(gate_repo, "gatecase")
         os.chdir(gate_repo)
+        (workflow_dir(gate_repo) / _PLAN_APPROVAL).unlink()
+        expect_refusal("plan-waive", "--reason", "", "--all-lanes", contains="waiver requires")
+        expect_refusal("plan-waive", "--reason", "away", "--lane", "bad", contains="change/lane")
+        result, _, error = invoke("plan-waive", "--reason", "away", "--lane", "gatecase/other")
+        assert result == 0, error
+        view = state_derive("gatecase")
+        assert _plan_approval_status(view)["state"] == "waived"
+        expect_refusal("lane-open", "one", "--change", "gatecase", contains="plan approval is waived")
+        result, _, error = invoke("plan-waive", "--reason", "away", "--lane", "gatecase/one")
+        assert result == 0, error
+        waiver_status = _plan_approval_status(state_derive("gatecase"))
+        assert waiver_status["waiver"]["lanes"] == ["gatecase/one"]
+        shared = _repository_coordination(gate_repo.resolve())
+        shared["advance_waivers"] = [{"gates": ["plan-approval"], "lanes": ["gatecase/one"],
+                                      "reason": "away", "state": "active"}]
+        _atomic_write_json(workflow_dir(gate_repo) / "coordination.json", shared)
+        lane_open("one", "gatecase")
+        assert _repository_coordination(gate_repo.resolve())["advance_waivers"] == shared["advance_waivers"]
+        result, _, error = invoke("plan-waive", "--reason", "away", "--all-lanes")
+        assert result == 0 and _plan_approval_status(state_derive("gatecase"))["waiver"]["all_lanes"], error
+        waiver_record = _load_json(workflow_dir(gate_repo) / _PLAN_APPROVAL)
+        assert waiver_record["waiver"]["all_lanes"] and "approver" not in waiver_record
+        plan_approve()
+        approval_record = _load_json(workflow_dir(gate_repo) / _PLAN_APPROVAL)
+        assert "waiver" not in approval_record and approval_record["approver"] == "human"
+        assert _plan_approval_status(state_derive("gatecase"))["state"] == "current"
         ledger, _ = _load_plan_ledger(None, gate_repo)
         ledger["reviews"].append({"scope": "graph", "role": "oracle", "verdict": "MORE WORK",
                                   "plan_sha256": _plan_context(None, None, "graph")[3]})
@@ -5626,8 +5707,15 @@ def _self_check() -> int:
         expect_refusal("lane-merge", "visible", "--change", "visible", contains="human gate")
         human_coordination["human_gates"] = {}
         write_fixture(human_coordination_path, human_coordination)
-        human_gate("visible", "approved", human_head, "human-r1", human_evidence, change="visible")
-        lane_merge("visible", "visible")
+        result, _, error = invoke("lane-merge", "visible", "--change", "visible",
+                                  "--human-override", "--override-head", human_head,
+                                  "--waive", "human-gate", "--override-reason", "advance waiver")
+        assert result == 0, error
+        merged_coordination = read_fixture(human_coordination_path)
+        gate = merged_coordination["human_gates"]["visible"]
+        assert gate["state"] == "waived" and gate["binding"]["commit"] == human_head
+        assert gate["reason"] == "advance waiver" and "approved_by" not in gate
+        assert merged_coordination["lanes"]["visible"]["merge"]["human_override"]["skipped_gates"] == ["human-gate"]
         lane_close("visible", "visible")
         human_coordination_path.write_text("{bad json", encoding="utf-8")
         malformed_result, malformed_status, malformed_error = invoke("status", "--change", "visible")
@@ -5937,13 +6025,25 @@ def _self_check() -> int:
         assert git(flow_repository, "rev-parse", "HEAD")
         assert (flow_repository / "openspec/changes/flow/tasks.md").read_text(encoding="utf-8").startswith("- [x] 1.1")
 
-        # A second lane is opened after the first merge. Its readiness and completion come
-        # from committed ticks; dispatch and review records are only temporary coordination.
-        result, _, stderr = invoke("lane-open", "b", "--change", "flow")
-        assert result == 0, stderr
+        # Simulate an active lane opened with the former URL-encoded naming scheme.
+        original_worktree_path = _lane_worktree_path
+        legacy_repo = quote(str(flow_repository.resolve()), safe="")
+        legacy_path = Path.home() / ".agents" / "worktrees" / legacy_repo / "main" / "flow" / "b"
+        globals()["_lane_worktree_path"] = lambda state, lane_id: legacy_path
+        try:
+            result, _, stderr = invoke("lane-open", "b", "--change", "flow")
+            assert result == 0, stderr
+        finally:
+            globals()["_lane_worktree_path"] = original_worktree_path
         coordination = read_fixture(coordination_path)
         b_worktree = Path(coordination["lanes"]["b"]["worktree"])
         b_ref = coordination["lanes"]["b"]["ref"]
+        assert b_worktree == legacy_path.resolve() and "%2F" in str(b_worktree)
+        new_path = _lane_worktree_path(state_derive("flow"), "b")
+        assert new_path != b_worktree and not new_path.exists()
+        lane_open("b", "flow")
+        assert read_fixture(coordination_path)["lanes"]["b"]["worktree"] == str(b_worktree)
+        assert not new_path.exists()
         dispatch_run("b", "code-reviewer",  "2.1", change="flow")
         assert read_fixture(coordination_path)["lanes"]["b"]["dispatches"][0]["access"] == "read-only"
         # Resume an open dispatch written by the previous role vocabulary.
@@ -7006,6 +7106,10 @@ def _parser() -> argparse.ArgumentParser:
         "plan-approve", help="record human approval of committed OpenSpec artifacts and the reviewed repo graph"
     )
     approve.add_argument("--approver", default="human", metavar="<approver>", help="approver label; defaults to human")
+    waiver_parser = commands.add_parser("plan-waive", help="record an advance human waiver of plan approval")
+    waiver_parser.add_argument("--reason", required=True, help="human waiver decision and reason")
+    waiver_parser.add_argument("--lane", action="append", help="covered change/lane; repeat for multiple lanes")
+    waiver_parser.add_argument("--all-lanes", action="store_true", help="cover every lane in this feature")
 
     send = commands.add_parser("dispatch", help="record a temporary worker dispatch intent")
     send.add_argument("lane", nargs="?", metavar="<lane>")
@@ -7200,6 +7304,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "plan-approve":
             path = plan_approve(args.approver)
             print(f"plan-approve: recorded ({path})")
+            return 0
+        if args.command == "plan-waive":
+            path = plan_approve("human", args.reason, args.lane, args.all_lanes)
+            print(f"plan-waive: recorded ({path})")
             return 0
         if args.command in {"dispatch", "dispatch-done"}:
             if (args.scope == "lane") != (args.lane is not None):

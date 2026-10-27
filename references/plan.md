@@ -1,6 +1,6 @@
 # Plan phase
 
-The Coordinator owns planning. Planning starts from the human's request, not from an existing OpenSpec change: the Coordinator turns that intent into reviewed OpenSpec artifacts, then into the lane graph. No implementation begins before both Oracle review stages and explicit human approval.
+The Coordinator owns planning. Planning starts from the human's request, not from an existing OpenSpec change: the Coordinator turns that intent into reviewed OpenSpec artifacts, then into the lane graph. No implementation begins before both Oracle review stages and human approval or an applicable advance waiver.
 
 ## Objects and ownership
 
@@ -22,9 +22,9 @@ The Coordinator owns planning. Planning starts from the human's request, not fro
 5. Complete every included change's artifact corrections before graph review.
 6. Build or update the repo-level graph from the reviewed change artifacts.
 7. Obtain a separate independent Oracle verdict for the whole repo-level graph.
-8. Obtain the human's explicit approval of the artifacts and graph.
-9. Commit only the approved OpenSpec artifacts.
-10. Record the human approval with `plan-approve`.
+8. Obtain human approval of the artifacts and graph, or verify an applicable advance waiver.
+9. Commit only the reviewed OpenSpec artifacts.
+10. Record the human approval with `plan-approve`, or the scoped waiver with `plan-waive`.
 11. Start implementation from that committed and recorded state.
 
 OpenSpec edits remain uncommitted during both review stages. No intermediate artifact commit occurs between Oracle correction cycles.
@@ -59,7 +59,7 @@ For each included change, author under `openspec/changes/<change>/`:
 - `tasks.md`: unique top-level checklist IDs that implement the specifications; nested checkboxes annotate their parent task.
 
 Acceptance criteria must be observable and testable by an independent reviewer, and tasks must map back to them so review coverage is checkable.
-The artifacts are the implementation contract: do not start implementation or build the lane graph before both Oracle stages and human approval.
+The artifacts are the implementation contract: do not start implementation or build the lane graph before both Oracle stages and human approval or an applicable advance waiver.
 
 ### Oracle stage 1: each change's OpenSpec artifacts
 
@@ -172,15 +172,15 @@ That intent closes the author record; a different Oracle performs the independen
 The author cannot approve its own correction.
 A stale intent requires a fresh unique `--key`; never reuse a dispatch ID for different inputs.
 
-After both stages pass, obtain explicit human approval of the artifacts and local graph.
-Commit the OpenSpec artifacts first, then record the approval with `plan-approve` ([approval command](helper-commands.md#plan-approval)).
+After both stages pass, obtain explicit human approval of the artifacts and local graph, unless an applicable [advance waiver](lane.md#advance-human-waiver) covers plan approval.
+Commit the OpenSpec artifacts first, then record the approval with `plan-approve` or the waiver with `plan-waive` ([approval command](helper-commands.md#plan-approval)).
 Committing a contract-changing artifact edit after its review does not satisfy the artifact requirement:
 the changed digest invalidates the earlier PASS and requires a fresh artifact review.
 Never stage `plan-graph.json`, `coordination.json`, or their review/approval records; the helper records the decision but never grants human approval or commits these files.
 
 Plan-approval state and its enforcement are defined once in [lane records](lane.md#records-and-progress).
 
-Plan amendments require affected artifact review, then repo graph review, then human approval recorded with `plan-approve` before renewed implementation.
+Plan amendments require affected artifact review, then repo graph review, then human approval recorded with `plan-approve` or an applicable waiver recorded with `plan-waive` before renewed implementation.
 Lane review and human-gate bindings include the lane contract digest; material lane edits require fresh verdicts.
 Unrelated changes or lanes do not invalidate an unchanged ordinary lane's review binding.
 Plan-bound grants retain their exact selected-change bindings.

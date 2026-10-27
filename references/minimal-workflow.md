@@ -214,7 +214,7 @@ The graph ledger is `.agents/workflow/plan-graph-review.json`.
 Neither verdict substitutes for the other or grants human approval.
 
 CAUTION: The following commands record approval; they do not obtain it.
-Obtain explicit human approval of the OpenSpec artifacts and local graph before running them.
+Obtain explicit human approval of the OpenSpec artifacts and local graph before running them. For a waiver, use the separate [plan-waive command](helper-commands.md#plan-approval) instead.
 Commit the artifacts first, then record the approval in the repo-level record.
 Never stage a repo-level runtime object.
 
@@ -229,7 +229,7 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-approve --approver human
 
 ## 3. Dispatch the implementer
 
-Verify current plan approval before opening the lane:
+For this approval example, verify current plan approval before opening the lane. For a waiver, verify its recorded lane scope instead:
 
 ```bash
 if ! python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" status --json | \
@@ -312,7 +312,7 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" lane-review 
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" sync
 ```
 
-Merge revalidates only the `ui-reviewer` evidence path and digest; the Coordinator verifies this code-review report's hash and evidence and confirms plan approval is still current before merging:
+For this approval example, use the check below. For a waiver, verify its recorded scope instead. Merge revalidates only the `ui-reviewer` evidence path and digest; the Coordinator verifies this code-review report's hash and evidence and confirms plan approval is still current before merging:
 
 ```bash
 if ! python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" status --json | \
