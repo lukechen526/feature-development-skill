@@ -4257,12 +4257,8 @@ def _validate_completed_lane_merge(
                 f"lane: recorded merge commit {merged_head} of completed lane {lane_id!r} is not in the feature "
                 "branch; reconcile the feature branch, then re-run lane-merge"
             )
-    _validate_lane_reviews(
-        lane_id, operation_lane, reviewed_head,
-
-
-
-    )
+    if not (recorded and "reviews" in (merge.get("human_override") or {}).get("skipped_gates", [])):
+        _validate_lane_reviews(lane_id, operation_lane, reviewed_head)
     if recorded:
         # The tool validated this gate when it performed the merge, and its one-use grant is already
         # consumed: re-litigating a completed checkpoint would break idempotency.
@@ -4299,28 +4295,24 @@ def lane_merge(
     change: str | None = None,
     human_override: bool = False,
     override_reason: str | None = None,
+    override_head: str | None = None,
+    waive: list[str] | None = None,
 ) -> Path:
+    if not human_override and (override_reason or override_head or waive):
+        raise StateError("lane: override options require --human-override")
     path, state, plan = _state_context(change)
     lane = _state_lane(state, lane_id)
     coordination, runtime = _coordination_lane_for(state, plan, lane_id)
     if human_override:
-        # A recorded human decision trumps the review gates. The workflow restricts the
-        # override to waivable review duties: it can never waive clean-tree, task completion
-        # ownership/completeness, lane-base/ancestry validation, current required
-        # evidence, or human authorization integrity, so those checks still run below.
-        # The reason is mandatory and is persisted in the coordination record beside
-        # the merge so the audit trail shows which decision bypassed which gate.
         reason = (override_reason or "").strip()
         if not reason:
             raise StateError(
                 "lane: --human-override requires --override-reason naming the human decision; "
                 "an unexplained override cannot be recorded"
             )
-        if lane.get("complete"):
-            raise StateError(
-                f"lane: lane {lane_id!r} is already complete from committed ticks; "
-                "record a human override only on a lane that is not merged"
-            )
+        waived = set(waive or ["reviews"])
+        if not override_head:
+            raise StateError("lane: --human-override requires --override-head identifying the approved candidate")
         operation_lane = dict(lane)
         operation_lane.update(runtime)
         worktree, ref = _lane_runtime_for_operation(state, lane_id, operation_lane)
@@ -4331,36 +4323,38 @@ def lane_merge(
         current_branch = _git_output(repository, "rev-parse", "--abbrev-ref", "HEAD")
         if current_branch != branch:
             raise StateError(f"lane: feature checkout is on {current_branch!r}, not {branch!r}; switch branches")
-        if _run_git(worktree, "status", "--porcelain").stdout.strip():
+        if "clean-trees" not in waived and _run_git(worktree, "status", "--porcelain").stdout.strip():
             raise StateError("lane: lane worktree is dirty; commit before merging")
         head = _git_output(worktree, "rev-parse", "HEAD")
+        if _git_commit(worktree, override_head) != head:
+            raise StateError("lane: override candidate differs from lane HEAD; obtain a renewed human decision")
         ref_head = _ref_sha(repository, ref)
         if ref_head != head:
             raise StateError(f"lane: ref {ref} is at {ref_head or 'no commit'}, worktree HEAD is {head}; reconcile it first")
-        if _run_git(repository, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+        if "clean-trees" not in waived and _run_git(repository, "status", "--porcelain", "--untracked-files=no").stdout.strip():
             raise StateError("lane: feature checkout is dirty; commit or discard changes before merging")
         feature_head = _git_output(repository, "rev-parse", branch)
-        # Waivable review duties only: ticks, tick-set ownership, base/ancestry, and the
-        # human checkpoint still bind an override merge.
-        base = _lane_merge_base(repository, ref, feature_head)
-        _validate_resolved_lane_base(repository, base, head, feature_head)
-        override_change = state.get("change")
-        if not isinstance(override_change, str) or not override_change:
-            raise StateError("lane: change is missing; re-derive the state")
-        override_assigned = _lane_assigned_tasks(plan, lane_id)
-        override_checked = _lane_checked_tasks(worktree, override_change, plan)
-        if override_missing := (override_assigned - override_checked):
-            raise StateError(
-                f"lane: lane {lane_id!r} has unfinished tasks ({', '.join(sorted(override_missing))}); "
-                "a human override cannot waive task completion; tick every assigned task first"
-            )
-        _candidate_tick_state(repository, override_change, plan, lane_id, base, head, feature_head)
+        base = None
+        if "ancestry" not in waived or "tasks" not in waived:
+            base = _lane_merge_base(repository, ref, feature_head)
+        if "ancestry" not in waived:
+            _validate_resolved_lane_base(repository, base, head, feature_head)
+        if "tasks" not in waived:
+            override_change = state.get("change")
+            if not isinstance(override_change, str) or not override_change:
+                raise StateError("lane: change is missing; re-derive the state")
+            assigned = _lane_assigned_tasks(plan, lane_id)
+            checked = _lane_checked_tasks(worktree, override_change, plan)
+            if missing := (assigned - checked):
+                raise StateError(f"lane: lane {lane_id!r} has unfinished tasks ({', '.join(sorted(missing))})")
+            _candidate_tick_state(repository, override_change, plan, lane_id, base, head, feature_head)
         override_lane = dict(lane)
         override_lane.update(runtime)
-        _validate_human_gate(
-            lane_id, override_lane, head, coordination, state.get("plan_sha256"),
-            allow_deferred=True,
-        )
+        if "reviews" not in waived:
+            _validate_lane_reviews(lane_id, override_lane, head)
+        if "human-gate" not in waived:
+            _validate_human_gate(lane_id, override_lane, head, coordination, state.get("plan_sha256"),
+                                 allow_deferred=True)
         if _is_ancestor(repository, head, feature_head):
             merge_commit = feature_head
         else:
@@ -4388,13 +4382,13 @@ def lane_merge(
             "human_override": {
                 "reason": reason,
                 "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-                "skipped_gates": ["reviews"],
+                "skipped_gates": sorted(waived),
             },
         }
         runtime["phase"] = "merged"
-        _consume_human_grant(coordination, lane_id)
+        if "human-gate" not in waived:
+            _consume_human_grant(coordination, lane_id)
         _write_coordination(state, coordination, plan)
-        state_derive(state.get("change"), None, repository)
         return path
     if lane.get("complete"):
         # A merged tick is the durable completion record, but it is not proof on its own: the
@@ -5845,6 +5839,35 @@ def _self_check() -> int:
             obsolete_result, _, _ = invoke(obsolete)
             assert obsolete_result == 2, obsolete
 
+        # Explicit overrides waive only named gates and remain bound to the candidate.
+        override_plan = {
+            "schema_version": 1, "change": "override",
+            "lanes": {"only": {"risk": "ordinary", "ui": False, "sensitive": False, "depends_on": []}},
+            "tasks": {"1.1": {"lane": "only", "deps": []}},
+        }
+        override_repo = make_repository("override-repository", "override", override_plan, "- [ ] 1.1 work\n")
+        os.chdir(override_repo)
+        result, _, stderr = invoke("lane-open", "only", "--change", "override")
+        assert result == 0, stderr
+        override_coord = _coordination_path("override", override_repo)
+        override_worktree = Path(read_fixture(override_coord)["lanes"]["only"]["worktree"])
+        git(override_worktree, "commit", "--allow-empty", "-m", "candidate")
+        override_head = git(override_worktree, "rev-parse", "HEAD")
+        args = ("lane-merge", "only", "--change", "override", "--human-override",
+                "--override-reason", "human accepts missing tasks and reviews", "--override-head", override_head)
+        expect_refusal(*args, contains="unfinished tasks")
+        expect_refusal(*args, "--waive", "tasks", contains="review")
+        expect_refusal("lane-merge", "only", "--change", "override", "--human-override",
+                       "--override-reason", "human decision", "--override-head", git(override_repo, "rev-parse", "HEAD"),
+                       "--waive", "tasks", "--waive", "reviews", contains="differs from lane HEAD")
+        result, _, stderr = invoke(*args, "--waive", "tasks", "--waive", "reviews")
+        assert result == 0, stderr
+        override_merge = read_fixture(override_coord)["lanes"]["only"]["merge"]
+        assert override_merge["reviewed_head"] == override_head
+        assert override_merge["human_override"]["skipped_gates"] == ["reviews", "tasks"]
+        assert "- [ ] 1.1" in (override_repo / "openspec/changes/override/tasks.md").read_text()
+        os.chdir(root)
+
         # End-to-end flow starts without any scratch state or run identifier. The first
         # status call derives state automatically, then all lane coordination lives beside
         # that projection and never becomes task truth.
@@ -6371,7 +6394,7 @@ def _self_check() -> int:
         expect_refusal("lane-merge", "only", "--change", "amendment", contains="merge failed")
         expect_refusal(
             "lane-merge", "only", "--change", "amendment", "--human-override",
-            "--override-reason", "fixture human decision", contains="merge failed",
+            "--override-reason", "fixture human decision", "--override-head", amendment_head, contains="merge failed",
         )
         assert git(amendment_repository, "rev-parse", "HEAD") == approved_head
         assert git(amendment_worktree, "rev-parse", "HEAD") == amendment_head
@@ -7084,7 +7107,7 @@ def _parser() -> argparse.ArgumentParser:
     merged.add_argument(
         "--human-override",
         action="store_true",
-        help="merge on an explicit human decision, waiving only review duties (ticks/base/tree/gate still bind)",
+        help="merge on an explicit human decision, waiving the specified gates",
     )
     merged.add_argument(
         "--override-reason",
@@ -7092,6 +7115,9 @@ def _parser() -> argparse.ArgumentParser:
         metavar="<reason>",
         help="required with --human-override; the recorded human decision",
     )
+    merged.add_argument("--override-head", help="candidate commit approved by the human")
+    merged.add_argument("--waive", action="append", choices=("reviews", "tasks", "human-gate", "ancestry", "clean-trees", "plan-approval"),
+                        help="gate waived by the human; repeat for multiple gates (default: reviews)")
     _add_change_option(merged)
 
     finish = commands.add_parser("finish-record", help="bind classification/version before final capture; restage after changes and recapture before PR")
@@ -7234,7 +7260,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "lane-merge":
             path = lane_merge(
-                args.lane, selected_change, args.human_override, args.override_reason
+                args.lane, selected_change, args.human_override, args.override_reason, args.override_head, args.waive
             )
             suffix = " (human override)" if args.human_override else ""
             print(f"lane-merge: recorded {args.lane}{suffix} ({path})")

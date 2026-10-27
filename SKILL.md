@@ -32,7 +32,7 @@ and its gates before starting the next. Do not batch, reorder, or skip phase gat
 3. **[Lanes](references/lane.md).** Opening a lane needs a current plan approval.
    Dispatch isolated, scoped implementation per task, obtain independent reviews of
    the current lane `HEAD`, correct findings within the documented review limits, and
-   integrate only through the lane gates. Verify current approval before merge;
+   integrate through the lane gates or an explicit human override. Verify current approval before merge unless waived;
    `lane-merge` does not enforce it.
 4. **[Finish](references/finish.md).** Start after every lane of every change in the
    repository graph integrates. Finish is repository-level: one record at
@@ -58,6 +58,13 @@ resume the owning phase's first incomplete operation or stop for the human. Reco
 is an exception path, not a fifth stage: it never recreates consent or restarts
 completed work.
 
+## Lane override precedence
+
+An explicit human decision for a named lane and candidate HEAD may waive any
+lane review or merge rule in this skill. Record the exact waived gates and reason
+as described in [Human Override](references/lane.md#human-override). Ordinary
+approval does not waive other gates. This exception does not apply to other phases.
+
 ## Non-negotiables
 
 - Implementation requires human-approved committed planning artifacts and recorded approval.
@@ -70,9 +77,9 @@ completed work.
   Reviewers remain read-only. Authors, including Oracle authors, never self-approve.
   Runner observations never satisfy review duties or supply verdicts.
 - Never fabricate completion, evidence, verdicts, or consent. Complete required
-  task, review, evidence, and human gates. Only documented exceptions apply,
+  task, review, evidence, and human gates unless explicitly waived for lane integration. Only documented exceptions apply,
   including [Human Override and Oracle stand-in](references/lane.md#human-override).
-- Missing or stale records block affected work. Chat never replaces those records.
+- Missing or stale records block affected work unless explicitly waived for lane integration. Chat never replaces those records.
   Stop and report missing required helpers or unmet human gates; never invent substitutes.
 - PR-opening consent is a separate, one-time human decision recorded in
   `.agents/workflow/finish/pr-follow-up.md`; it is not merge consent, and only the

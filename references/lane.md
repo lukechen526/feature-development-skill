@@ -12,7 +12,7 @@ Resolve and export `FEATDEV_SKILL_ROOT` to the absolute installed skill path bef
 - Each change's `plan-reviews.json` records Oracle review of its OpenSpec artifacts.
 - Repo-level `plan-graph-review.json` records the separate graph review, after all included artifact passes.
 - `.agents/workflow/model-selection.json` and its model/thinking/role profiles are repo-level only. No lane worktree or per-dispatch path is stored in a profile; the worktree is execution metadata in the brief and coordination.
-- `.agents/workflow/plan-approval.json` records the human plan approval. Status reports it as `current`, `stale`, or `missing`; lane-open refuses unless it is current; lane-merge does not enforce it. The Coordinator verifies current approval before merge.
+- `.agents/workflow/plan-approval.json` records the human plan approval. Status reports it as `current`, `stale`, or `missing`; lane-open refuses unless it is current; lane-merge does not enforce it. The Coordinator verifies current approval before merge unless the human explicitly waives it.
 - Briefs, reports, and evidence use the locations in [briefs-and-handoffs.md](briefs-and-handoffs.md#set-locations-no-ad-hoc-paths).
 
 One Coordinator writes the shared coordination file across all changes. The Coordinator authors the local graph.
@@ -183,37 +183,27 @@ Every correction retains the plan-required checks, reviewer independence, eviden
 A focused technical consultation is read-only unless edit authority is explicitly granted.
 It does not reset rounds, approve a merge, or authorize new scope.
 Pause dependent edits for conflicting requirements or unclear closure criteria.
-Only an [explicit human override](#human-override) can waive review duties; agent preference cannot.
+Only an [explicit human override](#human-override) can waive lane review or merge rules; agent preference cannot.
 
 ## Human Override
 
-The human retains authority, but the helper has no general bypass for every gate.
-The Coordinator records the actual human decision; it never invents or infers an exception.
+A human may explicitly waive any lane review or merge rule in this skill.
+The decision takes precedence over conflicting lane review and merge instructions.
+An ordinary approval is not an override. The Coordinator must not invent consent,
+a review verdict, task completion, or evidence.
 
-### Review-duty override
+1. Obtain an explicit decision naming the lane, candidate HEAD, intended merge, reason, and each waived gate.
+2. Verify the candidate HEAD matches the human decision.
+3. Run the [human-override form of lane-merge](helper-commands.md#human-override), naming each waived gate.
+4. Preserve the decision and exact waived duties in the reason and merge record.
 
-A human may explicitly direct integration despite missing or negative code, test, or UI review verdicts.
-Use the [human-override form of lane-merge](helper-commands.md#human-override) with the human's reason.
-Prefer completing normal reviews; the exception does not turn a failed or missing review into `PASS`.
-
-The override cannot waive:
-
-- Completion and ownership of assigned tasks, or preservation of other task definitions and ticks.
-- Clean worktrees, a valid lane ref, candidate identity, or base/ancestry validation.
-- Required UI evidence or the current human checkpoint.
-- Authorization scope, current bindings, or one-use grant rules.
-- Release checks, final human inspections, PR-opening consent, or the human's PR merge decision.
-
-Record an override in this order:
-
-1. Obtain an explicit human instruction identifying the lane, intended integration, and accepted review exception.
-2. Verify the current candidate HEAD and all non-waivable gates.
-3. Record any separately required human checkpoint.
-4. Run the override integration with the human's reason.
-5. Preserve the human's reason and timestamp in the merge record. The helper stores `skipped_gates` only as one generic `reviews` entry, so the reason and record must name each exact waived review duty and each review duty that still applies.
-
-A changed candidate needs a renewed decision. The Coordinator does not reuse an earlier instruction for different work.
-The override affects lane integration only. It is not final release approval and does not reset review history.
+The helper records the selected gate categories. Gates not selected still apply.
+The Coordinator applies the same decision to rules the helper does not enforce.
+The override does not waive release checks, final inspections, PR-opening consent,
+or the human's PR merge decision. A changed candidate requires a new decision.
+A waived review is not a PASS. An unfinished task remains unfinished.
+Git may still refuse a merge, and the helper must identify the candidate and target.
+An override does not authorize discarding uncommitted changes.
 
 ### Oracle stand-in for a lane checkpoint
 
@@ -233,9 +223,9 @@ Final hands-on release inspections remain human-only, as specified in [finish](f
 
 ## Merge and close
 
-Normal integration requires current independent reviewer passes, current UI evidence where `ui: true`, and the bound human checkpoint.
-Before merge, verify plan approval is current ([Records and progress](#records-and-progress)) and that the recorded reviewer evidence is sound; `lane-merge` enforces neither.
-The [merge command reference](helper-commands.md#lane-merge-and-lane-close) contains syntax, not authority to waive those gates.
+Normal integration requires current independent reviewer passes, current UI evidence where `ui: true`, and the bound human checkpoint. An explicit human override may waive these requirements.
+Before merge, verify plan approval is current ([Records and progress](#records-and-progress)) and that the recorded reviewer evidence is sound unless explicitly waived; `lane-merge` enforces neither.
+The [merge command reference](helper-commands.md#lane-merge-and-lane-close) contains syntax; only the human grants an override.
 
 The helper validates:
 

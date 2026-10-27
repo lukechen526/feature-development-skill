@@ -308,14 +308,21 @@ This is the authorized form of `human-gate`, not a separate command. A grant nev
 
 ```bash
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> lane-merge <lane-id> \
-  --human-override --override-reason "<the human decision>"
+  --human-override --override-head <candidate-sha> \
+  --waive reviews --waive tasks --override-reason "<human decision and exact waived duties>"
 ```
 
-This is an explicit-human-decision form of `lane-merge`. It waives only missing or negative review
-verdicts, never ticks, clean trees, base/ancestry validation, current UI evidence, or human checkpoints.
-The helper stores `skipped_gates` only as one generic `reviews` entry. The reason and merge record must
-name each exact waived review duty and each duty that still applies.
-A changed candidate needs a renewed human decision; never reuse an earlier instruction for different work.
+Repeat `--waive` for each gate the human explicitly waives. Choices are
+`reviews` (including review evidence), `tasks` (completion and task ownership),
+`human-gate` (including checkpoint evidence and authorization), `ancestry`,
+`clean-trees`, and `plan-approval` (Coordinator-enforced). With no `--waive`,
+only `reviews` is waived. Unselected gates still apply. The human may also waive
+other lane review and merge rules in the reason; the Coordinator must apply that
+decision. The helper records selected categories, reason, candidate, and timestamp.
+
+A changed candidate requires a renewed decision. The helper still identifies the
+candidate and target, and Git can refuse the merge. A dirty lane's uncommitted
+changes are not included. The helper does not fabricate task completion or verdicts.
 
 ## lane-merge-and-lane-close
 
@@ -324,7 +331,7 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> lane-merge <l
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> lane-close <lane-id>
 ```
 
-Before merge, the Coordinator verifies `.agents/workflow/plan-approval.json` is current for the approved plan; `lane-merge` does not enforce it.
+Before merge, the Coordinator verifies `.agents/workflow/plan-approval.json` is current for the approved plan unless the human explicitly waives it; `lane-merge` does not enforce it.
 Among role evidence, the merge check revalidates only the `ui-reviewer` evidence path and digest. It
 confirms that other review report files exist, but not their evidence content or report hashes.
 The Coordinator verifies every other role's evidence and each report hash before merge.
