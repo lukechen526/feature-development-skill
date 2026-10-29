@@ -836,7 +836,8 @@ def _plan_head(repository: Path) -> str:
     return result.stdout.strip()
 
 
-def _change_artifacts(root: Path, change: str) -> tuple[Path, str]:
+def _change_artifact_files(root: Path, change: str) -> tuple[Path, dict[str, str]]:
+    """Digest each artifact file separately, so one edit needs one narrow review."""
     directory = _openspec_change_directory(root, change)
     if not (directory / "tasks.md").is_file():
         raise StateError(f"plan: {directory} needs OpenSpec artifacts including tasks.md")
@@ -849,19 +850,138 @@ def _change_artifacts(root: Path, change: str) -> tuple[Path, str]:
         if path.name == "tasks.md" and path.parent == directory:
             data = _normalized_task_definitions(data.decode("utf-8")).encode("utf-8")
         files[str(path.relative_to(directory))] = hashlib.sha256(data).hexdigest()
-    return directory, hashlib.sha256(json.dumps(files, sort_keys=True).encode("utf-8")).hexdigest()
+    return directory, files
 
 
-def _reviewed_change_artifacts(root: Path, document: dict[str, Any]) -> dict[str, str]:
+def _artifact_fold(files: dict[str, str]) -> str:
+    """Fold per-file digests into one value for dispatch identity and pre-upgrade records."""
+    return hashlib.sha256(json.dumps(files, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _change_artifacts(root: Path, change: str) -> tuple[Path, str]:
+    """Fold the file digests for dispatch identity only; validity is checked per file."""
+    directory, files = _change_artifact_files(root, change)
+    return directory, _artifact_fold(files)
+
+
+def _graph_digest_matches(record: dict[str, Any], root: Path, document: dict[str, Any]) -> bool:
+    """Accept a graph binding, including a pre-upgrade one whose digest also folded artifacts."""
+    current = hashlib.sha256(json.dumps(document, sort_keys=True).encode("utf-8")).hexdigest()
+    if record.get("plan_sha256") == current:
+        return True
+    try:
+        folds = {change: _artifact_fold(_change_artifact_files(root, change)[1])
+                 for change in _change_plans(document)}
+    except (OSError, PlanError, StateError):
+        return False
+    legacy = hashlib.sha256(
+        json.dumps({"graph": document, "artifacts": folds}, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return record.get("plan_sha256") == legacy
+
+
+def _artifact_review_state(change: str, files: dict[str, str],
+                           checkout: Path) -> tuple[dict[str, str], set[str], set[str], bool]:
+    """Replay the ledger: PASS adds coverage, MORE WORK drops it, a listed removal clears it.
+
+    A record from before per-file review covered the whole change at its fold digest. When that
+    fold no longer matches, the record cannot name what changed, so one full review is required.
+    """
+    ledger, _ = _load_plan_ledger(change, checkout)
+    covered, removed, known, stale_legacy = {}, set(), set(), False
+    for record in ledger["reviews"]:
+        if not isinstance(record, dict) or record.get("scope") != "change":
+            continue
+        entries = record.get("files")
+        if entries is None:
+            if record.get("verdict") == "PASS":
+                # The newest pre-upgrade record decides: a matching fold is a review of this text.
+                stale_legacy = record.get("artifacts_sha256") != _artifact_fold(files)
+                if not stale_legacy:
+                    covered.update(files)
+            continue
+        if isinstance(entries, dict):
+            known.update(entries)
+            if record.get("verdict") == "PASS":
+                if not record.get("partial"):
+                    stale_legacy = False
+                for name, digest in entries.items():
+                    if files.get(name) == digest:
+                        covered[name] = digest
+                    else:
+                        covered.pop(name, None)
+                    removed.discard(name)
+            else:
+                for name in entries:
+                    covered.pop(name, None)
+                for name in record.get("removed") or []:
+                    removed.discard(name)
+        listed = record.get("removed")
+        if record.get("verdict") == "PASS" and isinstance(listed, list):
+            for name in listed:
+                if name not in files:
+                    removed.add(name)
+                    covered.pop(name, None)
+    return covered, removed, known, stale_legacy
+
+
+def _artifact_cycle_state(change: str, checkout: Path) -> tuple[int, set[str], bool]:
+    """Report the open correction cycle: its review count, the files it still needs, and scope.
+
+    A PASS closes the cycle only when it covers every file the open MORE WORK named.
+    A MORE WORK without a file list is unscoped: only a full review closes it.
+    """
+    ledger, _ = _load_plan_ledger(change, checkout)
+    reviews, outstanding, unscoped = 0, set(), False
+    for record in ledger["reviews"]:
+        if not isinstance(record, dict) or record.get("scope") != "change":
+            continue
+        entries, listed = record.get("files"), record.get("removed")
+        named = None if entries is None and listed is None else set(entries or {}) | set(listed or [])
+        if record.get("verdict") == "PASS":
+            if reviews == 0:
+                continue
+            covers = named is None or not outstanding or outstanding <= named
+            if covers and (not unscoped or not record.get("partial")):
+                reviews, outstanding, unscoped = 0, set(), False
+            else:
+                reviews += 1
+            continue
+        reviews += 1
+        if named is None:
+            unscoped = True
+        else:
+            outstanding |= named
+    return reviews, outstanding, unscoped
+
+
+def _unreviewed_artifacts(root: Path, change: str) -> list[str]:
+    """Name the artifact files and removals that no current PASS covers."""
+    _, files = _change_artifact_files(root, change)
+    covered, removed, known, stale_legacy = _artifact_review_state(change, files, root)
+    pending = [name for name in files if name not in covered]
+    pending.extend(f"removed: {name}" for name in sorted(known - set(files) - removed))
+    if stale_legacy:
+        pending.append("the whole change (pre-upgrade review)")
+    return sorted(pending)
+
+
+def _reviewed_change_artifacts(root: Path, document: dict[str, Any]) -> dict[str, dict[str, str]]:
     inputs = {}
     for change in _change_plans(document):
-        _, digest = _change_artifacts(root, change)
-        ledger, _ = _load_plan_ledger(change, root)
-        reviews = [item for item in ledger["reviews"] if isinstance(item, dict) and item.get("scope") == "change"]
-        latest = reviews[-1] if reviews else {}
-        if latest.get("verdict") != "PASS" or latest.get("artifacts_sha256") != digest:
-            raise StateError(f"plan: change {change!r} needs a current OpenSpec artifact PASS before repo graph review")
-        inputs[change] = digest
+        cycle, outstanding, unscoped = _artifact_cycle_state(change, root)
+        if cycle:
+            needs = ", ".join(sorted(outstanding)) or "a full review"
+            raise StateError(
+                f"plan: change {change!r} has an open correction cycle; review {needs} before this gate"
+            )
+        missing = _unreviewed_artifacts(root, change)
+        if missing:
+            raise StateError(
+                f"plan: change {change!r} needs a current OpenSpec artifact PASS for: {', '.join(missing)}"
+            )
+        _, files = _change_artifact_files(root, change)
+        inputs[change] = files
     return inputs
 
 
@@ -884,9 +1004,9 @@ def _plan_context(change: str | None, plan_path: object = None, scope: str = "ch
             raise StateError("plan: repo graph review covers every included change; omit --change")
         path = Path(str(plan_path)).expanduser().resolve() if plan_path is not None else root / _REPO_PLAN
         validate_plan(path)
-        document = _load_json(path)
-        inputs = _reviewed_change_artifacts(root, document)
-        digest = hashlib.sha256(json.dumps({"graph": document, "artifacts": inputs}, sort_keys=True).encode("utf-8")).hexdigest()
+        # The graph digest covers plan-graph.json only. Artifact text is reviewed per file,
+        # so a wording edit never invalidates the graph review or the recorded approval.
+        digest = hashlib.sha256(json.dumps(_load_json(path), sort_keys=True).encode("utf-8")).hexdigest()
     else:
         raise StateError("plan: scope must be change or graph")
     return root, change, path, digest, _plan_head(root)
@@ -916,6 +1036,8 @@ def plan_dispatch(
     if role != "oracle":
         raise StateError("plan: plan review must use role 'oracle'; change --role")
     checkout, change, plan, plan_sha256, current_head = _plan_context(change, plan_path, scope)
+    if scope == "graph":
+        _reviewed_change_artifacts(checkout, _load_json(plan))
     digest_field = "artifacts_sha256" if scope == "change" else "plan_sha256"
     path_field = "artifacts_path" if scope == "change" else "plan_path"
     reviewed_head = _git_commit(checkout, head) if head is not None else current_head
@@ -989,6 +1111,7 @@ def plan_review(
     change: str | None = None,
     plan_path: object = None,
     scope: str = "change",
+    files: list[str] | None = None,
 ) -> Path:
     """Record a verdict bound to the selected planning scope and its exact inputs."""
     role = _require_role(role)
@@ -997,6 +1120,8 @@ def plan_review(
     if verdict not in {"PASS", "MORE WORK"}:
         raise StateError("plan: verdict must be PASS or MORE WORK; change it")
     checkout, change, plan, plan_sha256, current_head = _plan_context(change, plan_path, scope)
+    if scope == "graph":
+        _reviewed_change_artifacts(checkout, _load_json(plan))
     digest_field = "artifacts_sha256" if scope == "change" else "plan_sha256"
     path_field = "artifacts_path" if scope == "change" else "plan_path"
     reviewed_head = _git_commit(checkout, head)
@@ -1037,18 +1162,42 @@ def plan_review(
             f"plan: plan dispatch is bound to {dispatch.get('head') or 'no head'}, "
             f"review HEAD is {reviewed_head}; dispatch a fresh plan review"
         )
-    round_number = 1
-    for previous in reversed(ledger["reviews"]):
-        if not isinstance(previous, dict) or previous.get("role") != role or previous.get("scope") != scope:
-            continue
-        if previous.get("verdict") == "PASS":
-            break
-        round_number += 1
+    # A partial PASS is a review inside the open cycle; it never resets the round count.
+    if scope == "change":
+        round_number = _artifact_cycle_state(change, checkout)[0] + 1
+    else:
+        round_number = 1
+        for previous in reversed(ledger["reviews"]):
+            if (not isinstance(previous, dict) or previous.get("role") != role
+                    or previous.get("scope") != scope):
+                continue
+            if previous.get("verdict") == "PASS":
+                break
+            round_number += 1
     if round_number > 2 and mediation_path is None:
         raise StateError(
             "plan: plan review round is past the two-review limit; provide --mediation "
             "with the Oracle mediation report before reviewing again"
         )
+    reviewed_files, reviewed_removed, basis = None, [], None
+    if scope == "change":
+        _, current_files = _change_artifact_files(checkout, change)
+        _, _, known, _ = _artifact_review_state(change, current_files, checkout)
+        known.update(current_files)
+        selected = (sorted(set(files)) if files
+                    else sorted(set(current_files) | (known - set(current_files))))
+        unknown = [name for name in selected if name not in current_files and name not in known]
+        if unknown:
+            raise StateError(f"plan: unknown artifact files: {', '.join(unknown)}; change --file")
+        reviewed_files = {name: current_files[name] for name in selected if name in current_files}
+        reviewed_removed = sorted(name for name in selected if name not in current_files)
+        if files:
+            priors = [row for row in ledger["reviews"]
+                      if isinstance(row, dict) and row.get("scope") == "change"
+                      and row.get("verdict") == "PASS"]
+            if priors:
+                basis = {"report": priors[-1].get("report"),
+                         "artifacts_sha256": priors[-1].get("artifacts_sha256")}
     record = {
         "scope": scope,
         "role": role,
@@ -1063,6 +1212,13 @@ def plan_review(
     }
     if mediation_path is not None:
         record["mediation"] = mediation_path
+    if reviewed_files is not None:
+        record["files"] = reviewed_files
+        record["partial"] = bool(files)
+    if reviewed_removed:
+        record["removed"] = reviewed_removed
+    if basis is not None:
+        record["basis"] = basis
     ledger["reviews"].append(record)
     dispatch.update({
         "result": "ok",
@@ -1095,7 +1251,9 @@ def plan_approve(approver: str = "human", waiver: str | None = None, lanes: list
         if isinstance(item, dict) and item.get("scope") == "graph"
     ]
     latest = reviews[-1] if reviews else None
-    if not latest or latest.get("verdict") != "PASS" or latest.get("plan_sha256") != plan_sha256:
+    document = _load_json(plan_path)
+    if (not latest or latest.get("verdict") != "PASS"
+            or not _graph_digest_matches(latest, root, document)):
         raise StateError(
             "plan: a current repo graph PASS is required before recording approval; "
             "run plan-review --scope graph first"
@@ -1105,7 +1263,6 @@ def plan_approve(approver: str = "human", waiver: str | None = None, lanes: list
         raise StateError(f"plan: cannot inspect OpenSpec artifacts: {_one_line(status.stderr)}; repair the checkout")
     if status.stdout.strip():
         raise StateError("plan: commit the OpenSpec artifacts before recording approval")
-    document = _load_json(plan_path)
     artifacts = _reviewed_change_artifacts(root, document)
     label = approver.strip() if isinstance(approver, str) and approver.strip() else "human"
     record = {
@@ -1146,12 +1303,24 @@ def _plan_approval_status(state: dict[str, Any]) -> dict[str, Any]:
                 or not isinstance(waiver.get("all_lanes"), bool)
                 or bool(waiver["lanes"]) == waiver["all_lanes"]):
             return {"state": "unreadable", "error": "malformed plan waiver"}
+    bound, pending, blocker = False, [], None
     try:
-        current = _plan_context(None, None, "graph")[3]
+        _, _, plan_path, _, _ = _plan_context(None, None, "graph")
+        document = _load_json(plan_path)
+        bound = _graph_digest_matches(record, Path(checkout), document)
+        clean = _state_git(Path(checkout), "status", "--porcelain", "--untracked-files=all",
+                           "--", "openspec/changes")
+        if clean.returncode or clean.stdout.strip():
+            # A reviewed but uncommitted edit would not reach the lane worktrees.
+            blocker = "commit the reviewed artifacts: openspec/changes is not clean"
+        for change in _change_plans(document):
+            if _artifact_cycle_state(change, Path(checkout))[0]:
+                pending.append(f"open correction cycle: {change}")
+            pending.extend(_unreviewed_artifacts(Path(checkout), change))
     except (OSError, PlanError, StateError, ValueError):
-        current = None
-    return {
-        "state": kind if current and record.get("plan_sha256") == current else "stale",
+        bound, pending = False, []
+    result = {
+        "state": kind if bound and not pending and blocker is None else "stale",
         "waiver": record.get("waiver"),
         "approver": record.get("approver"),
         "approved_at": record.get("approved_at"),
@@ -1160,6 +1329,11 @@ def _plan_approval_status(state: dict[str, Any]) -> dict[str, Any]:
         "head": record.get("head"),
         "plan_sha256": record.get("plan_sha256"),
     }
+    if blocker:
+        result["detail"] = blocker
+    elif pending:
+        result["detail"] = f"artifact review required: {', '.join(sorted(set(pending)))}"
+    return result
 
 
 def _state_git(repository: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -4881,9 +5055,11 @@ def _self_check() -> int:
                 if not (repository / _REPO_PLAN).exists():
                     migrate_repository(repository)
                 _, _, _, change_digest, _ = _plan_context(change, None, "change")
+                _, change_files = _change_artifact_files(repository, change)
                 ledger, _ = _load_plan_ledger(change, repository)
                 ledger.setdefault("reviews", []).append(
-                    {"scope": "change", "role": "oracle", "verdict": "PASS", "artifacts_sha256": change_digest}
+                    {"scope": "change", "role": "oracle", "verdict": "PASS",
+                     "artifacts_sha256": change_digest, "files": change_files}
                 )
                 _write_plan_ledger(change, repository, ledger)
                 _, _, _, graph_digest, _ = _plan_context(None, None, "graph")
@@ -7035,6 +7211,174 @@ def _self_check() -> int:
         else:
             raise AssertionError("a missing plan-review report must be refused")
 
+        # Artifact review binds each file: one changed file needs one narrow review, while the
+        # graph review and the recorded approval stay current.
+        delta_repo = make_repository("deltacase", "deltacase", {
+            "schema_version": 1, "change": "deltacase",
+            "lanes": {"one": {"risk": "ordinary", "ui": False,
+                               "sensitive": False, "depends_on": []}},
+            "tasks": {"1.1": {"lane": "one", "deps": []}},
+        }, "- [ ] 1.1 first\n", approve=False)
+        delta_change = delta_repo / "openspec" / "changes" / "deltacase"
+        delta_spec = delta_change / "specs" / "one" / "spec.md"
+        delta_spec.parent.mkdir(parents=True)
+        delta_spec.write_text("# First requirement\n", encoding="utf-8")
+        commit(delta_repo, "add spec")
+        approve_plan(delta_repo, "deltacase")
+        os.chdir(delta_repo)
+        delta_reviews = workflow_dir(delta_repo) / "deltacase" / "reviews"
+        graph_reviews = len(_load_plan_ledger(None, delta_repo)[0]["reviews"])
+
+        delta_spec.write_text("# First requirement, refined\n", encoding="utf-8")
+        assert _unreviewed_artifacts(delta_repo, "deltacase") == ["specs/one/spec.md"]
+        assert _plan_approval_status(state_derive("deltacase"))["state"] == "stale"
+
+        narrow_report = delta_reviews / "artifacts-oracle-c2-r1.md"
+        narrow_report.parent.mkdir(parents=True, exist_ok=True)
+        narrow_report.write_text("PASS: refined requirement\n", encoding="utf-8")
+        plan_dispatch("oracle", "plan", key="delta/r1", report=str(narrow_report), change="deltacase")
+        plan_review("oracle", "PASS", git(delta_repo, "rev-parse", "HEAD"), str(narrow_report),
+                    change="deltacase", files=["specs/one/spec.md"])
+        narrow_record = _load_plan_ledger("deltacase", delta_repo)[0]["reviews"][-1]
+        assert list(narrow_record["files"]) == ["specs/one/spec.md"], narrow_record
+        assert narrow_record["basis"]["artifacts_sha256"], narrow_record
+
+        commit(delta_repo, "refine requirement")
+        plan_approve()
+        assert _plan_approval_status(state_derive("deltacase"))["state"] == "current"
+        assert len(_load_plan_ledger(None, delta_repo)[0]["reviews"]) == graph_reviews
+
+        # A reviewed but uncommitted edit does not reopen the gate: lane worktrees read HEAD.
+        delta_spec.write_text("# First requirement, refined again\n", encoding="utf-8")
+        uncommitted_report = delta_reviews / "artifacts-oracle-c2-r2.md"
+        uncommitted_report.write_text("PASS: refined again\n", encoding="utf-8")
+        plan_dispatch("oracle", "plan", key="delta/r1b", report=str(uncommitted_report), change="deltacase")
+        plan_review("oracle", "PASS", git(delta_repo, "rev-parse", "HEAD"), str(uncommitted_report),
+                    change="deltacase", files=["specs/one/spec.md"])
+        uncommitted = _plan_approval_status(state_derive("deltacase"))
+        assert uncommitted["state"] == "stale" and "commit" in uncommitted["detail"], uncommitted
+        commit(delta_repo, "refine again")
+        assert _plan_approval_status(state_derive("deltacase"))["state"] == "current"
+
+        # A structural edit changes the graph digest and returns to the full plan path.
+        delta_graph = _load_json(delta_repo / _REPO_PLAN)
+        changed_graph = json.loads(json.dumps(delta_graph))
+        changed_graph["changes"]["deltacase"]["lanes"]["one"]["sensitive"] = True
+        _atomic_write_json(delta_repo / _REPO_PLAN, changed_graph)
+        expect_refusal("plan-approve", contains="graph PASS is required")
+        _atomic_write_json(delta_repo / _REPO_PLAN, delta_graph)
+
+        # A new artifact file needs one review; unchanged files keep their PASS entries.
+        added_spec = delta_change / "specs" / "one" / "extra.md"
+        added_spec.write_text("# Extra requirement\n", encoding="utf-8")
+        commit(delta_repo, "add requirement")
+        assert _unreviewed_artifacts(delta_repo, "deltacase") == ["specs/one/extra.md"]
+        expect_refusal("plan-approve", contains="artifact PASS for: specs/one/extra.md")
+        added_report = delta_reviews / "artifacts-oracle-c3-r1.md"
+        added_report.write_text("PASS: extra requirement\n", encoding="utf-8")
+        plan_dispatch("oracle", "plan", key="delta/r2", report=str(added_report), change="deltacase")
+        plan_review("oracle", "PASS", git(delta_repo, "rev-parse", "HEAD"), str(added_report),
+                    change="deltacase", files=["specs/one/extra.md"])
+        plan_approve()
+        assert _plan_approval_status(state_derive("deltacase"))["state"] == "current"
+
+        # A mistyped --file must not record coverage for a file that does not exist.
+        unknown_report = delta_reviews / "artifacts-oracle-c4-r1.md"
+        unknown_report.write_text("PASS\n", encoding="utf-8")
+        plan_dispatch("oracle", "plan", key="delta/r3", report=str(unknown_report), change="deltacase")
+        try:
+            plan_review("oracle", "PASS", git(delta_repo, "rev-parse", "HEAD"), str(unknown_report),
+                        change="deltacase", files=["specs/nope.md"])
+        except StateError as exc:
+            assert "unknown artifact files" in str(exc), str(exc)
+        else:
+            raise AssertionError("an unknown --file must be refused")
+
+        # A removed artifact needs an explicit review; the removal must not slip through.
+        added_spec.unlink()
+        commit(delta_repo, "remove requirement")
+        assert _unreviewed_artifacts(delta_repo, "deltacase") == ["removed: specs/one/extra.md"]
+        expect_refusal("plan-approve", contains="artifact PASS for: removed: specs/one/extra.md")
+        removal_report = delta_reviews / "artifacts-oracle-c3-r2.md"
+        removal_report.write_text("PASS: requirement removed\n", encoding="utf-8")
+        plan_dispatch("oracle", "plan", key="delta/r4", report=str(removal_report), change="deltacase")
+        plan_review("oracle", "PASS", git(delta_repo, "rev-parse", "HEAD"), str(removal_report),
+                    change="deltacase", files=["specs/one/extra.md"])
+        removal_record = _load_plan_ledger("deltacase", delta_repo)[0]["reviews"][-1]
+        assert removal_record["removed"] == ["specs/one/extra.md"], removal_record
+        assert removal_record["partial"] is True
+        plan_approve()
+        assert _plan_approval_status(state_derive("deltacase"))["state"] == "current"
+
+        # A later deletion cannot inherit the earlier removal review.
+        added_spec.write_text("# Extra requirement again\n", encoding="utf-8")
+        commit(delta_repo, "restore requirement")
+        restore_report = delta_reviews / "artifacts-oracle-c3-r3.md"
+        restore_report.write_text("PASS: requirement restored\n", encoding="utf-8")
+        plan_dispatch("oracle", "plan", key="delta/r4b", report=str(restore_report), change="deltacase")
+        plan_review("oracle", "PASS", git(delta_repo, "rev-parse", "HEAD"), str(restore_report),
+                    change="deltacase", files=["specs/one/extra.md"])
+        added_spec.unlink()
+        commit(delta_repo, "remove requirement again")
+        assert _unreviewed_artifacts(delta_repo, "deltacase") == ["removed: specs/one/extra.md"]
+
+        # A pre-upgrade PASS that no longer matches forces one full review; a per-file PASS
+        # cannot clear it, so a change the old record cannot name is never skipped.
+        legacy_ledger, _ = _load_plan_ledger("deltacase", delta_repo)
+        legacy_ledger["reviews"].append({"scope": "change", "role": "oracle", "verdict": "PASS",
+                                         "artifacts_sha256": "0" * 64})
+        _write_plan_ledger("deltacase", delta_repo, legacy_ledger)
+        assert "the whole change (pre-upgrade review)" in _unreviewed_artifacts(delta_repo, "deltacase")
+        legacy_partial = delta_reviews / "artifacts-oracle-c3-r4.md"
+        legacy_partial.write_text("PASS: one file\n", encoding="utf-8")
+        plan_dispatch("oracle", "plan", key="delta/r4c", report=str(legacy_partial), change="deltacase")
+        plan_review("oracle", "PASS", git(delta_repo, "rev-parse", "HEAD"), str(legacy_partial),
+                    change="deltacase", files=["specs/one/spec.md"])
+        assert "the whole change (pre-upgrade review)" in _unreviewed_artifacts(delta_repo, "deltacase")
+        full_report = delta_reviews / "artifacts-oracle-c3-r5.md"
+        full_report.write_text("PASS: full review\n", encoding="utf-8")
+        plan_dispatch("oracle", "plan", key="delta/r4d", report=str(full_report), change="deltacase")
+        plan_review("oracle", "PASS", git(delta_repo, "rev-parse", "HEAD"), str(full_report),
+                    change="deltacase")
+        assert _unreviewed_artifacts(delta_repo, "deltacase") == []
+
+        # A newer pre-upgrade PASS that matches the current files clears the older mismatch.
+        legacy_ledger, _ = _load_plan_ledger("deltacase", delta_repo)
+        legacy_ledger["reviews"].extend([
+            {"scope": "change", "role": "oracle", "verdict": "PASS", "artifacts_sha256": "1" * 64},
+            {"scope": "change", "role": "oracle", "verdict": "PASS",
+             "artifacts_sha256": _change_artifacts(delta_repo, "deltacase")[1]},
+        ])
+        _write_plan_ledger("deltacase", delta_repo, legacy_ledger)
+        assert _unreviewed_artifacts(delta_repo, "deltacase") == []
+
+        # MORE WORK drops coverage, and a partial PASS does not reset the correction cycle.
+        work_report = delta_reviews / "artifacts-oracle-c4-r1.md"
+        work_report.write_text("MORE WORK: coverage gap\n", encoding="utf-8")
+        plan_dispatch("oracle", "plan", key="delta/r5", report=str(work_report), change="deltacase")
+        plan_review("oracle", "MORE WORK", git(delta_repo, "rev-parse", "HEAD"), str(work_report),
+                    change="deltacase")
+        assert "specs/one/spec.md" in _unreviewed_artifacts(delta_repo, "deltacase")
+        expect_refusal("plan-approve", contains="open correction cycle")
+
+        partial_report = delta_reviews / "artifacts-oracle-c4-r2.md"
+        partial_report.write_text("PASS: one file fixed\n", encoding="utf-8")
+        plan_dispatch("oracle", "plan", key="delta/r6", report=str(partial_report), change="deltacase")
+        plan_review("oracle", "PASS", git(delta_repo, "rev-parse", "HEAD"), str(partial_report),
+                    change="deltacase", files=["specs/one/spec.md"])
+        assert "tasks.md" in _unreviewed_artifacts(delta_repo, "deltacase")
+
+        open_cycle_report = delta_reviews / "artifacts-oracle-c4-r3.md"
+        open_cycle_report.write_text("MORE WORK: still open\n", encoding="utf-8")
+        plan_dispatch("oracle", "plan", key="delta/r7", report=str(open_cycle_report), change="deltacase")
+        try:
+            plan_review("oracle", "MORE WORK", git(delta_repo, "rev-parse", "HEAD"),
+                        str(open_cycle_report), change="deltacase")
+        except StateError as exc:
+            assert "two-review limit" in str(exc), str(exc)
+        else:
+            raise AssertionError("a partial PASS must not reset the correction cycle")
+
         os.chdir(root)
 
 
@@ -7100,6 +7444,10 @@ def _parser() -> argparse.ArgumentParser:
     plan_reviewed.add_argument("--report", required=True, metavar="<path>")
     plan_reviewed.add_argument("--mediation", metavar="<path>", help="required after two plan reviews")
     plan_reviewed.add_argument("--plan", type=Path, metavar="<plan.json>")
+    plan_reviewed.add_argument(
+        "--file", action="append", dest="files", metavar="<relative-path>",
+        help="reviewed artifact file; repeat per changed file; omit to review the whole change",
+    )
     _add_change_option(plan_reviewed)
 
     approve = commands.add_parser(
@@ -7297,7 +7645,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "plan-review":
             path = plan_review(
                 args.role, args.verdict, args.head, args.report, args.mediation,
-                selected_change, args.plan, args.scope,
+                selected_change, args.plan, args.scope, args.files,
             )
             print(f"plan-review: recorded {args.role}={args.verdict} ({path})")
             return 0

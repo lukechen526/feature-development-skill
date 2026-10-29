@@ -83,11 +83,18 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> plan-dispatch
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> plan-review \
   --scope change --role oracle <PASS|MORE WORK> \
   --head <feature-head-sha> \
-  --report .agents/workflow/<change>/reviews/artifacts-oracle-c<cycle>-r<round>.md
+  --report .agents/workflow/<change>/reviews/artifacts-oracle-c<cycle>-r<round>.md \
+  [--file <relative-path> ...]
 ```
 
 Record intent before launching the actual Oracle. Record its verdict only after reading the actual report.
 Pair the report with `.agents/workflow/<change>/briefs/artifacts-oracle-c<cycle>-r<round>.md`.
+Add `--file` for each changed artifact, for example `--file specs/auth/spec.md`, to review a subset. Omit it to cover every artifact file in the change.
+The record stores a digest per covered file and names the earlier `PASS` as its basis.
+An edit drops only that file's coverage, so the next review covers the changed file and its related requirements.
+`MORE WORK` drops coverage for the files it names. Name a deleted artifact with `--file` to review the removal; the record lists it in `removed`.
+A `PASS` that covers only part of an open `MORE WORK` does not reset the round count.
+An open correction cycle blocks graph review, plan approval, and lane opening; commit a reviewed edit before those gates reopen.
 This scope reviews one change's OpenSpec artifacts, not the graph. See [Oracle stage 1](plan.md#oracle-stage-1-each-changes-openspec-artifacts).
 
 ## Oracle planning corrections
@@ -155,10 +162,11 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-approve [--approver <label
 ```
 
 Run after both Oracle stages pass, after the human approves the artifacts and the current repo graph, and after committing the OpenSpec artifacts.
-It requires a current artifact `PASS` for every included change and a current graph `PASS` bound to the
-current artifact and graph digests. It records the approver, current HEAD, graph digest, and per-change
-artifact digests in `.agents/workflow/plan-approval.json`.
-It refuses uncommitted `openspec/changes` content, a missing/stale graph `PASS`, or a missing/stale artifact `PASS`.
+It requires a current artifact `PASS` for every artifact file of every included change and a current graph
+`PASS` bound to the current graph digest. It records the approver, current HEAD, graph digest, and per-change
+artifact file digests in `.agents/workflow/plan-approval.json`.
+It refuses uncommitted `openspec/changes` content, a missing/stale graph `PASS`, or an artifact file without a current `PASS`.
+A one-file edit makes the approval stale for that file only. After its review, the record is current again without a new `plan-approve`.
 It records the human decision; it never grants approval. `status` shows whether the record is current, stale, or missing.
 
 For an explicit [advance waiver](lane.md#advance-human-waiver) of plan approval, use one of:

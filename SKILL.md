@@ -28,6 +28,7 @@ Read and follow each linked guide before starting that phase. Complete each phas
    reviews of each change's artifacts and then the whole repository graph.
    Obtain human approval or a scoped advance waiver, commit the artifacts, and record approval or waiver with
    [the appropriate command](references/helper-commands.md#plan-approval) before implementation.
+   A reviewed artifact edit needs only that file's re-review while `plan-graph.json` does not change.
 3. **[Lanes](references/lane.md).** Opening a lane needs current plan approval or a current waiver covering that lane.
    Dispatch isolated, scoped implementation per task, obtain independent reviews of
    the current lane `HEAD`, correct findings within the documented review limits, and

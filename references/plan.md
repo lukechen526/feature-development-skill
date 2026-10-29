@@ -71,10 +71,17 @@ It can run before `plan-graph.json` exists.
 Record intent before the actual launch, and record the verdict only after reading the actual report: see the [helper command reference](helper-commands.md#change-artifact-review).
 
 Each change has its own ledger: `.agents/workflow/<change>/plan-reviews.json`.
-The helper binds the verdict to the OpenSpec artifact digest and review HEAD, not to the graph.
-Artifact edits invalidate the corresponding verdict. Task completion marks alone do not change the artifact contract digest.
+The helper binds the verdict to each reviewed artifact file and its digest, and to the review HEAD, never to the graph.
+A `PASS` covers the files it reviewed. Pass `--file` for each changed file, or omit it to cover every file in the change.
+An edit drops that file's coverage and leaves the other files covered, so the next review covers the changed file and its related requirements only.
+A `MORE WORK` verdict drops coverage for the files it names; a later `PASS` restores the files it covers.
+Name a deleted artifact with `--file` to review the removal; the record lists it in `removed`.
+An open correction cycle blocks graph review, plan approval, and lane opening until a `PASS` covers every file that cycle named.
+A reviewed edit must be committed before those gates open again: lane worktrees read the feature HEAD, not the working tree.
+Task completion marks alone do not change any artifact digest.
 An earlier graph-only verdict never satisfies this stage.
-Every included change needs a current `PASS` before Oracle graph review starts.
+Every artifact file needs a current `PASS` before Oracle graph review and before plan approval.
+A ledger from before per-file review still counts while its recorded fold digest matches the files on disk; otherwise one full review restores coverage.
 
 ## Author the repo-level graph
 
@@ -143,9 +150,11 @@ It uses the reviewed OpenSpec artifacts as inputs; it does not silently revise t
 
 Graph review has no `--change` selector: see the [helper command reference](helper-commands.md#repo-graph-review).
 The repo-level ledger is `.agents/workflow/plan-graph-review.json`, separate from every change's artifact ledger.
-The helper requires current artifact passes for every graph entry at dispatch and verdict recording.
-The graph verdict binds the whole graph and the reviewed artifact digests.
-Changing either input invalidates the graph review. Changed artifact contracts return to stage 1 first.
+The helper requires current artifact coverage for every graph entry at dispatch and verdict recording.
+The graph verdict binds `.agents/workflow/plan-graph.json` alone.
+An artifact edit does not invalidate the graph review; the per-file artifact review covers it.
+A lane, task, ownership, dependency, `risk`, `ui`, or `sensitive` edit changes the graph:
+obtain a fresh graph review and human approval before renewed implementation.
 
 ## Corrections and approval
 
@@ -158,6 +167,7 @@ Each Oracle planning dispatch has a canonical brief and report pair: artifact re
 `.agents/workflow/reviews/plan-graph-oracle-c<cycle>-r<round>.md`.
 The `c<cycle>` and `r<round>` components prevent overwriting an earlier report when later planning work starts a new cycle or a correction review starts a new round.
 Edits after `MORE WORK` remain in the same cycle; changing a commit or digest never resets that cycle.
+A `PASS` that covers only some of the files an open `MORE WORK` named does not close the cycle or restart its round count.
 A third review within that cycle requires `--mediation <report>` or escalation to the human.
 After a second `MORE WORK`, authorize bounded Oracle authorship or escalate to the human.
 
@@ -180,7 +190,8 @@ Never stage `plan-graph.json`, `coordination.json`, or their review/approval rec
 
 Plan-approval state and its enforcement are defined once in [lane records](lane.md#records-and-progress).
 
-Plan amendments require affected artifact review, then repo graph review, then human approval recorded with `plan-approve` or an applicable waiver recorded with `plan-waive` before renewed implementation.
+A plan amendment is a file review, not a planning cycle. Review the changed artifacts with `--file`; coverage then restores and the recorded approval is current again while `plan-graph.json` does not change.
+A change to lanes, task ownership, dependencies, `risk`, `ui`, or `sensitive` edits the graph. Obtain a fresh graph review and human approval recorded with `plan-approve`, or an applicable waiver recorded with `plan-waive`, before renewed implementation.
 Lane review and human-gate bindings include the lane contract digest; material lane edits require fresh verdicts.
 Unrelated changes or lanes do not invalidate an unchanged ordinary lane's review binding.
 Plan-bound grants retain their exact selected-change bindings.
