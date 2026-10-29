@@ -864,8 +864,31 @@ def _change_artifacts(root: Path, change: str) -> tuple[Path, str]:
     return directory, _artifact_fold(files)
 
 
+def _graph_structure_digest(document: dict[str, Any]) -> str:
+    """Bind task order and scope explicitly, without prose or artifact contents."""
+    structure = {
+        change: {
+            "lanes": {
+                lane_id: {key: lane.get(key) for key in
+                          ("risk", "ui", "sensitive", "depends_on")}
+                for lane_id, lane in plan["lanes"].items()
+            },
+            # A list preserves task order even though object keys are canonicalized.
+            "tasks": [{"id": task_id, "lane": task["lane"], "deps": task.get("deps", [])}
+                      for task_id, task in plan["tasks"].items()],
+        }
+        for change, plan in _change_plans(document).items()
+    }
+    return hashlib.sha256(json.dumps(structure, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 def _graph_digest_matches(record: dict[str, Any], root: Path, document: dict[str, Any]) -> bool:
     """Accept a graph binding, including a pre-upgrade one whose digest also folded artifacts."""
+    kind = record.get("digest_kind")
+    if kind in {None, "structure"} and record.get("plan_sha256") == _graph_structure_digest(document):
+        return True
+    if kind not in {None, "legacy"}:
+        return False
     current = hashlib.sha256(json.dumps(document, sort_keys=True).encode("utf-8")).hexdigest()
     if record.get("plan_sha256") == current:
         return True
@@ -1004,9 +1027,7 @@ def _plan_context(change: str | None, plan_path: object = None, scope: str = "ch
             raise StateError("plan: repo graph review covers every included change; omit --change")
         path = Path(str(plan_path)).expanduser().resolve() if plan_path is not None else root / _REPO_PLAN
         validate_plan(path)
-        # The graph digest covers plan-graph.json only. Artifact text is reviewed per file,
-        # so a wording edit never invalidates the graph review or the recorded approval.
-        digest = hashlib.sha256(json.dumps(_load_json(path), sort_keys=True).encode("utf-8")).hexdigest()
+        digest = _graph_structure_digest(_load_json(path))
     else:
         raise StateError("plan: scope must be change or graph")
     return root, change, path, digest, _plan_head(root)
@@ -1067,6 +1088,8 @@ def plan_dispatch(
         path_field: plan_relative,
         digest_field: plan_sha256,
     }
+    if scope == "graph":
+        intent["digest_kind"] = "structure"
     if report_path is not None:
         intent["report"] = report_path
     dispatches = ledger["dispatches"]
@@ -1152,7 +1175,8 @@ def plan_review(
             "plan: no open plan dispatch matches this review; record the intent with plan-dispatch first"
         )
     dispatch = open_records[-1]
-    if dispatch.get(digest_field) != plan_sha256:
+    if (not _graph_digest_matches(dispatch, checkout, _load_json(plan)) if scope == "graph"
+            else dispatch.get(digest_field) != plan_sha256):
         raise StateError(
             "plan: the review inputs changed since the plan dispatch; "
             "dispatch a fresh plan review for the current plan"
@@ -1210,6 +1234,8 @@ def plan_review(
         "dispatch_key": dispatch.get("key"),
         "recorded_at": _utc_timestamp(),
     }
+    if scope == "graph":
+        record["digest_kind"] = "structure"
     if mediation_path is not None:
         record["mediation"] = mediation_path
     if reviewed_files is not None:
@@ -1272,6 +1298,7 @@ def plan_approve(approver: str = "human", waiver: str | None = None, lanes: list
         "approved_at": _utc_timestamp(),
         "head": head,
         "plan_sha256": plan_sha256,
+        "digest_kind": "structure",
         "artifacts": artifacts,
     }
     if waiver is not None:
@@ -7228,6 +7255,59 @@ def _self_check() -> int:
         os.chdir(delta_repo)
         delta_reviews = workflow_dir(delta_repo) / "deltacase" / "reviews"
         graph_reviews = len(_load_plan_ledger(None, delta_repo)[0]["reviews"])
+
+        graph_document = _load_json(delta_repo / _REPO_PLAN)
+        graph_record = _load_plan_ledger(None, delta_repo)[0]["reviews"][-1]
+        assert _graph_digest_matches(graph_record, delta_repo, graph_document)
+        assert _load_json(workflow_dir(delta_repo) / _PLAN_APPROVAL)["digest_kind"] == "structure"
+        legacy_fold = hashlib.sha256(json.dumps({
+            "graph": graph_document,
+            "artifacts": {"deltacase": _change_artifacts(delta_repo, "deltacase")[1]},
+        }, sort_keys=True).encode("utf-8")).hexdigest()
+        legacy_record = {**graph_record, "plan_sha256": legacy_fold}
+        graph_ledger, _ = _load_plan_ledger(None, delta_repo)
+        graph_ledger["reviews"].append(legacy_record)
+        _write_plan_ledger(None, delta_repo, graph_ledger)
+        loaded = _load_plan_ledger(None, delta_repo)[0]["reviews"][-1]
+        assert _graph_digest_matches(loaded, delta_repo, graph_document)
+        assert _graph_digest_matches(dict(loaded, digest_kind="legacy"), delta_repo, graph_document)
+        graph_ledger["reviews"].pop()
+        _write_plan_ledger(None, delta_repo, graph_ledger)
+        for artifact in (delta_spec, delta_change / "proposal.md", delta_change / "tasks.md"):
+            original = artifact.read_text(encoding="utf-8") if artifact.exists() else None
+            artifact.write_text((original or "") + "Refined wording.\n", encoding="utf-8")
+            assert _graph_digest_matches(graph_record, delta_repo, graph_document), artifact
+            assert not _graph_digest_matches(legacy_record, delta_repo, graph_document), artifact
+            if original is None:
+                artifact.unlink()
+            else:
+                artifact.write_text(original, encoding="utf-8")
+        print("graph proof: same graph, spec wording edit: PASS before -> PASS after")
+
+        two_tasks = json.loads(json.dumps(graph_document))
+        two_tasks["changes"]["deltacase"]["lanes"]["one"]["tasks"]["1.2"] = {"deps": []}
+        structural_record = {"digest_kind": "structure",
+                             "plan_sha256": _graph_structure_digest(two_tasks)}
+        for mutation in ("dependency", "add", "remove", "order", "scope", "risk", "ui", "sensitive"):
+            changed = json.loads(json.dumps(two_tasks))
+            node = changed["changes"]["deltacase"]
+            lane = node["lanes"]["one"]
+            if mutation == "dependency":
+                lane["tasks"]["1.2"]["deps"] = ["1.1"]
+            elif mutation == "add":
+                lane["tasks"]["1.3"] = {"deps": []}
+            elif mutation == "remove":
+                del lane["tasks"]["1.2"]
+            elif mutation == "order":
+                lane["tasks"] = dict(reversed(list(lane["tasks"].items())))
+            elif mutation == "scope":
+                node["lanes"]["two"] = {**lane, "tasks": {"1.2": lane["tasks"].pop("1.2")}}
+            else:
+                lane[mutation] = "high" if mutation == "risk" else True
+            assert not _graph_digest_matches(structural_record, delta_repo, changed), mutation
+        prose_graph = json.loads(json.dumps(two_tasks))
+        prose_graph["changes"]["deltacase"]["lanes"]["one"]["tasks"]["1.1"]["description"] = "New wording"
+        assert _graph_digest_matches(structural_record, delta_repo, prose_graph)
 
         delta_spec.write_text("# First requirement, refined\n", encoding="utf-8")
         assert _unreviewed_artifacts(delta_repo, "deltacase") == ["specs/one/spec.md"]
