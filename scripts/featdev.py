@@ -686,9 +686,15 @@ def _finish_changes(checkout: Path) -> list[str]:
     return _active_changes(root)
 
 
-def _finish_plan_digest(checkout: Path) -> str:
+def _finish_plan_digest(checkout: Path, legacy: bool = False) -> str:
     root = _workflow_checkout(checkout)
     head = _git_output(root, "rev-parse", "HEAD")
+    if not legacy:
+        path = root / _REPO_PLAN
+        document = (_load_json(path) if path.is_file() else
+                    _repository_plan({change: _change_plan_at(root, head, change)[0]
+                                      for change in _finish_changes(root)}))
+        return _graph_structure_digest(document)
     parts = {
         change: _change_plan_at(root, head, change)[1]
         for change in _finish_changes(root)
@@ -853,7 +859,7 @@ def _change_artifact_files(root: Path, change: str) -> tuple[Path, dict[str, str
     return directory, files
 
 
-def _artifact_fold(files: dict[str, str]) -> str:
+def _artifact_fold(files: dict[str, str | None]) -> str:
     """Fold per-file digests into one value for dispatch identity and pre-upgrade records."""
     return hashlib.sha256(json.dumps(files, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -1051,12 +1057,24 @@ def plan_dispatch(
     plan_path: object = None,
     scope: str = "change",
     access: str = "read-only",
+    files: list[str] | None = None,
 ) -> Path:
     """Record an Oracle intent for change artifacts or the repo-level graph."""
     role = _require_role(role)
     if role != "oracle":
         raise StateError("plan: plan review must use role 'oracle'; change --role")
     checkout, change, plan, plan_sha256, current_head = _plan_context(change, plan_path, scope)
+    selected_files = None
+    if files:
+        if scope != "change" or access != "read-only":
+            raise StateError("plan: --file requires a read-only change review")
+        _, current_files = _change_artifact_files(checkout, change)
+        _, _, known, _ = _artifact_review_state(change, current_files, checkout)
+        unknown = set(files) - (set(current_files) | known)
+        if unknown:
+            raise StateError(f"plan: unknown artifact files: {', '.join(sorted(unknown))}")
+        selected_files = {name: current_files.get(name) for name in sorted(set(files))}
+        plan_sha256 = _artifact_fold(selected_files)
     if scope == "graph":
         _reviewed_change_artifacts(checkout, _load_json(plan))
     digest_field = "artifacts_sha256" if scope == "change" else "plan_sha256"
@@ -1088,6 +1106,8 @@ def plan_dispatch(
         path_field: plan_relative,
         digest_field: plan_sha256,
     }
+    if selected_files is not None:
+        intent["selected_files"] = selected_files
     if scope == "graph":
         intent["digest_kind"] = "structure"
     if report_path is not None:
@@ -1175,13 +1195,23 @@ def plan_review(
             "plan: no open plan dispatch matches this review; record the intent with plan-dispatch first"
         )
     dispatch = open_records[-1]
-    if (not _graph_digest_matches(dispatch, checkout, _load_json(plan)) if scope == "graph"
+    selected_files = dispatch.get("selected_files")
+    if isinstance(selected_files, dict):
+        _, current_files = _change_artifact_files(checkout, change)
+        if files is None:
+            files = list(selected_files)
+        if set(files) != set(selected_files):
+            raise StateError("plan: verdict files must match the dispatched files")
+        if any(current_files.get(name) != digest for name, digest in selected_files.items()):
+            raise StateError("plan: the review inputs changed since the plan dispatch; dispatch a fresh plan review")
+    if selected_files is None and (not _graph_digest_matches(dispatch, checkout, _load_json(plan)) if scope == "graph"
             else dispatch.get(digest_field) != plan_sha256):
         raise StateError(
             "plan: the review inputs changed since the plan dispatch; "
             "dispatch a fresh plan review for the current plan"
         )
-    if dispatch.get("head") != reviewed_head:
+    if dispatch.get("head") != reviewed_head and not (
+            isinstance(selected_files, dict) and _is_ancestor(checkout, dispatch["head"], reviewed_head)):
         raise StateError(
             f"plan: plan dispatch is bound to {dispatch.get('head') or 'no head'}, "
             f"review HEAD is {reviewed_head}; dispatch a fresh plan review"
@@ -4727,6 +4757,28 @@ def lane_merge(
     return path
 
 
+def _finish_plan_matches(record: dict[str, Any], repository: Path) -> bool:
+    return record.get("plan_sha256") == _finish_plan_digest(
+        repository, legacy=record.get("plan_digest_kind") != "structure")
+
+
+def _finish_inputs_current(repository: Path, item: dict[str, Any], head: str) -> bool:
+    source, inputs = item.get("head"), item.get("inputs")
+    if not source or not isinstance(inputs, list) or not inputs:
+        return False
+    return source == head or (_is_ancestor(repository, source, head) and not
+        _git_output(repository, "diff", "--name-only", source, head, "--", *inputs))
+
+
+def _finish_item_current(repository: Path, item: dict[str, Any], head: str,
+                         preparation_hash: str, inspection: bool = False) -> bool:
+    if item.get("binding_kind") == "inputs":
+        return _finish_inputs_current(repository, item, head)
+    # Old records retain their preparation and exact-HEAD inspection bindings.
+    return item.get("preparation_sha256") == preparation_hash and (
+        item.get("head") == head if inspection else _finish_inputs_current(repository, item, head))
+
+
 def _finish_preparation(record: dict[str, Any], repository: Path, head: str) -> str:
     """Check the supplied release-preparation artifact and its committed inputs."""
     preparation = record.get("preparation")
@@ -4798,8 +4850,18 @@ def finish_record(action: str, classification: str | None = None, version: str |
             required = record.setdefault("required_checks", {})
             for selected, item in record.get("evidence", {}).items():
                 required.setdefault(selected, item["inputs"])
-            record["evidence"] = {}
-            record["inspection"] = {}
+            same_contract = (_finish_plan_matches(record, repository)
+                             and classification.strip() == record.get("classification")
+                             and version == record.get("expected_version"))
+            preparation_hash = _path_sha256(Path(preparation_path))
+            for collection in ("evidence", "inspection"):
+                record[collection] = {
+                    key: item for key, item in record.get(collection, {}).items()
+                    if same_contract and _finish_item_current(
+                        repository, item, head, preparation_hash, collection == "inspection")
+                    and Path(item["artifact"]).is_file()
+                    and _path_sha256(Path(item["artifact"])) == item.get("sha256")
+                }
         declared_checks = [
             value.strip() for value in (
                 check if isinstance(check, list) else [check] if check is not None else []
@@ -4816,7 +4878,10 @@ def finish_record(action: str, classification: str | None = None, version: str |
                 selected: list(existing.get(selected, []))
                 for selected in sorted(set(declared_checks))
             }
+            record["evidence"] = {key: item for key, item in record.get("evidence", {}).items()
+                                  if key in declared_checks}
         record.update({"plan_sha256": _finish_plan_digest(repository),
+                       "plan_digest_kind": "structure",
                        "included_changes": _finish_changes(repository),
                        "classification": classification.strip(), "expected_version": version,
                        "classified_at": head,
@@ -4827,13 +4892,15 @@ def finish_record(action: str, classification: str | None = None, version: str |
             if any(not checkpoint.strip() for checkpoint in inspections):
                 raise StateError("finish: inspection checkpoint names must be non-empty")
             record["required_inspections"] = sorted(set(inspections))
+            record["inspection"] = {key: item for key, item in record.get("inspection", {}).items()
+                                    if key in inspections}
     else:
         if not record.get("classification"):
             raise StateError("finish: human release classification must precede final capture")
         preparation_hash = _finish_preparation(record, repository, head)
         evidence = record.setdefault("evidence", {})
         if action in {"capture", "inspect", "pr-check"}:
-            if record.get("plan_sha256") != _finish_plan_digest(repository):
+            if not _finish_plan_matches(record, repository):
                 raise StateError("finish: repository plan changed; restage and renew release validation")
             _finish_integrated(repository, head)
         if action == "capture":
@@ -4851,7 +4918,7 @@ def finish_record(action: str, classification: str | None = None, version: str |
             if check in required and not set(required[check]).issubset(declared):
                 raise StateError("finish: recapture must retain all selected check input dependencies")
             required[check] = sorted(declared)
-            evidence[check] = {"head": head, "preparation_sha256": preparation_hash,
+            evidence[check] = {"binding_kind": "inputs", "head": head, "preparation_sha256": preparation_hash,
                                "artifact": str(artifact_path), "sha256": _path_sha256(artifact_path),
                                "inputs": sorted(declared)}
         elif action == "inspect":
@@ -4860,11 +4927,18 @@ def finish_record(action: str, classification: str | None = None, version: str |
                 raise StateError("finish: direct human inspection requires checkpoint and human record path")
             report_path = Path(_required_document(artifact, "human inspection artifact"))
             digest = _path_sha256(report_path)
+            prior = record.get("inspection_inputs", {}).get(check, [])
+            if prior and (not inputs or not set(prior).issubset(inputs)):
+                raise StateError("finish: inspection must retain all selected input dependencies")
             verdict = _human_inspection_verdict(report_path, check)
             if verdict in {"accept", "reject"}:
                 record.setdefault("inspection", {})[check] = {
                     "head": head, "artifact": str(report_path), "sha256": digest,
                     "preparation_sha256": preparation_hash, "verdict": verdict}
+                if inputs:
+                    record.setdefault("inspection_inputs", {})[check] = sorted(set(inputs))
+                    record["inspection"][check].update({
+                        "binding_kind": "inputs", "inputs": sorted(set(inputs))})
             if verdict == "reject":
                 _write_finish_record(repository, record)
             if verdict != "accept":
@@ -4891,18 +4965,16 @@ def finish_record(action: str, classification: str | None = None, version: str |
                 raise StateError("finish: deferred UI requires declared human inspection checkpoints; restage with --inspection")
             for checkpoint in checkpoints:
                 item = record.get("inspection", {}).get(checkpoint)
-                if (not isinstance(item, dict) or item.get("head") != head
-                        or item.get("preparation_sha256") != preparation_hash):
+                if (not isinstance(item, dict) or not _finish_item_current(
+                        repository, item, head, preparation_hash, inspection=True)):
                     raise StateError(f"finish: human inspection missing/stale: {checkpoint}")
                 report_path = Path(item["artifact"])
                 if _path_sha256(report_path) != item["sha256"] or not _human_inspection_accepts(report_path, checkpoint):
                     raise StateError(f"finish: changed/rejected human inspection: {checkpoint}")
             for selected, item in evidence.items():
-                if (item.get("preparation_sha256") != preparation_hash
-                        or _path_sha256(Path(item["artifact"])) != item["sha256"]):
+                if _path_sha256(Path(item["artifact"])) != item["sha256"]:
                     raise StateError(f"finish: final evidence changed: {selected}")
-                if item["head"] != head and (not _is_ancestor(repository, item["head"], head) or
-                    _git_output(repository, "diff", "--name-only", item["head"], head, "--", *item["inputs"])):
+                if not _finish_item_current(repository, item, head, preparation_hash):
                     raise StateError(f"finish: affected final evidence: {selected}")
         else:
             raise StateError("finish: unknown action")
@@ -5326,9 +5398,10 @@ def _self_check() -> int:
         restage_args = ("--change", "finishcase", "finish-record", "restage",
                         "--artifact", str(preparation),
                         "--input", "release.txt", "--input", "generated.txt", "--check", "a")
+        preserved = _load_finish_record(finish_repo)["evidence"]["a"].copy()
         assert invoke(*restage_args)[0] == 0
-        expect_refusal("--change", "finishcase", "finish-record", "pr-check",
-                       contains="declared selected checks")
+        assert _load_finish_record(finish_repo)["evidence"]["a"] == preserved
+        assert invoke("--change", "finishcase", "finish-record", "pr-check")[0] == 0
         expect_refusal("--change", "finishcase", "finish-record", "capture", "--check", "a",
                        "--artifact", str(artifact), "--input", "input-b", contains="retain all")
         artifact.write_text("recaptured")
@@ -7459,6 +7532,122 @@ def _self_check() -> int:
         else:
             raise AssertionError("a partial PASS must not reset the correction cycle")
 
+        # Scoped dispatches survive unrelated artifacts and commits, but not changed inputs.
+        scoped_repo = make_repository("scoped-review", "scoped", {
+            "schema_version": 1, "change": "scoped",
+            "lanes": {"one": {"risk": "ordinary", "ui": False,
+                               "sensitive": False, "depends_on": []}},
+            "tasks": {"1.1": {"lane": "one", "deps": []}},
+        }, "- [ ] 1.1 first\n")
+        os.chdir(scoped_repo)
+        proposal = scoped_repo / "openspec/changes/scoped/proposal.md"
+        proposal.write_text("Initial proposal\n")
+        commit(scoped_repo, "proposal")
+        scoped_report = workflow_dir(scoped_repo) / "scoped/reviews/partial.md"
+        scoped_report.parent.mkdir(parents=True, exist_ok=True)
+        scoped_report.write_text("PASS: selected proposal\n")
+        args = ("--change", "scoped", "plan-dispatch", "--file", "proposal.md",
+                "--report", str(scoped_report))
+        assert invoke(*args)[0] == 0
+        task_file = proposal.with_name("tasks.md")
+        task_file.write_text("- [ ] 1.1 clarified task\n")
+        new_head = commit(scoped_repo, "unrelated artifact")
+        expect_refusal("--change", "scoped", "plan-review", "PASS", "--head", new_head,
+                       "--report", str(scoped_report), "--file", "tasks.md",
+                       contains="must match")
+        assert invoke("--change", "scoped", "plan-review", "PASS", "--head", new_head,
+                      "--report", str(scoped_report), "--file", "proposal.md")[0] == 0
+        assert _unreviewed_artifacts(scoped_repo, "scoped") == ["tasks.md"]
+        assert invoke(*args)[0] == 0
+        proposal.write_text("Changed selected proposal\n")
+        expect_refusal("--change", "scoped", "plan-review", "PASS", "--head", new_head,
+                       "--report", str(scoped_report), "--file", "proposal.md",
+                       contains="inputs changed")
+        assert invoke("--change", "scoped", "plan-dispatch", "--file", "absent.md")[0] == 1
+        # A narrow dispatch also rejects unrelated history, even with identical file contents.
+        commit(scoped_repo, "commit selected edit")
+        result, _, error = invoke(*args, "--key", "scoped/rebound")
+        assert result == 0, error
+        orphan = git(scoped_repo, "commit-tree", "HEAD^{tree}", "-m", "unrelated history")
+        git(scoped_repo, "reset", "--hard", orphan)
+        expect_refusal("--change", "scoped", "plan-review", "PASS", "--head", orphan,
+                       "--report", str(scoped_report), "--file", "proposal.md",
+                       contains="dispatch is bound")
+        print("planning proof: unrelated edit retained; changed selected file and unrelated history rejected")
+
+        # Use the integrated finish fixture to test selective checks and inspections.
+        os.chdir(finish_repo)
+        prep = finish_repo / ".agents/workflow/selective-preparation.md"
+        prep.write_text("Updated preparation receipt\n")
+        restage = ("finish-record", "restage", "--artifact", str(prep),
+                   "--input", "release.txt", "--check", "a", "--check", "b",
+                   "--inspection", "a", "--inspection", "b")
+        assert invoke(*restage)[0] == 0
+        for name in ("a", "b"):
+            receipt = prep.with_name(f"check-{name}.md")
+            receipt.write_text(f"Check {name}: PASS\n")
+            assert invoke("finish-record", "capture", "--check", name, "--artifact", str(receipt),
+                          "--input", f"input-{name}")[0] == 0
+            inspection = prep.with_name(f"inspect-{name}.md")
+            inspection.write_text(f"inspector: human\ncheckpoint: {name}\nverdict: accept\n")
+            assert invoke("finish-record", "inspect", "--check", name, "--artifact", str(inspection),
+                          "--input", f"input-{name}")[0] == 0
+        assert invoke("finish-record", "pr-check")[0] == 0
+        before = _load_finish_record(finish_repo)
+        # Archive-only commits preserve explicit input bindings and original provenance.
+        (finish_repo / "archive-note.md").write_text("Archive metadata\n")
+        commit(finish_repo, "archive-only change")
+        assert invoke("finish-record", "pr-check")[0] == 0
+        assert _load_finish_record(finish_repo) == before
+        # A receipt edit alone does not invalidate checks or inspections.
+        prep.write_text("Receipt wording clarified\n")
+        assert invoke(*restage)[0] == 0
+        current = _load_finish_record(finish_repo)
+        assert current["evidence"] == before["evidence"]
+        assert current["inspection"] == before["inspection"]
+        assert invoke("finish-record", "pr-check")[0] == 0
+        # One preparation input changes: only results that declare it are removed.
+        (finish_repo / "input-a").write_text("Selective dependency change\n")
+        commit(finish_repo, "change one dependency")
+        selective_restage = (*restage, "--input", "input-a")
+        assert invoke(*selective_restage)[0] == 0
+        after = _load_finish_record(finish_repo)
+        assert set(after["evidence"]) == {"b"}
+        assert set(after["inspection"]) == {"b"}
+        assert after["evidence"]["b"] == before["evidence"]["b"]
+        expect_refusal("finish-record", "pr-check", contains="declared selected checks")
+        expect_refusal("finish-record", "inspect", "--check", "a",
+                       "--artifact", str(prep.with_name("inspect-a.md")),
+                       contains="retain all")
+        assert invoke("finish-record", "capture", "--check", "a",
+                      "--artifact", str(prep.with_name("check-a.md")), "--input", "input-a")[0] == 0
+        expect_refusal("finish-record", "pr-check", contains="inspection missing/stale: a")
+        assert invoke("finish-record", "inspect", "--check", "a",
+                      "--artifact", str(prep.with_name("inspect-a.md")), "--input", "input-a")[0] == 0
+        assert invoke("finish-record", "pr-check")[0] == 0
+        # Plan wording is harmless. A structural change requires restage and clears results.
+        plan_file = finish_repo / _REPO_PLAN
+        original_plan = _load_json(plan_file)
+        worded_plan = json.loads(json.dumps(original_plan))
+        worded_plan["changes"]["finishcase"]["lanes"]["one"]["description"] = "New wording"
+        _atomic_write_json(plan_file, worded_plan)
+        assert invoke("finish-record", "pr-check")[0] == 0
+        # Old plan hashes retain their old rules until restage.
+        legacy_finish = _load_finish_record(finish_repo)
+        legacy_finish.pop("plan_digest_kind")
+        legacy_finish["plan_sha256"] = _finish_plan_digest(finish_repo, legacy=True)
+        assert _finish_plan_matches(legacy_finish, finish_repo)
+        worded_plan["changes"]["finishcase"]["lanes"]["one"]["description"] = "Another wording"
+        _atomic_write_json(plan_file, worded_plan)
+        assert not _finish_plan_matches(legacy_finish, finish_repo)
+        worded_plan["changes"]["finishcase"]["lanes"]["one"]["risk"] = "high"
+        _atomic_write_json(plan_file, worded_plan)
+        expect_refusal("finish-record", "pr-check", contains="repository plan changed")
+        assert invoke(*selective_restage)[0] == 0
+        final_record = _load_finish_record(finish_repo)
+        assert not final_record["evidence"] and not final_record["inspection"]
+        _atomic_write_json(plan_file, original_plan)
+        print("finish proof: selective restage, archive reuse, inspection dependencies, structural plan gates")
         os.chdir(root)
 
 
@@ -7511,6 +7700,8 @@ def _parser() -> argparse.ArgumentParser:
     plan_send.add_argument("--key", metavar="<key>", help="retry identity; new dispatches generate a unique key")
     plan_send.add_argument("--report", metavar="<path>", help="Oracle plan-review report path")
     plan_send.add_argument("--head", metavar="<sha>", help="feature HEAD; defaults to current")
+    plan_send.add_argument("--file", action="append", dest="files", metavar="<relative-path>",
+                           help="bind a read-only change review to selected files")
     plan_send.add_argument("--plan", type=Path, metavar="<plan.json>")
     _add_change_option(plan_send)
 
@@ -7661,7 +7852,7 @@ def _parser() -> argparse.ArgumentParser:
         help="selected check id; repeat on classify/restage to declare the selected set",
     )
     finish.add_argument("--artifact", help="gitignored receipt or manifest")
-    finish.add_argument("--input", action="append", dest="inputs", help="tracked preparation or check input path (repeat)")
+    finish.add_argument("--input", action="append", dest="inputs", help="preparation, check, or inspection input path (repeat)")
     finish.add_argument("--inspection", action="append", dest="inspections",
                         help="required human inspection checkpoint for classify/restage (repeat)")
     _add_change_option(finish)
@@ -7718,7 +7909,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "plan-dispatch":
             path = plan_dispatch(
                 args.role,  args.task, args.key, args.report,
-                args.head, selected_change, args.plan, args.scope, args.access,
+                args.head, selected_change, args.plan, args.scope, args.access, args.files,
             )
             print(f"plan-dispatch: recorded {args.role} ({path})")
             return 0

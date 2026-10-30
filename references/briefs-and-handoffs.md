@@ -120,8 +120,8 @@ These bind every role; each role file adds only its own remit.
 
 - Read the brief and approved sources directly. Never consume generated review packets, digests, or pre-written verdicts.
 - Never edit outside authorized paths. Only the Coordinator writes `coordination.json` and the review ledgers.
-- Reviewers are read-only. Review the full lane diff, expanding only for a named dependency or requirement. Exclude unrelated cleanup, hypothetical hardening, and style.
-- Bind every verdict to the current `HEAD` and evidence revision. Missing or stale evidence never passes; an ancestor `PASS` never carries forward.
+- Reviewers are read-only. For initial review, read the full lane diff. For correction or impact review, start with the correction range and expand only for a named dependency or requirement. Exclude unrelated cleanup, hypothetical hardening, and style.
+- Bind lane verdicts to the current `HEAD` and evidence revision. An unaffected lane role records a fresh verdict after a short impact check. Finish reviews may retain their original HEAD when declared tracked inputs remain unchanged under the finish rules. Changes to ignored supporting evidence alone do not invalidate reuse. Missing or stale evidence never passes.
 - The environment is cooperative. Do not report tampering or forgery unless the brief names a concrete non-adversarial trigger (crash, reuse, stale state, honest mistake) and a user-visible consequence.
 - Material finding: stable ID | P0/P1/P2 | location | trigger | violated requirement | minimal fix | observable closure check. Consolidate one root cause per report.
 - Optional handoff-compression tooling may shorten the handoff text only; it never replaces evidence, paths, or exact SHAs. Missing token/cost telemetry is `unknown`, never inferred.
@@ -250,7 +250,7 @@ Deliver: <report path; PASS or MORE WORK; exact HEAD; finding IDs; evidence revi
 The review role line is `code-reviewer`, `test-reviewer`, or `ui-reviewer`; never `oracle`. Required reviews follow the lane's risk and UI flags ([lane](lane.md#start-conditions-and-required-reviewers)).
 
 Correction/impact: include previous reviewed SHA, correction range, full lane range.
-Preserve full-lane access; investigate relevant dependencies only.
+Preserve full-lane access; investigate relevant dependencies only. Use a short impact check for an unaffected role. Name the check execution owner and valid results to reuse. Run an additional check only for a specific concern, a stale result, or a repository requirement.
 Keep lane candidate evidence separate from integrated release evidence.
 
 ## Correction continuation
@@ -266,7 +266,7 @@ Verify: <affected commands and evidence to refresh>
 Deliver: <report path; new SHA; fixed/disputed per ID with evidence>
 ```
 
-Wait for the complete first-pass batch. Resolve disagreements before dependent edits.
+Wait for the complete first-pass batch. Resolve disagreements before dependent edits. Finish the correction batch before the next review dispatch; do not create a review cycle for each finding.
 Round limits and escalation are defined in [lane](lane.md#escalation); a new dispatch key never authorizes a second writer.
 
 ## Oracle consultation
@@ -283,7 +283,7 @@ Conflict or failure: <exact evidence; attempted approaches and results>
 Deliver: <report path; decision and rationale; minimal correction; closure check>
 ```
 
-OpenSpec artifact review: identify one change; supply proposal/design/spec/tasks, not the repo graph.
+OpenSpec artifact review: identify one change; supply proposal/design/spec/tasks, not the repo graph. For a partial review, select the same `--file` paths at dispatch and verdict recording. Include related source files that the decision depends on.
 Repo graph review: supply the whole local graph and every included change's current artifact verdict and sources.
 Use separate fresh Oracle contexts and the canonical brief and report paths from [Set locations](#set-locations-no-ad-hoc-paths).
 Every `plan-review` command includes the verdict, `--head`, and `--report`; record the intent before launching the Oracle, and the verdict only after reading the actual report. Command forms are in [planning corrections](helper-commands.md#oracle-planning-corrections).

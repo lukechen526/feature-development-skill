@@ -28,7 +28,7 @@ Read and follow each linked guide before starting that phase. Complete each phas
    reviews of each change's artifacts and then the whole repository graph.
    Obtain human approval or a scoped advance waiver, commit the artifacts, and record approval or waiver with
    [the appropriate command](references/helper-commands.md#plan-approval) before implementation.
-   A reviewed artifact edit needs only that file's re-review while `plan-graph.json` does not change.
+   A reviewed artifact edit needs only that file's re-review while `plan-graph.json` does not change. Use `--file` at dispatch and verdict recording to keep unrelated edits from cancelling a partial review.
 3. **[Lanes](references/lane.md).** Opening a lane needs current plan approval or a current waiver covering that lane.
    Dispatch isolated, scoped implementation per task, obtain independent reviews of
    the current lane `HEAD`, correct findings within the documented review limits, and
@@ -38,7 +38,7 @@ Read and follow each linked guide before starting that phase. Complete each phas
    repository graph integrates. Finish is repository-level: one record at
    `.agents/workflow/finish.json` covers the PR. Obtain human release classification,
    commit release preparation, and complete required evidence, reviews, and human
-   inspections. Obtain separate, one-time consent to open the PR, recorded in
+   inspections. Keep valid results when their declared tracked inputs are unchanged; ignored supporting files alone do not invalidate reuse; restage removes only affected results unless the structural plan or release decision changes. Obtain separate, one-time consent to open the PR, recorded in
    `.agents/workflow/finish/pr-follow-up.md` and distinct from merge consent. Resolve
    post-PR findings through corrections, independent review, and renewed checks, then
    sync and archive included OpenSpec changes and hand off for the human's PR merge.

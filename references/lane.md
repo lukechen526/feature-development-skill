@@ -108,7 +108,7 @@ The UI reviewer ingests supplied screenshots, manifests, and metadata. It never 
 Oracle-authored fixes and Oracle stand-ins have no provenance flag: the Coordinator verifies reviewer independence for an authored fix and stand-in independence for a checkpoint, then records the ID in the report, brief, grant, or checklist.
 
 Only direct verdicts for the current lane HEAD satisfy review gates.
-Earlier verdicts remain superseded history. An unchanged role still performs an independent impact check after a new commit.
+Earlier verdicts remain superseded history. An unaffected role performs a short independent impact check after a new commit. Compare the previous reviewed commit with the new commit. Confirm that the correction does not affect the role's criteria or evidence. Record a fresh current-HEAD verdict. Do not repeat the full review when the impact check finds no affected input.
 Record actual verdicts and report paths with [lane-review](helper-commands.md#lane-review) before requesting corrections.
 
 ### Checks, evidence, and runtimes
@@ -118,7 +118,7 @@ The lane uses the repository's primary environment. The full release matrix runs
 This skill fixes no platform or runtime version.
 
 - The Implementer runs the assigned focused checks and records exact commands and results.
-- Reviewers independently run relevant checks at the reviewed HEAD, within their assigned remit.
+- Assign one execution owner to each expensive check. Reviewers examine its command, inputs, result, and provenance. They run another check only for a specific concern, a stale result, or a repository requirement. Reviewer judgment remains independent.
 - The brief assigns one execution owner to each build, capture, or long-running check to avoid duplicate execution.
 - A read-only Runner may execute a supplied long command or poll an external result. Its report is evidence, never a review verdict.
 - Screenshots and other evidence bind the producing commit, revision, and relevant inputs.
@@ -133,14 +133,14 @@ Do not replace reviewer judgment with deterministic summaries, generated review 
 
 A reviewer returns `PASS` only when the assigned remit has no material issue; otherwise it returns `MORE WORK`.
 Findings use shared stable IDs, severity, location, a reachable failure, and a concrete closure check.
-Review the full lane diff, then expand only for a specific dependency or requirement concern.
+For initial review, read the full lane diff. For correction review, read the correction and affected regressions. For an unaffected role, use a short impact check. Expand only for a specific dependency or requirement concern.
 Avoid unrelated cleanup, hypothetical hardening, and duplicate findings.
 
-Collect all first-pass verdicts before building one deduplicated correction batch.
+Collect all first-pass verdicts before building one deduplicated correction batch. Complete the batch before the next review dispatch. Do not start a separate review cycle for each finding.
 An uncovered criterion or unjustified task tick requires more work.
 Record the current commit, lane contract digest, evidence revision, report path, and limitations.
 A reviewer or Runner reply states the verdict or status, exact SHA, finding IDs, report path, and evidence revision; it carries no machine-readable verdict footer.
-After corrections, each required role returns a fresh current-HEAD verdict. An unaffected role may perform a short impact check.
+After corrections, each required role returns a fresh current-HEAD verdict. Use correction review for affected roles and a short impact check for unaffected roles. Review the correction and affected regressions. Keep access to the full lane diff, but read unchanged files again only for a specific concern.
 The two-round limit and unresolved findings continue under [Escalation](#escalation).
 
 ### Human checkpoints

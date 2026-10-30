@@ -16,7 +16,7 @@ Oracle-authored work requires a different independent reviewer `PASS`.
 ## Evidence and remit
 
 Use the brief's criteria, remit, exclusions, check owner, worktree, base, `HEAD`, and evidence.
-Read approved tasks, OpenSpec artifacts, repository agent instructions, and canonical docs directly; run the relevant checks. The Coordinator records the verdict.
+Read approved tasks, OpenSpec artifacts, repository agent instructions, and canonical docs directly. Examine relevant check results and run checks under the execution-owner rules below. The Coordinator records the verdict.
 
 Ordinary lanes: one code/test pass. You own implementation correctness, task completeness, and test adequacy, coverage, and test quality for the touched behavior. High-risk lanes: you own implementation and task completeness; the separate test reviewer owns test adequacy, coverage, test quality, fixtures/mocks, and mutation testing. Do not duplicate that remit or issue test-adequacy verdicts when a separate test reviewer is assigned.
 `ui: true` requires a separate UI review of supplied rendered evidence; the UI `PASS` and human gate each require current evidence. Remits must cover every criterion. Use `bash` for focused checks; no formatters or fixers. Corrections re-verify closure plus affected regressions.
@@ -31,3 +31,12 @@ Ordinary lane: direct pass. High-risk lane: deeper state, failure, concurrency, 
 Write the full report at the supplied absolute path, including `Limitations and Unverified Items`.
 Return `PASS` only with no material issue; otherwise `MORE WORK` with the contract's finding fields.
 Nothing qualifies: `No issues found.`
+
+## Correction and impact checks
+
+For an affected role, review the correction, finding closure, and affected regressions.
+For an unaffected role, compare the previous reviewed commit with the current commit.
+Check whether the change affects this role's criteria or evidence. Record a fresh lane verdict
+for the current HEAD. Read unchanged files again only for a specific concern.
+Use valid check results from the assigned execution owner. Run an additional check only
+for a specific concern, a stale result, or a repository requirement.

@@ -72,6 +72,7 @@ Record intent before the actual launch, and record the verdict only after readin
 
 Each change has its own ledger: `.agents/workflow/<change>/plan-reviews.json`.
 The helper binds the verdict to each reviewed artifact file and its digest, and to the review HEAD, never to the graph.
+For a partial review, pass the same `--file` paths to `plan-dispatch` and `plan-review`. The dispatch binds only those files. An unrelated artifact edit or descendant commit does not cancel it. A changed selected file or unrelated Git history requires a fresh dispatch. Include related requirements in the selected scope when they are needed for the decision.
 A `PASS` covers the files it reviewed. Pass `--file` for each changed file, or omit it to cover every file in the change.
 An edit drops that file's coverage and leaves the other files covered, so the next review covers the changed file and its related requirements only.
 A `MORE WORK` verdict drops coverage for the files it names; a later `PASS` restores the files it covers.
@@ -180,7 +181,7 @@ Read the completed report before recording a fresh read-only follow-up with a ne
 
 That intent closes the author record; a different Oracle performs the independent review with `plan-review`.
 The author cannot approve its own correction.
-A stale intent requires a fresh unique `--key`; never reuse a dispatch ID for different inputs.
+A scoped artifact intent becomes stale only when its selected inputs change or its Git history is unrelated. A stale intent requires a fresh unique `--key`; never reuse a dispatch ID for different inputs.
 
 After both stages pass, obtain explicit human approval of the artifacts and local graph, unless an applicable [advance waiver](lane.md#advance-human-waiver) covers plan approval.
 Commit the OpenSpec artifacts first, then record the approval with `plan-approve` or the waiver with `plan-waive` ([approval command](helper-commands.md#plan-approval)).

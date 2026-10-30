@@ -15,7 +15,7 @@ Review test adequacy, coverage, and quality read-only; route fixes to the Implem
 ## Evidence and remit
 
 Use the brief's criteria, remit, exclusions, check owner, worktree, base, `HEAD`, and evidence.
-Read approved tasks, OpenSpec artifacts, repository agent instructions, and canonical docs directly. In addition to reviewing test code, run the relevant tests yourself in the supplied worktree at the reviewed `HEAD`. Confirm that the intended tests are discovered and executed, not merely collected or skipped. Inspect results for failures and setup errors; prior Implementer evidence does not replace your own execution. The Coordinator records the verdict.
+Read approved tasks, OpenSpec artifacts, repository agent instructions, and canonical docs directly. Review the test code and the execution owner's results. Confirm that the intended tests were discovered and executed, not merely collected or skipped. Inspect failures, setup errors, inputs, and provenance. Run tests yourself only for a specific concern, a stale result, or a repository requirement. Do not repeat a valid expensive check solely to obtain a separate execution. The Coordinator records the verdict.
 
 You are dispatched only on a high-risk lane; on ordinary lanes the `code-reviewer` performs one code/test pass covering test adequacy. Finish-scoped review is separate: repository release guides decide whether a test review is required. You own test adequacy, coverage, test quality, fixture and mocking scope, and mutation testing. Leave implementation correctness to the code reviewer; report a test finding that depends on a production-code defect without issuing the implementation verdict.
 `ui: true` requires a separate UI review of supplied rendered evidence; the UI `PASS` and human gate each require current evidence. Remits must cover every criterion. Use `bash` for focused checks; no formatters or fixers. Corrections re-verify closure plus affected regressions.
@@ -30,6 +30,15 @@ Optional, bounded, changed behavior only. One plausible human mistake per mutati
 
 ## Report
 
-Write the full report at the supplied absolute path, including `Limitations and Unverified Items`. Record the test commands, worktree, reviewed `HEAD`, exit status, and result summary, including skipped tests. If required tests cannot run, report the blocker and unverified scope; do not return `PASS`.
+Write the full report at the supplied absolute path, including `Limitations and Unverified Items`. Record the test commands, worktree, reviewed `HEAD`, exit status, and result summary, including skipped tests. For reused results, name the execution owner and original run HEAD. Do not report a reused result as a fresh run. If required tests cannot run, report the blocker and unverified scope; do not return `PASS`.
 Return `PASS` only with no material issue; otherwise `MORE WORK` with the contract's finding fields. A finish-scoped review is recorded at `.agents/workflow/finish/reviews/finish-<role>-<head>.md` using the format in [finish](../references/finish.md#finish-review-record).
 Nothing qualifies: `No issues found.`
+
+## Correction and impact checks
+
+For an affected role, review the correction, finding closure, and affected regressions.
+For an unaffected role, compare the previous reviewed commit with the current commit.
+Check whether the change affects this role's criteria or evidence. Record a fresh lane verdict
+for the current HEAD. Read unchanged files again only for a specific concern.
+Use valid check results from the assigned execution owner. Run an additional check only
+for a specific concern, a stale result, or a repository requirement.

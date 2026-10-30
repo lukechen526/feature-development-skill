@@ -44,7 +44,7 @@ Do not replay completed phases, redispatch completed tasks, or repeat a successf
 ## Binding and ownership rules
 
 - Missing dispatch records require reconciliation of the worker outcome before another launch. Never assume the old worker stopped.
-- Missing or stale review records require a fresh independent current-HEAD verdict. Never infer approval from code or task ticks.
+- Missing or stale lane review records require a fresh independent current-HEAD verdict. Check finish review input bindings under [finish](finish.md#finish-review-record) before declaring an older finish review stale. Never infer approval from code or task ticks.
 - A lost review ledger, review report, or evidence set is a missing record: re-review or re-capture it. Never rebuild it from surviving code, task ticks, or summaries.
 - After the actual re-review, record a lost planning verdict with a fresh `plan-dispatch` intent and then `plan-review`, including the verdict, `--head <sha>`, and `--report <path>`; a report path alone does not restore the ledger.
 - Missing finish reviews require a fresh independent review at the exact integrated HEAD. A lost PR-opening consent record requires renewed human consent, not an inference from an opened PR.
@@ -108,12 +108,12 @@ Normal changes to release inputs follow restaging in [finish.md](finish.md), wit
 
 Existing finish records without a preparation artifact require `finish-record restage`.
 Restage reuses the stored classification; supply the new preparation receipt and its committed input
-paths and repeat release checks and required human inspections. Use `checkpoint:` in new human inspection artifacts. See [finish.md](finish.md) for the record format and [Finish records](helper-commands.md#finish-records) for restage flags.
+paths. Repeat missing or affected release checks and human inspections. Keep valid results with unchanged explicit inputs. Use `checkpoint:` in new human inspection artifacts. See [finish.md](finish.md) for the record format and [Finish records](helper-commands.md#finish-records) for restage flags.
 
 Preserve lane reports and evidence under the change's absolute reports and evidence directories; finish reports and evidence live under the `.agents/workflow/finish/` tree. Their canonical paths are in [Set locations](briefs-and-handoffs.md#set-locations-no-ad-hoc-paths).
 Recovery checks for finish also cover the repo-level finish review at
 `.agents/workflow/finish/reviews/finish-<role>-<head>.md`, with its verdict, exact integrated HEAD,
-inputs/evidence revision, limitations, and reviewer identity, and
+tracked input paths, supporting evidence paths, structural plan digest, limitations, and reviewer identity, and
 `.agents/workflow/finish/pr-follow-up.md` with its PR URL, current HEAD, finding dispositions,
 outstanding items, and PR-opening consent naming the human, timestamp, HEAD, and included changes.
 PR-opening consent is separate from release classification and lane merge consent.

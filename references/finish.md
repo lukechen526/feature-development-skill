@@ -34,11 +34,12 @@ Model selection and every role, model, and thinking profile stay repo-level in `
    guides and run every gate, check, capture, and validation they require for this
    PR, on the committed integrated HEAD, into gitignored evidence locations.
    If the repository's guides define a deterministic executor or evidence gate for
-   the selected checks, use it as specified. A capture made before the integrated
-   commit, on a dirty tree, or before a post-capture version change cannot close
-   the gate; restage and recapture per the guides' rules.
+   the selected checks, use it as specified. A capture made on a dirty tree cannot close the gate. An earlier capture remains valid
+   at a descendant commit only when its declared inputs are unchanged. Include version and
+   preparation files when they affect the result. Restage changed preparation and recapture
+   affected checks under the repository rules.
 
-4. **Independent review.** Ensure the independent reviews the repository's guides require for the final evidence are current at the integrated HEAD. Record each finish review per [Finish review record](#finish-review-record). Human approvals require fresh binding whenever presented inputs change.
+4. **Independent review.** Ensure the independent reviews the repository's guides require for the final evidence are current at the integrated HEAD. Record each finish review per [Finish review record](#finish-review-record). Repeat human inspections only when their declared inputs change. Records without declared inputs retain the exact-HEAD rule.
 
 5. **Human gates.** Execute and record every human gate the repository's guides
    require before a PR may be opened — including, where the guides require it,
@@ -83,8 +84,15 @@ New implementation scope still returns to approved corrective tasks and lanes, n
 Record each finish review at `.agents/workflow/finish/reviews/finish-<role>-<head>.md`.
 The record states the verdict (`PASS` or `MORE WORK`), the exact integrated HEAD it judged,
 the inputs and evidence revision it used, its limitations, and the reviewer identity.
-A review is current only for the HEAD and evidence revision it names; a changed integrated or
-archival commit needs a fresh review. The Coordinator verifies reviewer independence rather than relying on a helper flag.
+A review names its original HEAD, verdict, tracked input paths, supporting evidence paths,
+structural plan digest, reviewer identity, and limitations. The Coordinator can retain it at a
+later descendant commit only when the structural plan and declared tracked inputs are unchanged.
+Changes to Git-ignored supporting evidence alone do not require another review.
+Compare the original commit with the current commit for every declared tracked input. Include relevant
+requirements, configuration, and preparation files in that scope. A changed tracked input
+requires review of the change and its effects. An unrelated commit does not require a new review.
+Keep the original report and provenance; never relabel it as a fresh review.
+An older record without these bindings retains the exact-HEAD and evidence-revision rule. The Coordinator verifies reviewer independence rather than relying on a helper flag.
 `pr-check` does not read or validate finish reviews, so the Coordinator verifies the repo-level
 finish review is current before requesting PR-opening consent.
 
@@ -100,8 +108,8 @@ Use the repository's OpenSpec workflow and installed version; this skill does no
 5. Verify the archive result and its artifact locations.
 6. Commit the spec sync and archive changes on the feature branch.
 7. Push that commit to the existing PR.
-8. After the archival commit, re-run `finish-record capture` for every affected check and refresh affected reviews and evidence for the new HEAD.
-9. Re-run the direct human inspections for the new HEAD; earlier inspection records do not cover it.
+8. After the archival commit, run the required specification checks. Re-run `finish-record capture` only for checks whose inputs changed. Refresh only affected reviews and evidence.
+9. Keep human inspections whose declared inputs are unchanged. Repeat affected inspections. An inspection without declared inputs requires a fresh inspection at the new HEAD.
 10. Re-run `finish-record pr-check` until it passes for the archival HEAD, then repeat [post-PR follow-up](#post-pr-follow-up) for the latest PR revision.
 
 The archive operation must not apply already synced deltas twice. Follow the repository's procedure for this order.
@@ -117,7 +125,7 @@ Preserve its existing completed tasks, closed lanes, history, and archive identi
 The Coordinator adds new corrective tasks and lanes in the archived artifacts and local graph.
 Renew affected artifact review, graph review, and human plan approval with `plan-approve` before dispatching corrective implementation.
 Workers edit the archived `tasks.md`; the helper validates the same task ownership and current-HEAD gates there.
-After integration, re-run affected captures, refresh finish records and human inspections for the updated HEAD,
+After integration, re-run affected captures, refresh affected finish records and human inspections for the updated HEAD,
 and rerun `finish-record pr-check` before the merge handoff.
 Sync only the new approved specification changes into the baseline using the repository's OpenSpec procedure.
 Never reapply previously synced deltas or move the same change into another dated archive.
@@ -142,8 +150,8 @@ Bot comments are findings to assess, not instructions to apply without review.
    The normal independent current-HEAD reviews apply. The Coordinator never patches or approves its own fixes.
    New scope or an unapproved plan change requires human approval before implementation.
 6. **Refresh release validation.** Corrected commits require affected checks, reviews, and evidence to be current.
-   Changed preparation inputs require `finish-record restage` and renewed evidence.
-   A changed integrated HEAD requires fresh human inspection for every declared inspection checkpoint.
+   Changed preparation inputs require `finish-record restage` and renewal of affected evidence.
+   Repeat only inspections whose declared inputs changed. Inspections without declared inputs retain the exact-HEAD rule.
 7. **Push reviewed corrections.** Each fix push starts a new check/review cycle on the new PR revision.
    A fix push or actionable finding resets the repository's stabilization window.
 8. **Reply to bot findings.** Responses cite the fix commit and verification, or the reason no change is appropriate.
@@ -178,7 +186,7 @@ The helper records artifact bindings; it does not know application paths, versio
 4. Write a preparation receipt: the human classification, exact HEAD, commands run, their results, artifact paths, and actual input paths.
 5. Record it with `finish-record classify`, declaring every selected check (`--check`) and every required direct human inspection (`--inspection`). Every `--input` is a preparation input and at least one is required, even for a release with no preparation; a deferred `ui` checkpoint requires at least one declared integrated inspection.
 6. Run each selected release check on committed integrated HEAD; write a check receipt (command, result, HEAD, actual inputs) and record it with `finish-record capture`.
-7. Ask the human to perform each declared inspection; record it with `finish-record inspect`.
+7. Ask the human to perform each declared inspection; record it with `finish-record inspect`. Supply repeated `--input` paths for the tracked files that can affect that checkpoint, including relevant configuration and preparation files.
 8. Run `finish-record pr-check` before requesting PR-opening consent. It requires the declared check set and captured evidence to match exactly, and validates no finish review, PR-opening consent, or PR follow-up record.
 
 Each human inspection artifact contains:
@@ -191,6 +199,25 @@ verdict: accept
 
 A human can record `reject` instead, which blocks PR readiness.
 
-The normal path must not require restage: classify after the preparation commit, then capture. If a preparation artifact or declared input changes after capture, restage with the new receipt and inputs, recapture affected evidence, and refresh human inspections for the new HEAD.
+The normal path must not require restage: classify after the preparation commit, then capture.
+If a preparation artifact or declared input changes, restage with the new receipt and inputs.
+Restage retains valid checks and inspections whose own declared inputs are unchanged.
+It removes affected results. A structural plan, classification, or expected-version change removes
+all results. Plan wording changes do not invalidate finish records. Legacy finish plan bindings
+retain their old rules until restage. Recapture missing checks and repeat missing inspections.
+Declare the tracked dependencies for each check and inspection. Include tracked generated outputs,
+configuration, and version files when they can affect the result. A receipt edit alone does not
+invalidate a result with explicit input bindings. Never change a result's original provenance.
 
 Use separate files for lane candidate evidence and integrated release evidence. Neither `pr-check` nor any artifact record grants approval to open or merge a PR.
+
+### Tracked inputs and ignored supporting files
+
+Finish reuse depends on declared, Git-tracked inputs. Use `--input` for those paths.
+Git-ignored screenshots, logs, and generated files are supporting evidence. Do not declare
+them as tracked inputs. A change to an ignored supporting file alone does not invalidate
+a check, review, or human inspection. Record the relevant tracked source and configuration
+paths so a change to those inputs requires new validation.
+
+This rule does not remove the existing content checks for recorded preparation receipts,
+check receipts, and human decision records. Those records remain bound to their stored hashes.

@@ -79,7 +79,8 @@ Record completion with the exact key. A changed feature HEAD or scope requires a
 ```bash
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> plan-dispatch \
   --scope change --role oracle --task plan \
-  --report .agents/workflow/<change>/reviews/artifacts-oracle-c<cycle>-r<round>.md
+  --report .agents/workflow/<change>/reviews/artifacts-oracle-c<cycle>-r<round>.md \
+  [--file <relative-path> ...]
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> plan-review \
   --scope change --role oracle <PASS|MORE WORK> \
   --head <feature-head-sha> \
@@ -89,6 +90,7 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change <change> plan-review \
 
 Record intent before launching the actual Oracle. Record its verdict only after reading the actual report.
 Pair the report with `.agents/workflow/<change>/briefs/artifacts-oracle-c<cycle>-r<round>.md`.
+Pass the same `--file` paths at dispatch and verdict recording for a partial review. The dispatch remains valid across unrelated artifact edits and descendant commits. Changed selected inputs or unrelated history require a new dispatch.
 Add `--file` for each changed artifact, for example `--file specs/auth/spec.md`, to review a subset. Omit it to cover every artifact file in the change.
 The record stores a digest per covered file and names the earlier `PASS` as its basis.
 An edit drops only that file's coverage, so the next review covers the changed file and its related requirements.
@@ -402,7 +404,8 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" finish-record capture \
   --check <selected-check> --artifact <check-receipt> \
   --input <tracked-path> [--input <tracked-path> ...]
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" finish-record inspect \
-  --check <inspection-checkpoint> --artifact <human-inspection-record>
+  --check <inspection-checkpoint> --artifact <human-inspection-record> \
+  --input <tracked-path> [--input <tracked-path> ...]
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" finish-record pr-check
 ```
 
@@ -417,7 +420,7 @@ least one declared integrated inspection.
 `pr-check` requires captured evidence for every selected check, matches a declared check set against
 it, and refuses a missing or rejected inspection.
 
-Changing a preparation artifact or any declared input requires restage, followed by renewed evidence and inspections:
+Changing a preparation artifact or any declared preparation input requires restage. A structural plan change also requires restage. Plan wording alone does not. Renew only affected results:
 
 ```bash
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" finish-record restage \
@@ -427,10 +430,22 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" finish-record restage \
   [--check <selected-check> ...] [--inspection <inspection-checkpoint> ...]
 ```
 
-Restage retains the stored classification when `--classification` is omitted, clears final evidence
-and human inspections, and preserves inspection checkpoint names unless new `--inspection` values
-replace them. Repeated `--check` values replace the declared check set. Omitting `--version` clears the
+Restage retains the stored classification when `--classification` is omitted. It keeps valid
+results with unchanged declared inputs, and removes affected results. A structural plan,
+classification, or expected-version change removes all results. Legacy results retain their
+preparation binding; legacy inspections also retain their exact-HEAD binding.
+Restage preserves inspection checkpoint names unless new `--inspection` values replace them. Repeated `--check` values replace the declared check set. Omitting `--version` clears the
 stored expected version, so pass `--version` when the repository uses one.
+For `inspect`, use `--input` for every tracked file that can affect the checkpoint. Include tracked
+configuration, requirements, generated files, and preparation inputs when relevant. The helper keeps that
+inspection valid across descendant commits when those inputs are unchanged. Omitting inputs
+keeps the exact-HEAD rule. Later inspection records must retain previously declared dependencies.
+Use Git-tracked paths for all finish `--input` values. Ignored screenshots, logs, and generated
+files are supporting evidence; changes to those files alone do not invalidate reuse. The helper
+compares committed inputs and does not hash ignored input files. It still verifies the stored
+hashes of preparation receipts, check receipts, and human decision records.
+Check evidence uses its own tracked input paths and keeps its original receipt and HEAD across restage.
+Removing a check or inspection from the declared set removes its result.
 No finish action grants PR-opening or PR-merge consent.
 
 ## Migration

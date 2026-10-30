@@ -38,3 +38,13 @@ Write the full report at the supplied absolute path under the coordinator store:
 For finish scope, record the review at `.agents/workflow/finish/reviews/finish-<role>-<head>.md` using the [finish review format](../references/finish.md#finish-review-record).
 Include evidence context, required-state coverage, findings, artifact paths, `Limitations and Unverified Items`, and Overall Result: `PASS` or `MORE WORK`.
 State that no application was launched and only supplied evidence was reviewed. Human approval remains separate; later affected changes require fresh review.
+
+## Correction and impact checks
+
+For an affected role, review the correction, finding closure, and affected regressions.
+For an unaffected role, compare the previous reviewed commit with the current commit.
+Check whether the change affects this role's criteria or evidence. Record a fresh lane verdict
+for the current HEAD. Read unchanged files again only for a specific concern.
+Use valid check results from the assigned execution owner. Run an additional check only
+for a specific concern, a stale result, or a repository requirement.
+The UI reviewer remains evidence-ingest only and must not build, launch, or capture.

@@ -445,13 +445,13 @@ After the human records acceptance:
 
 ```bash
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" finish-record inspect \
-  --check output --artifact "$FINISH_STORE/evidence/r1/human-output.md"
+  --check output --artifact "$FINISH_STORE/evidence/r1/human-output.md" --input message.py
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" finish-record pr-check
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" --change "$CHANGE" status --json
 ```
 
 `pr-check` validates only the declared checks, captured evidence, and declared inspections; it does not validate plan approval, the finish review, PR-opening consent, or `pr-follow-up.md`. The Coordinator verifies each of those records before relying on it.
-The finish review must be current at the same HEAD and evidence revision before PR-opening consent is requested.
+The finish review must be valid for the current inputs and evidence before PR-opening consent is requested.
 
 ### PR opening and follow-up
 
@@ -488,39 +488,18 @@ Opening the PR starts post-PR follow-up; it does not complete the workflow. Reco
 ### Archive and refresh
 
 Sync and archive the completed OpenSpec change before the human merge, using [the finish sequence](finish.md#openspec-sync-and-archive).
-After the archival commit, refresh every affected record for the new `HEAD`:
+After the archival commit, run the required OpenSpec checks. Compare each result's declared
+inputs with the new commit. In this fixture, `message.py` did not change. Keep the greeting
+check and human output inspection with their original HEAD and receipt.
 
-```bash
-HEAD="$(git rev-parse HEAD)"
-mkdir -p "$FINISH_STORE/evidence/r2"
-```
+Keep the finish review if it records complete tracked input paths and supporting evidence paths,
+and those tracked inputs and the structural plan remain unchanged. Changes to ignored supporting
+evidence alone do not require another review. An older review without those
+bindings requires a fresh review. Use the finish dispatch and review procedure above.
 
-Re-run the affected check with the same command and write the receipt under `$FINISH_STORE/evidence/r2/`.
-Record it again:
-
-```bash
-python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" finish-record capture \
-  --check greeting --artifact "$FINISH_STORE/evidence/r2/greeting.txt" --input message.py
-```
-
-This is not `restage`: `message.py` did not change.
-If it did, restage first, then recapture.
-
-Refresh the finish review at the new HEAD with the same brief fields, `Integrated HEAD: $HEAD`, and the `r2` evidence: dispatch with a new key, launch a fresh reviewer, set `FINISH_REVIEW_RUN_ID` from that launch, record the new `$FINISH_STORE/reviews/finish-code-reviewer-$HEAD.md` after an actual `PASS`, and close it with the same `dispatch-done` form shown above:
-
-```bash
-FINISH_REVIEW_KEY="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
-python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" dispatch --scope finish code-reviewer \
-  --task release-review --key "$FINISH_REVIEW_KEY"
-```
-
-Ask the human to repeat the declared inspection at the archival HEAD and write a fresh record under `$FINISH_STORE/evidence/r2/`.
-Record it:
-
-```bash
-python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" finish-record inspect \
-  --check output --artifact "$FINISH_STORE/evidence/r2/human-output.md"
-```
+If a check or inspection input changes, repeat that check or inspection and record its result.
+Restage first only if preparation inputs or the structural plan changed.
+Keep unchanged results. See [finish review records](finish.md#finish-review-record).
 
 Re-run `finish-record pr-check`:
 
@@ -566,5 +545,5 @@ These paths describe the state after finish and PR opening, before sync and arch
 The repo-level objects (`preflight.json`, `capability-map.md`, `model-selection.json`, `plan-graph.json`, `plan-graph-review.json`, `plan-approval.json`, `coordination.json`, `finish.json`) and `finish/pr-follow-up.md` follow [Set locations](briefs-and-handoffs.md#set-locations-no-ad-hoc-paths).
 
 `pr-check` must pass without `restage` on this normal path.
-Archive refresh re-captures evidence but does not change preparation inputs.
+Archive refresh repeats only affected validation. It keeps results with unchanged inputs.
 For interrupted work or changed inputs, follow [recovery](recovery.md).
