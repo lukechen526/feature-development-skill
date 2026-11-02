@@ -8,7 +8,8 @@ Independent reviewers inspect source artifacts and diffs directly. Implementatio
 
 ## Ownership
 
-- The Coordinator owns planning and workflow records, dispatch, integration, and human decisions. It never patches implementation.
+- The Coordinator owns the lane graph and workflow records, dispatch, integration, and human decisions. It never authors OpenSpec change content or patches implementation.
+- An authoring Oracle owns the assigned OpenSpec change paths, including review corrections and human-requested amendments. A different Oracle reviews the initial artifacts and lane plan read-only, returning PASS or MORE WORK.
 - Implementers write only in the assigned worktree and designated report/evidence paths.
 - Reviewers stay read-only and cannot approve their own work. A Runner reports observations, never verdicts.
 - Record actual dispatch outcomes and human decisions. Unknown results remain unknown.

@@ -25,6 +25,8 @@ Retired commands have no aliases. State refresh is derived on reads and gate che
 
 ## Initial planning
 
+First dispatch an Oracle through the harness with bounded write authority over the OpenSpec change paths. After it finishes, the Coordinator builds and validates the lane graph. The plan-scoped helper dispatch below records the separate, independent read-only review, not the authoring assignment.
+
 ```bash
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-validate
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" dispatch --scope plan oracle --task plan --key initial-r1 --report /absolute/review.md
@@ -34,7 +36,7 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" review --scope plan oracle PASS
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-approve --approver human
 ```
 
-A planning verdict closes its dispatch. For an interrupted worker or changed review inputs, use `dispatch-done --scope plan oracle --key <key> --result failed` after establishing ownership, then dispatch a replacement. Each `MORE WORK` correction needs a new independent review until the first PASS. No fixed round limit applies.
+A planning verdict closes its dispatch. For an interrupted worker or changed review inputs, use `dispatch-done --scope plan oracle --key <key> --result failed` after establishing ownership, then dispatch a replacement. Route artifact corrections to the authoring Oracle, not the Coordinator. Each `MORE WORK` correction needs a new independent review until the first PASS. No fixed round limit applies.
 
 `plan-approve --waiver <human-decision-and-reason> --lane <change/lane>` (repeat lanes) or `--all-lanes` records a distinct advance waiver. Verify the human's recorded waiver before using it. Later human-requested plan changes use amendment records, not another approval or Oracle dispatch.
 

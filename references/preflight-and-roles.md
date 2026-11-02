@@ -10,12 +10,12 @@ Ask the human for model and thinking choices for each role once per repository, 
 
 | Role | Responsibility |
 |---|---|
-| Coordinator | Current session: planning, ownership, records, integration, and human gates |
+| Coordinator | Current session: planning coordination and lane graph, ownership, records, integration, and human gates; no OpenSpec authorship |
 | [Implementer](../assets/implementer.md) | Scoped implementation, tests, task ticks, and commits |
 | [Code reviewer](../assets/code-reviewer.md) | Correctness and task completeness; test adequacy for ordinary lanes |
 | [Test reviewer](../assets/test-reviewer.md) | Separate test adequacy review for high-risk lanes |
 | [UI reviewer](../assets/ui-reviewer.md) | Review supplied rendered UI evidence |
-| [Oracle](../assets/oracle.md) | Initial combined planning review; optional technical consultation |
+| [Oracle](../assets/oracle.md) | OpenSpec authorship with bounded write authority, or independent read-only initial planning review in a different session; optional technical consultation |
 | [Runner](../assets/runner.md) | Execute assigned checks or monitor results; no review verdicts |
 
 Record a short capability summary in `preflight.json` and actual role selections in `model-selection.json`, using the [current schemas](workflow-records.md). No exhaustive capability matrix, prompt hash, provisioning sequence, or per-dispatch profile is required.

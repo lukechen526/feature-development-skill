@@ -9,8 +9,8 @@ Use for features needing several coordinated tasks and independent review. For a
 
 ## Workflow
 
-1. **Draft the plan.** Clarify the human's intent, reuse or create OpenSpec changes, and define artifacts, acceptance criteria, tasks, and lanes. See [planning](references/plan.md).
-2. **Review and approve the initial plan.** Have an independent Oracle review the artifacts and lane plan together. Resolve findings until the first `PASS`, then obtain human approval and commit the artifacts. Later human-requested plan changes need neither Oracle re-review nor another plan approval; record the initiating request and update the artifacts.
+1. **Draft the plan.** Clarify the human's intent, then dispatch an Oracle to author or update the OpenSpec changes, acceptance criteria, and tasks. The Coordinator defines lanes, not OpenSpec content. See [planning](references/plan.md).
+2. **Review and approve the initial plan.** Have a different, independent, read-only Oracle review the artifacts and lane plan together and return `PASS` or `MORE WORK`. Route artifact corrections to the authoring Oracle until the first `PASS`, then obtain human approval and commit the artifacts. Later human-requested plan changes need neither Oracle re-review nor another plan approval; record the initiating request and have the authoring Oracle update the artifacts.
 3. **Open lanes, implement, review, integrate.** Use isolated worktrees, one writer per lane, and independent reviewers. Batch related tasks when useful. Correct findings and integrate after applicable technical and human gates pass. See [lanes](references/lane.md).
 4. **Prepare and open the PR.** Complete release preparation, repository checks, required independent reviews and human inspections. Obtain the human's release classification and separate consent to open the PR. See [finish](references/finish.md).
 5. **Address PR comments.** Monitor checks and reviews, resolve actionable findings through scoped implementation and independent review, then sync and archive completed OpenSpec changes. Continue until ready or explicitly hand monitoring back to the human.
@@ -18,7 +18,7 @@ Use for features needing several coordinated tasks and independent review. For a
 
 ## Boundaries
 
-- The Coordinator plans, dispatches, records, and integrates; implementation authors work in separate worktrees. Reviewers are independent of the work they approve and stay read-only. Runner output is evidence, not a verdict.
+- The Coordinator coordinates planning, dispatches, records, and integrates; it does not author OpenSpec changes. A scoped Oracle authors them; implementation authors work in separate worktrees. Reviewers are independent of the work they approve and stay read-only. Runner output is evidence, not a verdict.
 - Keep existing human gates: model choices, initial plan approval, UI/sensitive lane checkpoints, release classification, repository-required inspections, PR-opening consent, and final PR merge. Honor explicit [waivers, deferrals, and overrides](references/lane.md#human-decisions); do not infer them.
 - Committed task ticks establish completion. Current review/evidence bindings establish technical readiness. Neither grants human consent.
 - Follow repository instructions for tests, releases, environments, and evidence. Renew affected reviews and evidence when inputs change; do not repeat unaffected checks without reason.

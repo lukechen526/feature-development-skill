@@ -4,16 +4,16 @@ An agent skill for taking an OpenSpec feature from an idea to a reviewed pull re
 
 The workflow has six stages:
 
-1. Draft specifications, acceptance criteria, tasks, and an implementation lane plan.
-2. Obtain a combined Oracle review until the initial plan passes, then human approval.
+1. Have an Oracle author OpenSpec specifications, acceptance criteria, and tasks; the Coordinator builds the lane plan.
+2. Obtain a combined review from a different, independent, read-only Oracle (`PASS` or `MORE WORK`) until the initial plan passes, then human approval.
 3. Implement in isolated lanes, obtain independent reviews, and integrate.
 4. Prepare the release and obtain separate consent to open the PR.
 5. Address PR checks and comments, then sync and archive completed specifications.
 6. Hand the ready PR to the human for the merge decision and merge.
 
-After the initial Oracle `PASS` and human plan approval, human-requested planning changes need neither review again nor another plan approval. The Coordinator records the request and updates the planning artifacts. Affected implementation reviews, evidence, and lane checkpoints still apply.
+After the initial Oracle `PASS` and human plan approval, human-requested planning changes need neither review again nor another plan approval. The Coordinator records the request and has the authoring Oracle update the OpenSpec artifacts. Affected implementation reviews, evidence, and lane checkpoints still apply.
 
-The Coordinator manages the workflow; separate implementation agents write code and independent reviewers assess it. Related tasks may share a session. Review correction loops follow progress and risk rather than a fixed round count.
+The Coordinator manages the workflow but does not author OpenSpec changes; separate implementation agents write code and independent reviewers assess it. Related tasks may share a session. Review correction loops follow progress and risk rather than a fixed round count.
 
 ## Use
 

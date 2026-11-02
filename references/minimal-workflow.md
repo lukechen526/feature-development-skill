@@ -4,7 +4,7 @@ This example illustrates the order of operations. Replace IDs, paths, checks, an
 
 ## Draft and approve
 
-Use the human's request to create `openspec/changes/greeting/` with proposal, design, delta specs, and:
+Dispatch an Oracle with bounded write authority to use the human's request to create `openspec/changes/greeting/` with proposal, design, delta specs, and:
 
 ```markdown
 ## 1. Greeting
@@ -20,13 +20,13 @@ python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" plan-validate
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" dispatch --scope plan oracle --task plan --key plan-r1
 ```
 
-Launch the independent Oracle to review both artifacts and graph. Read its report and record the actual verdict:
+After the author finishes, launch a different, independent, read-only Oracle to review both artifacts and graph. Read its report and record the actual verdict:
 
 ```bash
 python3 "$FEATDEV_SKILL_ROOT/scripts/featdev.py" review --scope plan oracle PASS --commit <feature-sha> --report /absolute/oracle.md
 ```
 
-If the verdict is MORE WORK, correct the findings and repeat with another dispatch/report until the first PASS. Obtain human plan approval, commit artifacts, then record approval:
+If the verdict is MORE WORK, have the authoring Oracle correct artifact findings and the Coordinator correct lane graph findings and repeat with another dispatch/report until the first PASS. Obtain human plan approval, commit artifacts, then record approval:
 
 ```bash
 git add openspec/changes/greeting
@@ -63,7 +63,7 @@ UI/sensitive lanes also require applicable human checkpoints; high-risk lanes re
 
 ## Human-requested plan change
 
-When the human changes the requested behavior, update the artifacts and lane graph, commit affected artifacts, and record the initiating request and current planning inputs in `coordination.json.plan_amendments`. No Oracle re-review or second plan approval is required. Reconcile active worktrees and renew affected implementation reviews/evidence/checkpoints.
+When the human changes the requested behavior, have the authoring Oracle update the artifacts and the Coordinator update the lane graph, commit affected artifacts, and record the initiating request and current planning inputs in `coordination.json.plan_amendments`. No Oracle re-review or second plan approval is required. Reconcile active worktrees and renew affected implementation reviews/evidence/checkpoints.
 
 ## Prepare, open, follow up, hand off
 
